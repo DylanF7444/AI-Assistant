@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.benchmark-data/
+.venv/
+build/
+*.log
+
+# Keep the verified release executable intentionally; ignore other build output.
+dist/*
+
+
+
+# User-local databases, models, and diagnostics.
+*.db
+*.db-shm
+*.db-wal
+models/
+diagnostics*.zip
+

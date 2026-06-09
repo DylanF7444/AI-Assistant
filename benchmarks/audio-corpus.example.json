@@ -1,0 +1,12 @@
+[
+  {
+    "audio": "clean-timer.wav",
+    "reference": "set a timer for five minutes",
+    "condition": "clean"
+  },
+  {
+    "audio": "noise-file-search.wav",
+    "reference": "find quarterly report in documents",
+    "condition": "controlled-noise"
+  }
+]

@@ -1,0 +1,48 @@
+{
+  "generated_at": 1780654869.008661,
+  "results": {
+    "llm": {
+      "model": "codellama:latest",
+      "tool_call_accuracy": 0.6666666666666666,
+      "median_latency_seconds": 1.9769008000002941,
+      "samples": [
+        {
+          "request": "Set a timer for five minutes",
+          "seconds": 1.9769008000002941,
+          "tokens_per_second": 19.722379215219092,
+          "correct": true,
+          "output": {
+            "skill_id": "core.timer",
+            "arguments": {
+              "seconds": 300
+            }
+          }
+        },
+        {
+          "request": "Calculate 17 times 19",
+          "seconds": 2.5276135000021895,
+          "tokens_per_second": 18.563162433081125,
+          "correct": true,
+          "output": {
+            "skill_id": "core.calculator",
+            "arguments": {
+              "expression": "17*19"
+            }
+          }
+        },
+        {
+          "request": "What time is it?",
+          "seconds": 1.822504800002207,
+          "tokens_per_second": 19.64440329771384,
+          "correct": false,
+          "output": {
+            "skill_id": "core.datetime",
+            "arguments": {
+              "query": "What time is it?"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
