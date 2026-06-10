@@ -3,7 +3,8 @@ from pathlib import Path
 from sqlalchemy import inspect
 
 from assistant.storage.database import AuditStore, Database, SettingsStore
-from assistant.storage.database import MacroRow, SchemaVersionRow
+from assistant.storage.database import KnowledgeBaseRow, MacroRow, SchemaVersionRow
+from assistant.storage.knowledge import KnowledgeBaseStore
 
 
 def test_database_migration_integrity_and_backup(tmp_path: Path):
@@ -41,7 +42,7 @@ def test_upgrade_from_schema_version_one(tmp_path: Path):
     MacroRow.__table__.drop(database.engine)
     database.migrate()
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 3
+        assert session.get(SchemaVersionRow, 1).version == 4
     assert inspect(database.engine).has_table("macros")
 
 
@@ -58,3 +59,45 @@ def test_corrupt_database_can_restore_verified_backup(tmp_path: Path):
     assert not broken.integrity_check()
     assert broken.recover(backup)
     assert SettingsStore(broken).get("value") == "preserved"
+
+
+def test_knowledge_base_crud_import_and_retrieval(tmp_path: Path):
+    database = Database(f"sqlite:///{tmp_path / 'data.db'}")
+    database.migrate()
+    store = KnowledgeBaseStore(database)
+    saved = store.save(
+        "Personal preferences",
+        "Dylan prefers concise answers and uses the America/Chicago time zone.",
+        description="Response and scheduling preferences",
+    )
+    source = tmp_path / "project.md"
+    source.write_text(
+        "# Atlas\n\nThe Atlas project launch date is October 14.",
+        encoding="utf-8",
+    )
+    imported = store.import_file(source)
+
+    assert store.get(saved.id).enabled
+    assert imported.source_path == str(source.resolve())
+    excerpts = store.search("When does the Atlas project launch?")
+    assert excerpts[0].name == "project"
+    assert "October 14" in excerpts[0].text
+
+    store.set_enabled(imported.id, False)
+    assert store.search("When does the Atlas project launch?") == ()
+    store.delete(saved.id)
+    assert [item.id for item in store.list()] == [imported.id]
+
+
+def test_upgrade_from_schema_version_three_adds_knowledge_bases(tmp_path: Path):
+    database = Database(f"sqlite:///{tmp_path / 'old.db'}")
+    database.migrate()
+    with database.session() as session:
+        session.get(SchemaVersionRow, 1).version = 3
+    KnowledgeBaseRow.__table__.drop(database.engine)
+
+    database.migrate()
+
+    assert inspect(database.engine).has_table("knowledge_bases")
+    with database.session() as session:
+        assert session.get(SchemaVersionRow, 1).version == 4

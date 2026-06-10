@@ -47,6 +47,17 @@ class ResultStatus(StrEnum):
     TIMED_OUT = "timed_out"
 
 
+class ResponseType(StrEnum):
+    ANSWER = "answer"
+    SKILL = "skill"
+    CLARIFICATION = "clarification"
+    PERMISSION = "permission"
+    CONFIRMATION = "confirmation"
+    CONTROL = "control"
+    STATUS = "status"
+    ERROR = "error"
+
+
 class AudioSession(StrictModel):
     session_id: UUID = Field(default_factory=uuid4)
     source: str
@@ -152,6 +163,7 @@ class ConfirmationRequest(StrictModel):
 class Response(StrictModel):
     display_text: str
     speech_text: str | None = None
+    response_type: ResponseType = ResponseType.STATUS
     severity: Literal["info", "success", "warning", "error"] = "info"
     speak: bool = False
     sensitive: bool = False
@@ -178,4 +190,3 @@ class ExecutionPlan(StrictModel):
     plan_id: UUID = Field(default_factory=uuid4)
     steps: tuple[PlanStep, ...]
     timeout_seconds: float = Field(default=120, gt=0)
-

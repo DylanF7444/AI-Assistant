@@ -171,6 +171,21 @@ async def test_permission_confirmation_and_idempotency(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_missing_permission_publishes_approval_event(tmp_path):
+    skill = CountingSkill(risk=RiskLevel.LOW)
+    engine, _, _ = engine_for(tmp_path, skill)
+    call = make_call("test.count", {"target": "item"})
+
+    outcome = await engine.prepare(call)
+
+    event = engine.events.history(call.correlation_id)[-1]
+    assert outcome.permission_requests
+    assert event.state.value == "awaiting_approval"
+    assert event.data["permissions"][0]["skill_id"] == "test.count"
+    assert event.data["permissions"][0]["capability"] == "test.run"
+
+
+@pytest.mark.asyncio
 async def test_one_time_permission_survives_prepare_until_execution(tmp_path):
     skill = CountingSkill(risk=RiskLevel.LOW)
     engine, permissions, _ = engine_for(tmp_path, skill)

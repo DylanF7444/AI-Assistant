@@ -114,23 +114,29 @@ class DeterministicRouter:
                     source="rule",
                 )
             )
-        if match := re.fullmatch(r"(?:calculate|what is) (.+)", routed):
+        if match := re.fullmatch(r"(calculate|what is) (.+)", routed):
             expression = (
-                match.group(1)
+                match.group(2)
                 .replace(" plus ", " + ")
                 .replace(" minus ", " - ")
                 .replace(" times ", " * ")
                 .replace(" multiplied by ", " * ")
                 .replace(" divided by ", " / ")
             )
-            return RouteResult(
-                Intent(
-                    name="core.calculator",
-                    arguments={"expression": expression},
-                    confidence=0.96,
-                    source="rule",
-                )
+            explicit_calculation = match.group(1) == "calculate"
+            numeric_expression = bool(
+                re.fullmatch(r"[\d\s.+\-*/()%]+", expression)
+                and re.search(r"\d", expression)
             )
+            if explicit_calculation or numeric_expression:
+                return RouteResult(
+                    Intent(
+                        name="core.calculator",
+                        arguments={"expression": expression},
+                        confidence=0.96,
+                        source="rule",
+                    )
+                )
         if match := re.fullmatch(
             r"convert (.+?) (kilometers?|miles?|meters?|feet|kilograms?|pounds?|liters?|gallons?|celsius|fahrenheit) to (kilometers?|miles?|meters?|feet|kilograms?|pounds?|liters?|gallons?|celsius|fahrenheit)",
             routed,

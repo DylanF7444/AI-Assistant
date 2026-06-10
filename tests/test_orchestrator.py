@@ -1,10 +1,12 @@
 import pytest
+from jsonschema import ValidationError
 from uuid import uuid4
 
 from assistant.bootstrap import build_container
 from assistant.contracts import (
     PipelineEvent,
     PipelineState,
+    ResponseType,
     ResultStatus,
     Transcript,
     WordTimestamp,
@@ -54,11 +56,20 @@ class AnsweringPlanner:
         pass
 
 
+class InvalidPlanner:
+    async def plan(self, text, recent_context=()):
+        raise ValidationError("invalid structured response")
+
+    async def cancel(self):
+        pass
+
+
 @pytest.mark.asyncio
 async def test_text_to_command_to_response(settings):
     container = build_container(settings)
     response, outcome = await container.orchestrator.handle_text("calculate 4 times 5")
     assert outcome.result.status == ResultStatus.COMPLETED
+    assert response.response_type == ResponseType.SKILL
     assert "20" in response.display_text
 
 
@@ -70,6 +81,7 @@ async def test_sensitive_action_is_denied_without_permission(settings):
     assert outcome.permission_requests
     assert "media.control" in response.display_text
     assert "Grant Permission" in response.display_text
+    assert response.response_type == ResponseType.PERMISSION
     assert response.severity == "warning"
 
 
@@ -126,6 +138,7 @@ async def test_low_confidence_sensitive_target_requires_clarification(settings):
     )
     response, outcome = await container.orchestrator.handle_transcript(transcript)
     assert "not confident" in response.display_text
+    assert response.response_type == ResponseType.CLARIFICATION
     assert outcome.result is None
 
 
@@ -142,11 +155,26 @@ async def test_unavailable_planner_keeps_deterministic_commands_available(settin
 
 
 @pytest.mark.asyncio
+async def test_invalid_planner_output_does_not_claim_ollama_is_stopped(settings):
+    container = build_container(settings)
+    container.orchestrator.planner = InvalidPlanner()
+
+    response, outcome = await container.orchestrator.handle_text(
+        "do something unmatched"
+    )
+
+    assert "invalid planner response" in response.display_text
+    assert "Start Ollama" not in response.display_text
+    assert outcome.result is None
+
+
+@pytest.mark.asyncio
 async def test_conversational_answer_does_not_execute_a_skill(settings):
     container = build_container(settings)
     container.orchestrator.planner = AnsweringPlanner()
     response, outcome = await container.orchestrator.handle_text("Tell me something")
     assert response.display_text == "A direct answer."
+    assert response.response_type == ResponseType.ANSWER
     assert outcome.result is None
 
 
@@ -157,5 +185,6 @@ async def test_skill_preparation_error_is_returned_as_response(settings):
         "open application not-registered"
     )
     assert response.severity == "warning"
+    assert response.response_type == ResponseType.ERROR
     assert "not registered" in response.display_text
     assert outcome.result is None

@@ -61,3 +61,17 @@ do not bypass any step's validation, permission, confirmation, or audit.
 The Diagnostics tab reports model, microphone, GPU, audio, database, and skill
 health with recovery guidance. Exported diagnostic bundles redact secrets and
 are created only when requested.
+
+## Knowledge bases
+
+Use the Knowledge tab to add a reference note or import a UTF-8 TXT, Markdown,
+RST, CSV, or JSON file up to 2 MB. Enabled knowledge bases are searched locally
+for each unmatched conversational request, and only the most relevant bounded
+excerpts are passed to the local planner. Disable an entry to keep it stored
+without using it, or remove entries individually. The Privacy tab can clear all
+knowledge bases independently.
+
+Knowledge content is treated as untrusted reference material, not as assistant
+instructions. Files are copied into the local database when imported, so later
+changes to the original file are not applied until it is imported or edited
+again.

@@ -45,6 +45,7 @@ from assistant.logging import configure_logging
 from assistant.storage.history import HistoryStore
 from assistant.storage.macros import MacroStore
 from assistant.storage.aliases import AliasStore
+from assistant.storage.knowledge import KnowledgeBaseStore
 from assistant.stt.faster_whisper import FasterWhisperProvider
 from assistant.tts.piper import PiperProvider
 from assistant.models import ModelManager
@@ -68,6 +69,7 @@ class Container:
     database: Database
     audit: AuditStore
     permissions: PermissionManager
+    confirmations: ConfirmationManager
     registry: SkillRegistry
     events: EventBus
     engine: ExecutionEngine
@@ -79,6 +81,7 @@ class Container:
     model_manager: ModelManager
     metrics: MetricsStore
     aliases: AliasStore
+    knowledge_bases: KnowledgeBaseStore
 
 
 def build_container(settings: Settings | None = None) -> Container:
@@ -98,6 +101,7 @@ def build_container(settings: Settings | None = None) -> Container:
     metrics = MetricsStore(database)
     permissions = PermissionManager(database, audit)
     aliases = AliasStore(database)
+    knowledge_bases = KnowledgeBaseStore(database)
     registry = SkillRegistry(
         settings.data_dir / "skills",
         trusted_signing_keys={
@@ -144,7 +148,9 @@ def build_container(settings: Settings | None = None) -> Container:
         else None
     )
     planner = (
-        LocalPlanner(llm, SkillRetriever(registry.list)) if llm else None
+        LocalPlanner(llm, SkillRetriever(registry.list), knowledge_bases)
+        if llm
+        else None
     )
     orchestrator = AssistantOrchestrator(
         DeterministicRouter(),
@@ -212,6 +218,7 @@ def build_container(settings: Settings | None = None) -> Container:
         database=database,
         audit=audit,
         permissions=permissions,
+        confirmations=confirmations,
         registry=registry,
         events=events,
         engine=engine,
@@ -223,4 +230,5 @@ def build_container(settings: Settings | None = None) -> Container:
         model_manager=model_manager,
         metrics=metrics,
         aliases=aliases,
+        knowledge_bases=knowledge_bases,
     )

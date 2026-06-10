@@ -1,6 +1,6 @@
 import json
 
-from assistant.contracts import Response, ResultStatus, SkillResult
+from assistant.contracts import Response, ResponseType, ResultStatus, SkillResult
 
 
 def response_from_result(
@@ -37,6 +37,7 @@ def response_from_result(
     return Response(
         display_text=display,
         speech_text=speech,
+        response_type=ResponseType.SKILL,
         severity=severity,
         speak=True,
         sensitive=result.sensitive,

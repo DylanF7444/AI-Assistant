@@ -5,6 +5,8 @@ import logging
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -44,6 +46,16 @@ class ExecutionOutcome:
     permission_requests: tuple[PermissionGrantRequest, ...] = ()
 
 
+@dataclass(frozen=True)
+class ActiveJob:
+    correlation_id: UUID
+    skill_id: str
+    display_name: str
+    arguments: dict[str, Any]
+    started_at: datetime
+    elapsed_seconds: float
+
+
 class ExecutionEngine:
     def __init__(
         self,
@@ -63,8 +75,30 @@ class ExecutionEngine:
         self.metrics = metrics
         self.completed_key_limit = completed_key_limit
         self._jobs: dict[UUID, asyncio.Task[SkillResult]] = {}
+        self._job_details: dict[UUID, tuple[str, str, dict[str, Any], datetime, float]] = {}
+        self._job_loops: dict[UUID, asyncio.AbstractEventLoop] = {}
         self._cancel_events: dict[UUID, asyncio.Event] = {}
         self._completed_keys: OrderedDict[str, SkillResult] = OrderedDict()
+
+    def active_jobs(self) -> tuple[ActiveJob, ...]:
+        current = time.monotonic()
+        return tuple(
+            ActiveJob(
+                correlation_id=correlation_id,
+                skill_id=skill_id,
+                display_name=display_name,
+                arguments=dict(arguments),
+                started_at=started_at,
+                elapsed_seconds=max(0.0, current - started_monotonic),
+            )
+            for correlation_id, (
+                skill_id,
+                display_name,
+                arguments,
+                started_at,
+                started_monotonic,
+            ) in tuple(self._job_details.items())
+        )
 
     async def prepare(self, call: SkillCall) -> ExecutionOutcome:
         try:
@@ -90,6 +124,22 @@ class ExecutionEngine:
             for scope in decision.missing
         )
         if any(not decision.allowed for decision in decisions):
+            await self.events.publish(
+                PipelineEvent(
+                    correlation_id=call.correlation_id,
+                    state=PipelineState.AWAITING_APPROVAL,
+                    message="Permission is required before this action can run.",
+                    data={
+                        "permissions": [
+                            {
+                                "skill_id": request.call.skill_id,
+                                **request.scope.model_dump(),
+                            }
+                            for request in missing
+                        ]
+                    },
+                )
+            )
             return ExecutionOutcome(
                 result=SkillResult(
                     status=ResultStatus.DENIED,
@@ -183,6 +233,11 @@ class ExecutionEngine:
         )
         started = time.perf_counter()
         max_attempts = 2 if skill.manifest.safe_to_retry else 1
+        timeout_seconds = (
+            max(30.0, float(call.arguments.get("seconds", 0)) + 1.0)
+            if call.skill_id == "core.timer"
+            else 30.0
+        )
         result = None
         attempts = 0
         try:
@@ -190,8 +245,16 @@ class ExecutionEngine:
                 attempts += 1
                 task = asyncio.create_task(skill.execute(call, cancel_event))
                 self._jobs[call.correlation_id] = task
+                self._job_loops[call.correlation_id] = asyncio.get_running_loop()
+                self._job_details[call.correlation_id] = (
+                    call.skill_id,
+                    skill.manifest.display_name,
+                    dict(call.arguments),
+                    datetime.now(UTC),
+                    time.monotonic(),
+                )
                 try:
-                    result = await asyncio.wait_for(task, timeout=30)
+                    result = await asyncio.wait_for(task, timeout=timeout_seconds)
                     skill.validate_result(result)
                     break
                 except TimeoutError:
@@ -216,6 +279,8 @@ class ExecutionEngine:
                         )
         finally:
             self._jobs.pop(call.correlation_id, None)
+            self._job_details.pop(call.correlation_id, None)
+            self._job_loops.pop(call.correlation_id, None)
             self._cancel_events.pop(call.correlation_id, None)
         assert result is not None
         self.audit.record(
@@ -318,11 +383,23 @@ class ExecutionEngine:
         )
         for target in targets:
             event = self._cancel_events.get(target)
-            if event:
-                event.set()
             task = self._jobs.get(target)
-            if task:
-                task.cancel()
+            job_loop = self._job_loops.get(target)
+            current_loop = asyncio.get_running_loop()
+
+            def request_cancel(
+                cancel_event: asyncio.Event | None = event,
+                active_task: asyncio.Task[SkillResult] | None = task,
+            ) -> None:
+                if cancel_event:
+                    cancel_event.set()
+                if active_task:
+                    active_task.cancel()
+
+            if job_loop and job_loop is not current_loop and job_loop.is_running():
+                job_loop.call_soon_threadsafe(request_cancel)
+            else:
+                request_cancel()
 
     @staticmethod
     def _failure(code: str, message: str, status: ResultStatus) -> SkillResult:

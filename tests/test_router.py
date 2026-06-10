@@ -40,6 +40,12 @@ def test_unknown_request_needs_local_planner():
     assert result.intent.ambiguous
 
 
+def test_knowledge_question_is_not_misrouted_to_calculator():
+    result = DeterministicRouter().route("What is the capital of France?")
+    assert result.needs_llm
+    assert result.intent.name == "conversation.question"
+
+
 def test_normalization_and_numbers():
     assert normalize_text("Hello comma WORLD") == "hello, world"
     assert spoken_number("one hundred and five") == 105

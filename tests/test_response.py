@@ -1,4 +1,4 @@
-from assistant.contracts import ResultStatus, SkillResult
+from assistant.contracts import ResponseType, ResultStatus, SkillResult
 from assistant.response import response_from_result
 
 
@@ -11,6 +11,7 @@ def test_sensitive_result_is_not_spoken():
         )
     )
     assert response.display_text == "Secret text"
+    assert response.response_type == ResponseType.SKILL
     assert "Secret text" not in response.speech_text
 
 

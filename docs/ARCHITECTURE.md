@@ -15,6 +15,11 @@
 8. Structured results produce display and optional speech responses.
 9. Permission decisions and outcomes are written to a separate audit log.
 
+For unmatched conversational requests, enabled local knowledge bases are
+searched with bounded lexical retrieval. Relevant excerpts are included as
+untrusted reference data in the schema-constrained planner prompt. Knowledge
+files are stored as local database content and never execute instructions.
+
 The UI depends on the orchestrator and event bus, not model or OS
 implementations. STT, LLM, TTS, wake-word, embedding, Windows, storage, clock,
 and device implementations are injected behind typed interfaces.
@@ -25,4 +30,3 @@ Core contracts and skill manifests use API version `1.0`. Minor core releases
 must preserve existing fields and meanings. A breaking contract change requires
 a new major API version and side-by-side loader support or a documented
 migration. Stable skill IDs are never inferred from display names.
-

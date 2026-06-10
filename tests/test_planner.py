@@ -1,15 +1,20 @@
 import pytest
+from jsonschema import ValidationError
 
 from assistant.language.planner import LocalPlanner, SkillRetriever
 from assistant.skills.builtin import CalculatorSkill, DateTimeSkill
+from assistant.storage.database import Database
+from assistant.storage.knowledge import KnowledgeBaseStore
 
 
 class FakeProvider:
     def __init__(self, output):
         self.output = output
         self.calls = 0
+        self.last_prompt = ""
 
     async def structured_completion(self, prompt, schema, timeout_seconds):
+        self.last_prompt = prompt
         output = (
             self.output[self.calls]
             if isinstance(self.output, list)
@@ -117,6 +122,55 @@ async def test_planner_answers_when_no_skill_is_relevant():
 
 
 @pytest.mark.asyncio
+async def test_planner_repairs_invalid_structured_output_once():
+    provider = FakeProvider(
+        [
+            {
+                "disposition": "answer",
+                "skill_id": "",
+                "arguments": {},
+                "answer": "",
+                "confidence": 0.98,
+                "clarification": None,
+            },
+            {
+                "disposition": "answer",
+                "skill_id": "",
+                "arguments": {},
+                "answer": "Paris is the capital of France.",
+                "confidence": 0.98,
+                "clarification": None,
+            },
+        ]
+    )
+    planner = LocalPlanner(provider, SkillRetriever((CalculatorSkill.manifest,)))
+
+    intent = await planner.plan("What is the capital of France?")
+
+    assert intent.name == "conversation.answer"
+    assert provider.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_planner_stops_after_one_invalid_output_retry():
+    invalid = {
+        "disposition": "answer",
+        "skill_id": "",
+        "arguments": {},
+        "answer": "",
+        "confidence": 0.98,
+        "clarification": None,
+    }
+    provider = FakeProvider([invalid, invalid])
+    planner = LocalPlanner(provider, SkillRetriever(()))
+
+    with pytest.raises(ValidationError):
+        await planner.plan("What is the capital of France?")
+
+    assert provider.calls == 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("text", ["zzzzzzzz", "...?!", "um uh"])
 async def test_planner_rejects_obvious_gibberish_without_calling_provider(text):
     provider = FakeProvider(None)
@@ -129,3 +183,32 @@ async def test_planner_rejects_obvious_gibberish_without_calling_provider(text):
 def test_retriever_does_not_match_substrings_inside_skill_descriptions():
     retriever = SkillRetriever((CalculatorSkill.manifest, DateTimeSkill.manifest))
     assert retriever.relevant("blorp snazzle") == ()
+
+
+def test_retriever_does_not_match_skills_only_by_stop_words():
+    retriever = SkillRetriever((CalculatorSkill.manifest, DateTimeSkill.manifest))
+    assert retriever.relevant("What is the capital of France?") == ()
+
+
+@pytest.mark.asyncio
+async def test_planner_receives_relevant_knowledge_excerpts(tmp_path):
+    database = Database(f"sqlite:///{tmp_path / 'knowledge.db'}")
+    database.migrate()
+    knowledge = KnowledgeBaseStore(database)
+    knowledge.save("Project Atlas", "Atlas launches on October 14.")
+    provider = FakeProvider(
+        {
+            "disposition": "answer",
+            "skill_id": "",
+            "arguments": {},
+            "answer": "Atlas launches on October 14.",
+            "confidence": 0.99,
+            "clarification": None,
+        }
+    )
+    planner = LocalPlanner(provider, SkillRetriever(()), knowledge)
+
+    intent = await planner.plan("When does Atlas launch?")
+
+    assert intent.arguments["text"] == "Atlas launches on October 14."
+    assert "Atlas launches on October 14." in provider.last_prompt

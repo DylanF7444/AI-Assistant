@@ -133,8 +133,20 @@ class MetricRow(Base):
     outcome: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
 
+class KnowledgeBaseRow(Base):
+    __tablename__ = "knowledge_bases"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), unique=True, index=True)
+    description: Mapped[str] = mapped_column(String(500), default="")
+    content: Mapped[str] = mapped_column(Text)
+    source_path: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class Database:
-    CURRENT_SCHEMA_VERSION = 3
+    CURRENT_SCHEMA_VERSION = 4
 
     def __init__(self, url: str) -> None:
         self.url = url
@@ -182,6 +194,8 @@ class Database:
                 MacroRow.__table__.create(self.engine, checkfirst=True)
             if version == 2:
                 MetricRow.__table__.create(self.engine, checkfirst=True)
+            if version == 3:
+                KnowledgeBaseRow.__table__.create(self.engine, checkfirst=True)
             version += 1
         session.get(SchemaVersionRow, 1).version = version  # type: ignore[union-attr]
 

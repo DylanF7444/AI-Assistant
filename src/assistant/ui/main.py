@@ -5,16 +5,20 @@ import json
 import shutil
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import select
+
 from assistant.bootstrap import Container
-from assistant.contracts import PipelineEvent, PipelineState
+from assistant.contracts import PipelineEvent, PipelineState, ResponseType
 from assistant.diagnostics import hardware_report, model_recommendations
 from assistant.policy.permissions import GrantType
+from assistant.policy.capabilities import available_capabilities
 from assistant.response import response_from_result
 from assistant.models import ModelManifest
-from assistant.storage.database import SettingsStore
+from assistant.storage.database import ItemRow, SettingsStore
 from assistant.storage.macros import MacroDefinition, MacroStep
 from assistant.storage.history import HistoryStore
 from assistant.audio.capture import enumerate_devices
@@ -22,12 +26,13 @@ from assistant.audio.capture import enumerate_devices
 
 def run_desktop(container: Container) -> int:
     try:
-        from PySide6.QtCore import QObject, QSettings, Qt, QThread, Signal
+        from PySide6.QtCore import QObject, QSettings, Qt, QThread, QTimer, Signal
         from PySide6.QtGui import QAction, QIcon, QKeySequence, QShortcut
         from PySide6.QtWidgets import (
             QApplication,
             QCheckBox,
             QComboBox,
+            QFrame,
             QFormLayout,
             QFileDialog,
             QHBoxLayout,
@@ -38,7 +43,9 @@ def run_desktop(container: Container) -> int:
             QMainWindow,
             QMenu,
             QMessageBox,
+            QProgressBar,
             QPushButton,
+            QSizePolicy,
             QSystemTrayIcon,
             QTabWidget,
             QTableWidget,
@@ -75,10 +82,14 @@ def run_desktop(container: Container) -> int:
         def __init__(self) -> None:
             super().__init__()
             self.setWindowTitle("Local Assistant")
-            self.resize(850, 620)
+            self.resize(1080, 760)
+            self.setMinimumSize(820, 600)
             self.setAccessibleName("Local Assistant command window")
             self._workers: list[AsyncWorker] = []
             self._hotkeys: list[int] = []
+            self._activity_started = time.perf_counter()
+            self._status_frame = 0
+            self._active_state = PipelineState.IDLE
             self.hotkey_bridge = HotkeyBridge()
             self.hotkey_bridge.push_to_talk.connect(self.listen)
             self.hotkey_bridge.cancel.connect(self.cancel)
@@ -86,6 +97,7 @@ def run_desktop(container: Container) -> int:
             container.events.add_listener(self.hotkey_bridge.pipeline_event.emit)
             tabs = QTabWidget()
             tabs.addTab(self._command_tab(), "Assistant")
+            tabs.addTab(self._active_scripts_tab(), "Active Scripts")
             tabs.addTab(self._skills_tab(), "Skills")
             tabs.addTab(self._permissions_tab(), "Permissions")
             tabs.addTab(self._audit_tab(), "Audit Log")
@@ -93,42 +105,425 @@ def run_desktop(container: Container) -> int:
             tabs.addTab(self._diagnostics_tab(), "Diagnostics")
             tabs.addTab(self._macros_tab(), "Macros")
             tabs.addTab(self._models_tab(), "Models")
+            tabs.addTab(self._knowledge_tab(), "Knowledge")
             tabs.addTab(self._privacy_tab(), "Privacy")
             tabs.addTab(self._applications_tab(), "Applications")
+            tabs.setTabPosition(QTabWidget.TabPosition.West)
+            tabs.setDocumentMode(True)
             self.setCentralWidget(tabs)
+            self._status_timer = QTimer(self)
+            self._status_timer.setInterval(420)
+            self._status_timer.timeout.connect(self._animate_status)
+            self._scripts_timer = QTimer(self)
+            self._scripts_timer.setInterval(1000)
+            self._scripts_timer.timeout.connect(self._refresh_active_scripts)
+            self._scripts_timer.start()
             QShortcut(QKeySequence(container.settings.cancel_hotkey), self, self.cancel)
+            QShortcut(QKeySequence("Ctrl+Return"), self, self.run_command)
             self._register_global_hotkeys()
             if container.wakeword:
                 self._start_wakeword()
             self._first_run()
 
+        def _active_scripts_tab(self) -> QWidget:
+            page = QWidget()
+            page.setObjectName("activeScriptsPage")
+            layout = QVBoxLayout(page)
+            layout.setContentsMargins(28, 24, 28, 24)
+            layout.setSpacing(12)
+
+            header = QHBoxLayout()
+            heading = QVBoxLayout()
+            title = QLabel("Active scripts")
+            title.setObjectName("pageTitle")
+            subtitle = QLabel(
+                "Live assistant jobs, future reminders, and runtime hooks."
+            )
+            subtitle.setObjectName("pageSubtitle")
+            heading.addWidget(title)
+            heading.addWidget(subtitle)
+            refresh = QPushButton("Refresh")
+            refresh.clicked.connect(self._refresh_active_scripts)
+            header.addLayout(heading, 1)
+            header.addWidget(refresh)
+            layout.addLayout(header)
+
+            running_label = QLabel("RUNNING NOW")
+            running_label.setObjectName("sectionLabel")
+            self.running_scripts = QTableWidget(0, 5)
+            self.running_scripts.setHorizontalHeaderLabels(
+                ["Type", "Name", "Details", "Started", "Elapsed"]
+            )
+            self.running_scripts.setSelectionBehavior(
+                QTableWidget.SelectionBehavior.SelectRows
+            )
+            self.running_scripts.setEditTriggers(
+                QTableWidget.EditTrigger.NoEditTriggers
+            )
+            self.running_scripts.setAlternatingRowColors(True)
+            self.running_scripts.horizontalHeader().setStretchLastSection(True)
+            cancel = QPushButton("Cancel selected")
+            cancel.setObjectName("dangerButton")
+            cancel.clicked.connect(self._cancel_selected_script)
+
+            scheduled_label = QLabel("SCHEDULED")
+            scheduled_label.setObjectName("sectionLabel")
+            self.scheduled_scripts = QTableWidget(0, 4)
+            self.scheduled_scripts.setHorizontalHeaderLabels(
+                ["Type", "Name", "Due", "Status"]
+            )
+            self.scheduled_scripts.setEditTriggers(
+                QTableWidget.EditTrigger.NoEditTriggers
+            )
+            self.scheduled_scripts.setAlternatingRowColors(True)
+            self.scheduled_scripts.horizontalHeader().setStretchLastSection(True)
+
+            hooks_label = QLabel("HOOKS")
+            hooks_label.setObjectName("sectionLabel")
+            self.script_hooks = QTableWidget(0, 3)
+            self.script_hooks.setHorizontalHeaderLabels(
+                ["Hook", "Trigger", "Status"]
+            )
+            self.script_hooks.setEditTriggers(
+                QTableWidget.EditTrigger.NoEditTriggers
+            )
+            self.script_hooks.setAlternatingRowColors(True)
+            self.script_hooks.horizontalHeader().setStretchLastSection(True)
+
+            layout.addWidget(running_label)
+            layout.addWidget(self.running_scripts, 2)
+            layout.addWidget(cancel)
+            layout.addWidget(scheduled_label)
+            layout.addWidget(self.scheduled_scripts, 2)
+            layout.addWidget(hooks_label)
+            layout.addWidget(self.script_hooks, 1)
+            self._refresh_active_scripts()
+            return page
+
+        @staticmethod
+        def _set_table_row(table: QTableWidget, row: int, values: list[str]) -> None:
+            table.insertRow(row)
+            for column, value in enumerate(values):
+                table.setItem(row, column, QTableWidgetItem(value))
+
+        def _refresh_active_scripts(self) -> None:
+            if not hasattr(self, "running_scripts"):
+                return
+            selected_id = None
+            selected = self.running_scripts.currentRow()
+            if selected >= 0:
+                item = self.running_scripts.item(selected, 0)
+                selected_id = item.data(Qt.ItemDataRole.UserRole) if item else None
+
+            self.running_scripts.setRowCount(0)
+            now = datetime.now(UTC)
+            for row, job in enumerate(container.engine.active_jobs()):
+                is_timer = job.skill_id == "core.timer"
+                if is_timer:
+                    duration = float(job.arguments.get("seconds", 0))
+                    remaining = max(0.0, duration - job.elapsed_seconds)
+                    details = f"{remaining:.1f}s remaining of {duration:g}s"
+                else:
+                    details = json.dumps(job.arguments, default=str)
+                self._set_table_row(
+                    self.running_scripts,
+                    row,
+                    [
+                        "Timer" if is_timer else "Action",
+                        str(job.arguments.get("label", job.display_name)),
+                        details,
+                        job.started_at.astimezone().strftime("%b %d, %I:%M:%S %p"),
+                        f"{job.elapsed_seconds:.1f}s",
+                    ],
+                )
+                id_item = self.running_scripts.item(row, 0)
+                id_item.setData(Qt.ItemDataRole.UserRole, str(job.correlation_id))
+                if selected_id == str(job.correlation_id):
+                    self.running_scripts.selectRow(row)
+
+            self.scheduled_scripts.setRowCount(0)
+            with container.database.session() as session:
+                reminders = list(
+                    session.scalars(
+                        select(ItemRow)
+                        .where(
+                            ItemRow.kind == "reminder",
+                            ItemRow.completed.is_(False),
+                        )
+                        .order_by(ItemRow.due_at)
+                    )
+                )
+            for row, reminder in enumerate(reminders):
+                due = reminder.due_at
+                if due is None:
+                    due_text = "No due time"
+                    status = "Pending"
+                else:
+                    if due.tzinfo is None:
+                        due = due.replace(tzinfo=UTC)
+                    due_text = due.astimezone().strftime("%b %d, %Y %I:%M %p")
+                    status = "Overdue" if due < now else "Scheduled"
+                self._set_table_row(
+                    self.scheduled_scripts,
+                    row,
+                    ["Reminder", reminder.title, due_text, status],
+                )
+
+            hooks = [
+                (
+                    "Push to talk",
+                    container.settings.push_to_talk_hotkey,
+                    "Active" if self._hotkeys else "Window only",
+                ),
+                (
+                    "Emergency stop",
+                    container.settings.cancel_hotkey,
+                    "Active" if self._hotkeys else "Window only",
+                ),
+                (
+                    "Wake word",
+                    "Voice detection",
+                    "Active" if container.wakeword else "Disabled",
+                ),
+                ("Pipeline events", "Assistant activity", "Active"),
+            ]
+            self.script_hooks.setRowCount(0)
+            for row, hook in enumerate(hooks):
+                self._set_table_row(self.script_hooks, row, list(hook))
+
+        def _cancel_selected_script(self) -> None:
+            row = self.running_scripts.currentRow()
+            if row < 0:
+                return
+            item = self.running_scripts.item(row, 0)
+            correlation_id = item.data(Qt.ItemDataRole.UserRole) if item else None
+            if not correlation_id:
+                return
+
+            async def cancel_job():
+                from uuid import UUID
+
+                await container.engine.cancel(UUID(correlation_id))
+
+            worker = AsyncWorker(cancel_job())
+            worker.complete.connect(lambda _: self._refresh_active_scripts())
+            worker.failed.connect(self._show_error)
+            worker.finished.connect(lambda: self._workers.remove(worker))
+            self._workers.append(worker)
+            worker.start()
+
         def _command_tab(self) -> QWidget:
             page = QWidget()
+            page.setObjectName("assistantPage")
             layout = QVBoxLayout(page)
+            layout.setContentsMargins(32, 28, 32, 28)
+            layout.setSpacing(18)
+
+            eyebrow = QLabel("PRIVATE  |  LOCAL  |  READY")
+            eyebrow.setObjectName("eyebrow")
+            title = QLabel("What can I help with?")
+            title.setObjectName("pageTitle")
+            subtitle = QLabel(
+                "Type a request or use your microphone. Actions and approvals "
+                "will appear here as they happen."
+            )
+            subtitle.setObjectName("pageSubtitle")
+            subtitle.setWordWrap(True)
+            layout.addWidget(eyebrow)
+            layout.addWidget(title)
+            layout.addWidget(subtitle)
+
+            status_card = QFrame()
+            status_card.setObjectName("statusCard")
+            status_layout = QVBoxLayout(status_card)
+            status_layout.setContentsMargins(20, 16, 20, 16)
+            status_layout.setSpacing(8)
+            status_row = QHBoxLayout()
+            self.status_dot = QLabel("")
+            self.status_dot.setObjectName("statusDot")
+            self.status_dot.setFixedSize(10, 10)
             self.status = QLabel("Ready")
+            self.status.setObjectName("assistantStatus")
             self.status.setAccessibleName("Assistant status")
+            self.status_detail = QLabel("Waiting for your request")
+            self.status_detail.setObjectName("statusDetail")
+            self.elapsed_status = QLabel("")
+            self.elapsed_status.setObjectName("elapsedStatus")
+            status_row.addWidget(self.status_dot)
+            status_row.addWidget(self.status, 1)
+            status_row.addWidget(self.elapsed_status)
+            self.pipeline_progress = QProgressBar()
+            self.pipeline_progress.setObjectName("pipelineProgress")
+            self.pipeline_progress.setTextVisible(False)
+            self.pipeline_progress.setFixedHeight(4)
+            self.pipeline_progress.hide()
+            status_layout.addLayout(status_row)
+            status_layout.addWidget(self.status_detail)
+            status_layout.addWidget(self.pipeline_progress)
+            layout.addWidget(status_card)
+
+            content = QHBoxLayout()
+            content.setSpacing(18)
+            compose_card = QFrame()
+            compose_card.setObjectName("composeCard")
+            compose_layout = QVBoxLayout(compose_card)
+            compose_layout.setContentsMargins(20, 18, 20, 18)
+            compose_layout.setSpacing(12)
+            input_label = QLabel("YOUR REQUEST")
+            input_label.setObjectName("sectionLabel")
             self.transcript = QTextEdit()
-            self.transcript.setPlaceholderText("Type a command or use push-to-talk")
+            self.transcript.setObjectName("commandInput")
+            self.transcript.setPlaceholderText(
+                "Ask a question, open an app, manage a file, or run a skill..."
+            )
             self.transcript.setAccessibleName("Command input and transcript")
+            self.transcript.setMinimumHeight(120)
             controls = QHBoxLayout()
-            listen = QPushButton("Push to Talk")
-            listen.setAccessibleName("Start voice input")
-            listen.clicked.connect(self.listen)
-            run = QPushButton("Run Command")
-            run.clicked.connect(self.run_command)
-            cancel = QPushButton("Cancel")
-            cancel.clicked.connect(self.cancel)
-            controls.addWidget(listen)
-            controls.addWidget(run)
-            controls.addWidget(cancel)
+            controls.setSpacing(10)
+            self.listen_button = QPushButton("  Listen")
+            self.listen_button.setObjectName("secondaryButton")
+            self.listen_button.setAccessibleName("Start voice input")
+            self.listen_button.clicked.connect(self.listen)
+            self.run_button = QPushButton("Run request  >")
+            self.run_button.setObjectName("primaryButton")
+            self.run_button.clicked.connect(self.run_command)
+            self.cancel_button = QPushButton("Stop")
+            self.cancel_button.setObjectName("dangerButton")
+            self.cancel_button.clicked.connect(self.cancel)
+            self.cancel_button.setEnabled(False)
+            controls.addWidget(self.listen_button)
+            controls.addStretch()
+            controls.addWidget(self.cancel_button)
+            controls.addWidget(self.run_button)
+            response_header = QHBoxLayout()
+            response_label = QLabel("ASSISTANT")
+            response_label.setObjectName("sectionLabel")
             self.response = QTextEdit()
+            self.response.setObjectName("assistantResponse")
             self.response.setReadOnly(True)
+            self.response.setPlaceholderText("The response will appear here.")
             self.response.setAccessibleName("Assistant response")
-            layout.addWidget(self.status)
-            layout.addWidget(self.transcript)
-            layout.addLayout(controls)
-            layout.addWidget(self.response)
+            self.response.setMinimumHeight(160)
+            self.response_type = QLabel("READY")
+            self.response_type.setObjectName("responseBadge")
+            self.response_type.setAccessibleName("Assistant response type")
+            response_header.addWidget(response_label)
+            response_header.addStretch()
+            response_header.addWidget(self.response_type)
+            compose_layout.addWidget(input_label)
+            compose_layout.addWidget(self.transcript)
+            compose_layout.addLayout(controls)
+            compose_layout.addSpacing(4)
+            compose_layout.addLayout(response_header)
+            compose_layout.addWidget(self.response)
+
+            activity_card = QFrame()
+            activity_card.setObjectName("activityCard")
+            activity_card.setMinimumWidth(250)
+            activity_card.setMaximumWidth(330)
+            activity_layout = QVBoxLayout(activity_card)
+            activity_layout.setContentsMargins(18, 18, 18, 18)
+            activity_layout.setSpacing(10)
+            activity_title = QLabel("ACTIVITY")
+            activity_title.setObjectName("sectionLabel")
+            activity_hint = QLabel("Live progress and actions")
+            activity_hint.setObjectName("activityHint")
+            self.activity_log = QListWidget()
+            self.activity_log.setObjectName("activityLog")
+            self.activity_log.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self.activity_log.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+            )
+            activity_layout.addWidget(activity_title)
+            activity_layout.addWidget(activity_hint)
+            activity_layout.addWidget(self.activity_log)
+            self._append_activity("Ready", "Waiting for your request")
+
+            content.addWidget(compose_card, 3)
+            content.addWidget(activity_card, 1)
+            layout.addLayout(content, 1)
             return page
+
+        def _append_activity(self, label: str, detail: str = "") -> None:
+            elapsed = time.perf_counter() - self._activity_started
+            timestamp = f"{elapsed:04.1f}s"
+            text = f"{timestamp}   {label}"
+            if detail and detail.lower() != label.lower():
+                text += f"\n          {detail}"
+            self.activity_log.addItem(text)
+            self.activity_log.scrollToBottom()
+
+        def _set_pipeline_state(
+            self,
+            state: PipelineState,
+            message: str = "",
+            progress: float | None = None,
+        ) -> None:
+            labels = {
+                PipelineState.IDLE: "Ready",
+                PipelineState.LISTENING: "Listening",
+                PipelineState.TRANSCRIBING: "Transcribing",
+                PipelineState.THINKING: "Thinking",
+                PipelineState.AWAITING_APPROVAL: "Waiting for approval",
+                PipelineState.EXECUTING: "Executing action",
+                PipelineState.SPEAKING: "Speaking",
+                PipelineState.ERROR: "Something went wrong",
+                PipelineState.CANCELLED: "Cancelled",
+            }
+            active_states = {
+                PipelineState.LISTENING,
+                PipelineState.TRANSCRIBING,
+                PipelineState.THINKING,
+                PipelineState.EXECUTING,
+                PipelineState.SPEAKING,
+            }
+            was_active = self._active_state in active_states
+            active = state in active_states
+            self._active_state = state
+            self._status_frame = 0
+            self.status.setText(labels[state])
+            self.status_detail.setText(message or {
+                PipelineState.IDLE: "Waiting for your request",
+                PipelineState.THINKING: "Understanding what you asked",
+                PipelineState.EXECUTING: "A local skill is running",
+            }.get(state, labels[state]))
+            self.status_dot.setProperty("state", state.value)
+            self.status_dot.style().unpolish(self.status_dot)
+            self.status_dot.style().polish(self.status_dot)
+            self.run_button.setEnabled(not active)
+            self.listen_button.setEnabled(not active)
+            self.cancel_button.setEnabled(active)
+            if active:
+                if not was_active:
+                    self._activity_started = time.perf_counter()
+                elapsed = time.perf_counter() - self._activity_started
+                self.elapsed_status.setText(f"{elapsed:.1f}s")
+                self.pipeline_progress.show()
+                if progress is None:
+                    self.pipeline_progress.setRange(0, 0)
+                else:
+                    self.pipeline_progress.setRange(0, 100)
+                    self.pipeline_progress.setValue(round(progress * 100))
+                self._status_timer.start()
+            else:
+                self._status_timer.stop()
+                self.elapsed_status.setText("")
+                self.pipeline_progress.hide()
+            self._append_activity(labels[state], message)
+
+        def _animate_status(self) -> None:
+            self._status_frame = (self._status_frame + 1) % 4
+            base = {
+                PipelineState.LISTENING: "Listening",
+                PipelineState.TRANSCRIBING: "Transcribing",
+                PipelineState.THINKING: "Thinking",
+                PipelineState.EXECUTING: "Executing action",
+                PipelineState.SPEAKING: "Speaking",
+            }.get(self._active_state)
+            if base:
+                self.status.setText(base + "." * self._status_frame)
+                elapsed = time.perf_counter() - self._activity_started
+                self.elapsed_status.setText(f"{elapsed:.1f}s")
 
         def _register_global_hotkeys(self) -> None:
             try:
@@ -161,7 +556,7 @@ def run_desktop(container: Container) -> int:
             worker.start()
 
         def listen(self) -> None:
-            self.status.setText("Listening")
+            self._set_pipeline_state(PipelineState.LISTENING, "Microphone is active")
             worker = AsyncWorker(
                 container.orchestrator.listen_once(
                     container.stt, container.audio_capture.chunks()
@@ -174,7 +569,7 @@ def run_desktop(container: Container) -> int:
             worker.start()
 
         def _handle_pipeline_event(self, event: PipelineEvent) -> None:
-            self.status.setText(event.state.value.replace("_", " ").title())
+            self._set_pipeline_state(event.state, event.message, event.progress)
             if event.state == PipelineState.TRANSCRIBING and event.message:
                 self.transcript.setPlainText(event.message)
 
@@ -359,33 +754,13 @@ def run_desktop(container: Container) -> int:
             if not ok:
                 return
             manifest = container.registry.get(skill_id).manifest
-            known_capabilities = {
-                "clipboard.read",
-                "clipboard.write",
-                "device.control",
-                "filesystem.read",
-                "filesystem.write",
-                "input.control",
-                "media.control",
-                "messaging",
-                "network",
-                "notification.create",
-                "process.launch",
-                "process.terminate",
-                "process.window",
-                "settings.get",
-                "settings.set",
-            }
-            capabilities = sorted(
-                known_capabilities
-                | {scope.capability for scope in manifest.permissions}
-            )
+            capabilities = available_capabilities(manifest.permissions)
             capability, ok = QInputDialog.getItem(
                 self,
                 "Grant Permission",
                 "Capability",
                 capabilities,
-                editable=True,
+                editable=False,
             )
             if not ok or not capability:
                 return
@@ -714,6 +1089,133 @@ def run_desktop(container: Container) -> int:
             layout.addWidget(select)
             return page
 
+        def _knowledge_tab(self) -> QWidget:
+            page = QWidget()
+            layout = QVBoxLayout(page)
+            layout.addWidget(
+                QLabel(
+                    "Store local reference notes and UTF-8 text files. Enabled "
+                    "knowledge is retrieved for relevant conversational questions."
+                )
+            )
+            self.knowledge_list = QListWidget()
+            self._reload_knowledge()
+            controls = QHBoxLayout()
+            import_button = QPushButton("Import File")
+            import_button.clicked.connect(self._import_knowledge)
+            add_button = QPushButton("Add Note")
+            add_button.clicked.connect(self._add_knowledge)
+            edit_button = QPushButton("Edit Selected")
+            edit_button.clicked.connect(self._edit_knowledge)
+            toggle_button = QPushButton("Enable / Disable")
+            toggle_button.clicked.connect(self._toggle_knowledge)
+            delete_button = QPushButton("Delete Selected")
+            delete_button.clicked.connect(self._delete_knowledge)
+            for button in (
+                import_button,
+                add_button,
+                edit_button,
+                toggle_button,
+                delete_button,
+            ):
+                controls.addWidget(button)
+            layout.addWidget(self.knowledge_list)
+            layout.addLayout(controls)
+            return page
+
+        def _reload_knowledge(self) -> None:
+            self.knowledge_list.clear()
+            for item in container.knowledge_bases.list():
+                source = Path(item.source_path).name if item.source_path else "note"
+                state = "Enabled" if item.enabled else "Disabled"
+                self.knowledge_list.addItem(
+                    f"{state} | {item.name} | {source} | {len(item.content):,} chars"
+                )
+
+        def _selected_knowledge(self):
+            row = self.knowledge_list.currentRow()
+            values = container.knowledge_bases.list()
+            return values[row] if 0 <= row < len(values) else None
+
+        def _import_knowledge(self) -> None:
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Import Knowledge File",
+                "",
+                "Knowledge files (*.txt *.md *.markdown *.rst *.csv *.json)",
+            )
+            if not path:
+                return
+            try:
+                container.knowledge_bases.import_file(Path(path))
+            except Exception as error:
+                QMessageBox.critical(self, "Knowledge Import Failed", str(error))
+                return
+            self._reload_knowledge()
+
+        def _add_knowledge(self) -> None:
+            self._edit_knowledge_value(None)
+
+        def _edit_knowledge(self) -> None:
+            selected = self._selected_knowledge()
+            if selected is not None:
+                self._edit_knowledge_value(selected)
+
+        def _edit_knowledge_value(self, selected) -> None:
+            name, ok = QInputDialog.getText(
+                self,
+                "Knowledge Base",
+                "Name",
+                text=selected.name if selected else "",
+            )
+            if not ok or not name.strip():
+                return
+            description, ok = QInputDialog.getText(
+                self,
+                "Knowledge Base",
+                "Description (helps retrieval)",
+                text=selected.description if selected else "",
+            )
+            if not ok:
+                return
+            content, ok = QInputDialog.getMultiLineText(
+                self,
+                "Knowledge Base Content",
+                "Reference information",
+                selected.content if selected else "",
+            )
+            if not ok:
+                return
+            try:
+                container.knowledge_bases.save(
+                    name,
+                    content,
+                    description=description,
+                    source_path=selected.source_path if selected else None,
+                    enabled=selected.enabled if selected else True,
+                    knowledge_base_id=selected.id if selected else None,
+                )
+            except Exception as error:
+                QMessageBox.critical(self, "Knowledge Save Failed", str(error))
+                return
+            self._reload_knowledge()
+
+        def _toggle_knowledge(self) -> None:
+            selected = self._selected_knowledge()
+            if selected is None:
+                return
+            container.knowledge_bases.set_enabled(selected.id, not selected.enabled)
+            self._reload_knowledge()
+
+        def _delete_knowledge(self) -> None:
+            selected = self._selected_knowledge()
+            if selected is None or not self._confirm(
+                f'Delete knowledge base "{selected.name}"?'
+            ):
+                return
+            container.knowledge_bases.delete(selected.id)
+            self._reload_knowledge()
+
         def _privacy_tab(self) -> QWidget:
             page = QWidget()
             layout = QVBoxLayout(page)
@@ -726,6 +1228,7 @@ def run_desktop(container: Container) -> int:
             actions = [
                 ("Clear Transcript History", self._clear_history),
                 ("Clear Audit Log", self._clear_audit),
+                ("Clear Knowledge Bases", self._clear_knowledge),
                 ("Clear TTS Cache", lambda: self._clear_directory("tts-cache")),
                 (
                     "Clear Diagnostic Audio",
@@ -741,6 +1244,11 @@ def run_desktop(container: Container) -> int:
                 layout.addWidget(button)
             layout.addStretch()
             return page
+
+        def _clear_knowledge(self) -> None:
+            if self._confirm("Delete all local knowledge bases?"):
+                container.knowledge_bases.clear()
+                self._reload_knowledge()
 
         def _applications_tab(self) -> QWidget:
             page = QWidget()
@@ -935,8 +1443,13 @@ def run_desktop(container: Container) -> int:
         def run_command(self) -> None:
             text = self.transcript.toPlainText().strip()
             if not text:
+                self.transcript.setFocus()
                 return
-            self.status.setText(PipelineState.THINKING.value.replace("_", " ").title())
+            self.activity_log.clear()
+            self._activity_started = time.perf_counter()
+            self._set_pipeline_state(
+                PipelineState.THINKING, "Interpreting your request"
+            )
             worker = AsyncWorker(container.orchestrator.handle_text(text))
             worker.complete.connect(self._show_result)
             worker.failed.connect(self._show_error)
@@ -946,12 +1459,13 @@ def run_desktop(container: Container) -> int:
 
         def _show_result(self, payload: Any) -> None:
             response, outcome = payload
-            self.response.setPlainText(response.display_text)
-            self.status.setText("Ready")
+            self._display_response(response)
             if outcome.permission_requests:
                 self._request_permissions(outcome)
             elif outcome.confirmation:
                 self._request_confirmation(outcome)
+            else:
+                self._set_pipeline_state(PipelineState.IDLE, "Request complete")
 
         def _request_permissions(self, outcome: Any) -> None:
             details = []
@@ -976,7 +1490,9 @@ def run_desktop(container: Container) -> int:
             dialog.addButton("Not Now", QMessageBox.ButtonRole.RejectRole)
             dialog.exec()
             if dialog.clickedButton() is not grant_button:
-                self.status.setText("Permission not granted")
+                self._set_pipeline_state(
+                    PipelineState.CANCELLED, "Permission was not granted"
+                )
                 return
             labels = {
                 "Just once": GrantType.ONCE,
@@ -991,7 +1507,9 @@ def run_desktop(container: Container) -> int:
                 editable=False,
             )
             if not ok:
-                self.status.setText("Permission not granted")
+                self._set_pipeline_state(
+                    PipelineState.CANCELLED, "Permission was not granted"
+                )
                 return
             grant_type = labels[mode_label]
             grants: dict[tuple[str, str, str, str], set[str]] = {}
@@ -1024,7 +1542,9 @@ def run_desktop(container: Container) -> int:
                     correlation_id=str(outcome.call.correlation_id),
                 )
             self._reload_permissions()
-            self.status.setText("Preparing approved command")
+            self._set_pipeline_state(
+                PipelineState.THINKING, "Preparing the approved action"
+            )
             worker = AsyncWorker(container.engine.prepare(outcome.call))
             worker.complete.connect(self._show_continued_outcome)
             worker.failed.connect(self._show_error)
@@ -1037,9 +1557,14 @@ def run_desktop(container: Container) -> int:
                 self.response.setPlainText(
                     "The command still needs permission for another capability."
                 )
-                self.status.setText("Permission required")
+                self._set_response_type(ResponseType.PERMISSION)
+                self._set_pipeline_state(
+                    PipelineState.AWAITING_APPROVAL,
+                    "Another permission is required",
+                )
                 self._request_permissions(outcome)
             elif outcome.confirmation:
+                self._set_response_type(ResponseType.CONFIRMATION)
                 self._request_confirmation(outcome)
             elif outcome.result:
                 self._show_skill_result(outcome.result)
@@ -1055,7 +1580,9 @@ def run_desktop(container: Container) -> int:
             )
             if approved != QMessageBox.StandardButton.Yes:
                 container.confirmations.deny(request.confirmation_id)
-                self.status.setText("Action not confirmed")
+                self._set_pipeline_state(
+                    PipelineState.CANCELLED, "Action was not confirmed"
+                )
                 return
             typed_token = None
             if request.requires_typed_token:
@@ -1067,9 +1594,13 @@ def run_desktop(container: Container) -> int:
                 )
                 if not ok:
                     container.confirmations.deny(request.confirmation_id)
-                    self.status.setText("Action not confirmed")
+                    self._set_pipeline_state(
+                        PipelineState.CANCELLED, "Action was not confirmed"
+                    )
                     return
-            self.status.setText("Executing")
+            self._set_pipeline_state(
+                PipelineState.EXECUTING, request.exact_action
+            )
             worker = AsyncWorker(
                 container.engine.execute(
                     outcome.call,
@@ -1090,11 +1621,34 @@ def run_desktop(container: Container) -> int:
                 allow_sensitive_speech=container.orchestrator.allow_sensitive_speech,
                 hide_sensitive_display=container.orchestrator.hide_sensitive_display,
             )
+            self._display_response(response)
+            if result.status.value == "completed":
+                self._set_pipeline_state(PipelineState.IDLE, "Action completed")
+            elif result.status.value == "cancelled":
+                self._set_pipeline_state(PipelineState.CANCELLED, result.summary)
+            else:
+                self._set_pipeline_state(PipelineState.ERROR, result.summary)
+
+        def _display_response(self, response: Any) -> None:
             self.response.setPlainText(response.display_text)
-            self.status.setText(result.status.value.replace("_", " ").title())
+            self._set_response_type(response.response_type)
+
+        def _set_response_type(self, response_type: ResponseType) -> None:
+            labels = {
+                ResponseType.ANSWER: "Answer",
+                ResponseType.SKILL: "Skill used",
+                ResponseType.CLARIFICATION: "Clarification",
+                ResponseType.PERMISSION: "Permission request",
+                ResponseType.CONFIRMATION: "Confirmation request",
+                ResponseType.CONTROL: "Assistant control",
+                ResponseType.STATUS: "Status",
+                ResponseType.ERROR: "Error",
+            }
+            self.response_type.setText(labels[response_type].upper())
 
         def _show_error(self, error: str) -> None:
-            self.status.setText("Error")
+            self._set_response_type(ResponseType.ERROR)
+            self._set_pipeline_state(PipelineState.ERROR, error)
             QMessageBox.critical(self, "Assistant Error", error)
 
         def cancel(self) -> None:
@@ -1104,7 +1658,11 @@ def run_desktop(container: Container) -> int:
                 await container.orchestrator.cancel()
 
             worker = AsyncWorker(cancel_all())
-            worker.complete.connect(lambda _: self.status.setText("Cancelled"))
+            worker.complete.connect(
+                lambda _: self._set_pipeline_state(
+                    PipelineState.CANCELLED, "Stopped by you"
+                )
+            )
             worker.finished.connect(lambda: self._workers.remove(worker))
             self._workers.append(worker)
             worker.start()
@@ -1124,6 +1682,239 @@ def run_desktop(container: Container) -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName("Local Assistant")
+    app.setStyle("Fusion")
+    app.setStyleSheet(
+        """
+        * {
+            font-family: "Segoe UI";
+            font-size: 10pt;
+            color: #dce7f3;
+        }
+        QMainWindow, QWidget {
+            background: #09111f;
+        }
+        QToolTip {
+            background: #17243a;
+            color: #f7fbff;
+            border: 1px solid #31415b;
+            padding: 6px;
+        }
+        QTabWidget::pane {
+            border: 0;
+            background: #0c1626;
+        }
+        QTabBar {
+            background: #07101d;
+        }
+        QTabBar::tab {
+            background: transparent;
+            color: #8292a8;
+            min-width: 126px;
+            min-height: 42px;
+            padding: 0 18px;
+            margin: 3px 8px;
+            border-radius: 8px;
+            text-align: left;
+        }
+        QTabBar::tab:hover {
+            background: #111e31;
+            color: #dce7f3;
+        }
+        QTabBar::tab:selected {
+            background: #162742;
+            color: #ffffff;
+            border-left: 3px solid #5a8cff;
+        }
+        #assistantPage {
+            background: #0c1626;
+        }
+        #eyebrow, #sectionLabel {
+            color: #6f92c9;
+            font-size: 8pt;
+            font-weight: 700;
+            letter-spacing: 1px;
+        }
+        #pageTitle {
+            color: #f7fbff;
+            font-size: 25pt;
+            font-weight: 650;
+        }
+        #pageSubtitle {
+            color: #8fa0b7;
+            font-size: 10.5pt;
+        }
+        #statusCard, #composeCard, #activityCard {
+            background: #101d30;
+            border: 1px solid #1e304a;
+            border-radius: 14px;
+        }
+        #statusCard {
+            background: #0f2032;
+        }
+        #statusDot {
+            background: #41d6a3;
+            border-radius: 5px;
+            margin-right: 4px;
+        }
+        #statusDot[state="thinking"], #statusDot[state="transcribing"] {
+            background: #73a5ff;
+        }
+        #statusDot[state="executing"], #statusDot[state="speaking"] {
+            background: #b996ff;
+        }
+        #statusDot[state="listening"] {
+            background: #4fd7ef;
+        }
+        #statusDot[state="awaiting_approval"] {
+            background: #ffbf69;
+        }
+        #statusDot[state="error"], #statusDot[state="cancelled"] {
+            background: #ff6f82;
+        }
+        #assistantStatus {
+            color: #f7fbff;
+            font-size: 12pt;
+            font-weight: 650;
+        }
+        #statusDetail, #elapsedStatus, #activityHint {
+            color: #8496ad;
+        }
+        #elapsedStatus {
+            font-family: "Consolas";
+            font-size: 9pt;
+        }
+        #pipelineProgress {
+            border: 0;
+            background: #1c2b40;
+            border-radius: 2px;
+        }
+        #pipelineProgress::chunk {
+            background: #5a8cff;
+            border-radius: 2px;
+        }
+        QTextEdit, QLineEdit, QComboBox, QListWidget, QTableWidget {
+            background: #0b1524;
+            color: #dce7f3;
+            border: 1px solid #263952;
+            border-radius: 9px;
+            padding: 9px;
+            selection-background-color: #315ea8;
+        }
+        QTextEdit:focus, QLineEdit:focus, QComboBox:focus, QListWidget:focus {
+            border: 1px solid #5a8cff;
+        }
+        #commandInput {
+            background: #0b1627;
+            font-size: 11pt;
+            padding: 14px;
+        }
+        #assistantResponse {
+            background: #0d192a;
+            border: 0;
+            color: #e8f0fa;
+            font-size: 10.5pt;
+            padding: 14px;
+        }
+        #responseBadge {
+            color: #87aef8;
+            background: #172b49;
+            border: 1px solid #28456f;
+            border-radius: 9px;
+            padding: 4px 9px;
+            font-size: 7.5pt;
+            font-weight: 700;
+        }
+        #activityLog {
+            background: transparent;
+            border: 0;
+            padding: 0;
+            color: #aebed1;
+            font-family: "Consolas";
+            font-size: 8.5pt;
+        }
+        #activityLog::item {
+            border-left: 2px solid #2b4262;
+            padding: 8px 8px 12px 12px;
+        }
+        #activityLog::item:selected {
+            background: transparent;
+            color: #dce7f3;
+        }
+        QPushButton {
+            background: #18283e;
+            color: #dce7f3;
+            border: 1px solid #2b405e;
+            border-radius: 8px;
+            padding: 9px 15px;
+            font-weight: 600;
+        }
+        QPushButton:hover {
+            background: #203653;
+            border-color: #3a587f;
+        }
+        QPushButton:pressed {
+            background: #132238;
+        }
+        QPushButton:disabled {
+            background: #121c2a;
+            color: #526175;
+            border-color: #1c293b;
+        }
+        #primaryButton {
+            background: #4d7ff0;
+            color: #ffffff;
+            border: 0;
+            padding: 10px 20px;
+        }
+        #primaryButton:hover {
+            background: #6593f5;
+        }
+        #secondaryButton {
+            background: #14253c;
+        }
+        #dangerButton {
+            background: transparent;
+            color: #ff8b9a;
+            border-color: #633747;
+        }
+        #dangerButton:hover {
+            background: #3a1e2a;
+        }
+        QTableWidget {
+            gridline-color: #1d2d43;
+            alternate-background-color: #0e1a2b;
+        }
+        QHeaderView::section {
+            background: #14233a;
+            color: #93a7c0;
+            border: 0;
+            border-bottom: 1px solid #293b54;
+            padding: 8px;
+            font-weight: 600;
+        }
+        QScrollBar:vertical {
+            background: transparent;
+            width: 10px;
+            margin: 2px;
+        }
+        QScrollBar::handle:vertical {
+            background: #30435d;
+            min-height: 24px;
+            border-radius: 5px;
+        }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            height: 0;
+        }
+        QStatusBar {
+            background: #07101d;
+            color: #8292a8;
+            border-top: 1px solid #18263a;
+        }
+        QMessageBox, QDialog {
+            background: #101b2c;
+        }
+        """
+    )
     window = MainWindow()
     tray = QSystemTrayIcon(QIcon(), app)
     menu = QMenu()

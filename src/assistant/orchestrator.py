@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import urllib.error
 from collections import deque
 from uuid import UUID, uuid4
 
@@ -12,6 +13,7 @@ from assistant.contracts import (
     PipelineEvent,
     PipelineState,
     Response,
+    ResponseType,
     SkillCall,
     Transcript,
 )
@@ -97,7 +99,11 @@ class AssistantOrchestrator:
             },
         )
         if route.clarification:
-            response = Response(display_text=route.clarification, speech_text=route.clarification)
+            response = Response(
+                display_text=route.clarification,
+                speech_text=route.clarification,
+                response_type=ResponseType.CLARIFICATION,
+            )
             return await self._finish(
                 response, ExecutionOutcome(), invoked_by_voice=invoked_by_voice
             )
@@ -106,6 +112,7 @@ class AssistantOrchestrator:
                 response = Response(
                     display_text="I could not match that to an offline core command.",
                     speech_text="I could not match that to an available command.",
+                    response_type=ResponseType.ERROR,
                     severity="warning",
                 )
                 return await self._finish(
@@ -117,11 +124,19 @@ class AssistantOrchestrator:
                 )
             except Exception as exc:
                 logger.warning("Local planner failed", exc_info=exc)
-                detail = str(exc).strip()
+                unavailable = isinstance(
+                    exc,
+                    (
+                        ConnectionError,
+                        TimeoutError,
+                        urllib.error.URLError,
+                    ),
+                )
                 guidance = (
                     " Start Ollama and verify the selected local model is installed."
-                    if detail
-                    else ""
+                    if unavailable
+                    else " The local model returned an invalid planner response. "
+                    "Please try again."
                 )
                 response = Response(
                     display_text=(
@@ -129,6 +144,7 @@ class AssistantOrchestrator:
                         f"{guidance} Deterministic commands still work."
                     ),
                     speech_text="The local planner is unavailable.",
+                    response_type=ResponseType.ERROR,
                     severity="warning",
                 )
                 return await self._finish(
@@ -139,6 +155,7 @@ class AssistantOrchestrator:
             response = Response(
                 display_text=intent.arguments["text"],
                 speech_text=intent.arguments["text"],
+                response_type=ResponseType.ANSWER,
                 severity="warning" if intent.name == "conversation.reject" else "info",
             )
             self.history.add(
@@ -153,7 +170,11 @@ class AssistantOrchestrator:
             )
         if intent.name == "control.cancel":
             await self.cancel()
-            response = Response(display_text="Cancelled.", speech_text="Cancelled.")
+            response = Response(
+                display_text="Cancelled.",
+                speech_text="Cancelled.",
+                response_type=ResponseType.CONTROL,
+            )
             return await self._finish(
                 response, ExecutionOutcome(), invoked_by_voice=invoked_by_voice
             )
@@ -162,6 +183,7 @@ class AssistantOrchestrator:
             response = Response(
                 display_text="I forgot the current session context.",
                 speech_text="Session context cleared.",
+                response_type=ResponseType.CONTROL,
             )
             return await self._finish(
                 response, ExecutionOutcome(), invoked_by_voice=invoked_by_voice
@@ -196,6 +218,7 @@ class AssistantOrchestrator:
             response = Response(
                 display_text=f"I could not prepare that command: {exc}",
                 speech_text="I could not prepare that command.",
+                response_type=ResponseType.ERROR,
                 severity="warning",
             )
             return await self._finish(
@@ -220,6 +243,7 @@ class AssistantOrchestrator:
                     + "\n\nChoose Grant Permission to approve this request."
                 ),
                 speech_text="I need your permission. Please review the request on screen.",
+                response_type=ResponseType.PERMISSION,
                 severity="warning",
                 speak=True,
             )
@@ -227,6 +251,7 @@ class AssistantOrchestrator:
             response = Response(
                 display_text=outcome.confirmation.exact_action,
                 speech_text="Please review and confirm the action shown on screen.",
+                response_type=ResponseType.CONFIRMATION,
                 severity="warning",
                 speak=True,
             )
@@ -238,7 +263,11 @@ class AssistantOrchestrator:
                 hide_sensitive_display=self.hide_sensitive_display,
             )
         else:
-            response = Response(display_text="No action was performed.", severity="warning")
+            response = Response(
+                display_text="No action was performed.",
+                response_type=ResponseType.STATUS,
+                severity="warning",
+            )
         self.history.add(
             correlation_id,
             response.display_text,
@@ -307,6 +336,7 @@ class AssistantOrchestrator:
                 speech_text=(
                     "Please repeat the exact target. I did not perform the action."
                 ),
+                response_type=ResponseType.CLARIFICATION,
                 severity="warning",
                 speak=True,
             )
@@ -397,6 +427,7 @@ class AssistantOrchestrator:
             response = Response(
                 display_text=f"Speech recognition is unavailable: {exc}",
                 speech_text=None,
+                response_type=ResponseType.ERROR,
                 severity="error",
             )
             return await self._finish(
@@ -408,6 +439,7 @@ class AssistantOrchestrator:
             response = Response(
                 display_text="No speech was detected.",
                 speech_text="I did not hear anything.",
+                response_type=ResponseType.STATUS,
                 severity="warning",
             )
             return await self._finish(
