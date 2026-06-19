@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from assistant.bootstrap import build_container
 from assistant.contracts import (
+    Intent,
     PipelineEvent,
     PipelineState,
     ResponseType,
@@ -11,6 +12,8 @@ from assistant.contracts import (
     Transcript,
     WordTimestamp,
 )
+from assistant.language.planner import InvalidPlannerResponse
+from assistant.storage.database import HistoryRow
 
 
 class FakeTTS:
@@ -41,10 +44,16 @@ class BrokenPlanner:
         pass
 
 
+class SlowPlanner:
+    async def plan(self, text, recent_context=()):
+        raise TimeoutError("planner timed out")
+
+    async def cancel(self):
+        pass
+
+
 class AnsweringPlanner:
     async def plan(self, text, recent_context=()):
-        from assistant.contracts import Intent
-
         return Intent(
             name="conversation.answer",
             arguments={"text": "A direct answer."},
@@ -59,6 +68,39 @@ class AnsweringPlanner:
 class InvalidPlanner:
     async def plan(self, text, recent_context=()):
         raise ValidationError("invalid structured response")
+
+    async def cancel(self):
+        pass
+
+
+class InvalidPlannerWithResponse:
+    async def plan(self, text, recent_context=()):
+        raise InvalidPlannerResponse(
+            "'confidence' is a required property",
+            {
+                "disposition": "answer",
+                "skill_id": "",
+                "arguments": {},
+                "answer": "I can help with that.",
+            },
+        )
+
+    async def cancel(self):
+        pass
+
+
+class CapturingPlanner:
+    def __init__(self):
+        self.calls = []
+
+    async def plan(self, text, recent_context=()):
+        self.calls.append((text, recent_context))
+        return Intent(
+            name="conversation.answer",
+            arguments={"text": "Use Settings to add an application alias."},
+            confidence=0.9,
+            source="llm",
+        )
 
     async def cancel(self):
         pass
@@ -169,6 +211,36 @@ async def test_invalid_planner_output_does_not_claim_ollama_is_stopped(settings)
 
 
 @pytest.mark.asyncio
+async def test_invalid_planner_output_includes_debug_response(settings):
+    container = build_container(settings)
+    container.orchestrator.planner = InvalidPlannerWithResponse()
+
+    response, outcome = await container.orchestrator.handle_text(
+        "do something unmatched"
+    )
+
+    assert "invalid planner response" in response.display_text
+    assert "Debug invalid planner response" in response.display_text
+    assert '"answer": "I can help with that."' in response.display_text
+    assert "Validation error: 'confidence' is a required property" in response.display_text
+    assert outcome.result is None
+
+
+@pytest.mark.asyncio
+async def test_planner_timeout_does_not_claim_ollama_is_stopped(settings):
+    container = build_container(settings)
+    container.orchestrator.planner = SlowPlanner()
+
+    response, outcome = await container.orchestrator.handle_text(
+        "do something unmatched"
+    )
+
+    assert "did not respond before the planner timeout" in response.display_text
+    assert "Start Ollama" not in response.display_text
+    assert outcome.result is None
+
+
+@pytest.mark.asyncio
 async def test_conversational_answer_does_not_execute_a_skill(settings):
     container = build_container(settings)
     container.orchestrator.planner = AnsweringPlanner()
@@ -185,6 +257,59 @@ async def test_skill_preparation_error_is_returned_as_response(settings):
         "open application not-registered"
     )
     assert response.severity == "warning"
-    assert response.response_type == ResponseType.ERROR
-    assert "not registered" in response.display_text
-    assert outcome.result is None
+    assert response.response_type == ResponseType.CLARIFICATION
+    assert "registered" in response.display_text
+    assert outcome.registration_requests
+    assert outcome.registration_requests[0].application == "not-registered"
+
+
+@pytest.mark.asyncio
+async def test_preparation_error_is_remembered_for_follow_up(settings):
+    container = build_container(settings)
+
+    response, _ = await container.orchestrator.handle_text("open discord")
+    assert "registered" in response.display_text
+
+    planner = CapturingPlanner()
+    container.orchestrator.planner = planner
+    follow_up, _ = await container.orchestrator.handle_text(
+        "how do I register an application?"
+    )
+
+    assert "Applications tab" in follow_up.display_text
+    assert not planner.calls
+    recent_context = tuple(container.orchestrator._session_context)
+    assert recent_context[-2]["request"] == "open discord"
+    assert recent_context[-2]["intent"] == "windows.launcher"
+    assert recent_context[-2]["outcome"] == "awaiting_registration"
+    assert "discord" in recent_context[-2]["response"]
+    with container.database.session() as session:
+        rows = session.query(HistoryRow).order_by(HistoryRow.id).all()
+        assert "discord" in rows[0].response_text
+
+
+@pytest.mark.asyncio
+async def test_unregistered_application_returns_registration_request(settings):
+    container = build_container(settings)
+
+    response, outcome = await container.orchestrator.handle_text("open discord")
+
+    assert response.response_type == ResponseType.CLARIFICATION
+    assert outcome.registration_requests
+    assert outcome.registration_requests[0].call.skill_id == "windows.launcher"
+    assert outcome.registration_requests[0].application == "discord"
+
+
+@pytest.mark.asyncio
+async def test_open_registered_application_requests_permission(settings, tmp_path):
+    container = build_container(settings)
+    target = tmp_path / "youtube.exe"
+    target.write_bytes(b"")
+    container.aliases.set("application", "youtube", str(target))
+
+    response, outcome = await container.orchestrator.handle_text("open youtube")
+
+    assert response.response_type == ResponseType.PERMISSION
+    assert outcome.permission_requests
+    assert outcome.permission_requests[0].call.skill_id == "windows.launcher"
+    assert outcome.permission_requests[0].scope.capability == "process.launch"

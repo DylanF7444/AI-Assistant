@@ -15,6 +15,12 @@ class RouteResult:
 
 
 class DeterministicRouter:
+    APP_REGISTRATION_HELP = (
+        "Open the Applications tab, choose Register Application, select the app's "
+        ".exe file, and give it the name you want to use. After that you can say "
+        "\"open <name>\" and I will use that registered path."
+    )
+
     CONTROL = {
         "cancel": "control.cancel",
         "stop": "control.cancel",
@@ -75,6 +81,20 @@ class DeterministicRouter:
                     arguments={"include_skills": True},
                     confidence=1,
                     source="deterministic",
+                )
+            )
+        if re.fullmatch(
+            r"(?:how do i |how can i |where do i |where can i )?"
+            r"(?:register|add) (?:an? |the )?(?:application|app)"
+            r"(?: so you can open it(?: for me)?| for launching| to open)?",
+            routed,
+        ):
+            return RouteResult(
+                Intent(
+                    name="conversation.answer",
+                    arguments={"text": self.APP_REGISTRATION_HELP},
+                    confidence=0.99,
+                    source="rule",
                 )
             )
         if match := re.fullmatch(
@@ -206,6 +226,42 @@ class DeterministicRouter:
                     source="rule",
                 )
             )
+        if match := re.fullmatch(r"(?:search the web|web search) for (.+)", routed):
+            return RouteResult(
+                Intent(
+                    name="web.search",
+                    arguments={"query": match.group(1), "count": 5},
+                    confidence=0.99,
+                    source="rule",
+                )
+            )
+        if match := re.fullmatch(r"(?:read|fetch|open) (https://\S+)", text.strip(), re.I):
+            return RouteResult(
+                Intent(
+                    name="web.fetch",
+                    arguments={"url": match.group(1), "max_characters": 12000},
+                    confidence=0.99,
+                    source="rule",
+                )
+            )
+        if match := re.fullmatch(r"ask (chatgpt|codex|openai|claude) (.+)", routed):
+            provider = {
+                "claude": "anthropic",
+                "codex": "codex",
+            }.get(match.group(1), "openai")
+            arguments = {
+                "provider": provider,
+                "question": match.group(2),
+                "max_tokens": 1500,
+            }
+            return RouteResult(
+                Intent(
+                    name="cloud.ask",
+                    arguments=arguments,
+                    confidence=0.99,
+                    source="rule",
+                )
+            )
         if match := re.fullmatch(r"(?:play|pause|play pause)(?: the)? music", routed):
             return RouteResult(
                 Intent(
@@ -296,6 +352,15 @@ class DeterministicRouter:
                     name="windows.launcher",
                     arguments={"application": match.group(1)},
                     confidence=0.98,
+                    source="rule",
+                )
+            )
+        if match := re.fullmatch(r"(?:open|launch|start) ([a-z0-9][a-z0-9 ._-]*)", routed):
+            return RouteResult(
+                Intent(
+                    name="windows.launcher",
+                    arguments={"application": match.group(1).strip()},
+                    confidence=0.9,
                     source="rule",
                 )
             )

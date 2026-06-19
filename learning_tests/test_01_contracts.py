@@ -22,11 +22,11 @@ def test_contract_defaults_make_related_objects_easy_to_connect():
 
 
 def test_contract_validation_rejects_impossible_confidence():
-    """Pydantic enforces the 0..1 confidence boundary at construction time."""
+    """Pydantic enforces the confidence boundary after percent normalization."""
     with pytest.raises(ValidationError):
         Intent(
             name="core.help",
-            confidence=1.5,
+            confidence=101,
             source="rule",
         )
 

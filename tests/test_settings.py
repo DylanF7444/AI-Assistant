@@ -16,3 +16,8 @@ def test_persisted_settings_load_on_restart(settings):
     assert second.settings.speech_mode == "never"
     assert second.settings.stt_model == "base.en"
     assert second.settings.retain_transcripts_days == 7
+
+
+def test_duckduckgo_is_the_default_search_provider(settings):
+    container = build_container(settings)
+    assert container.settings.search_provider == "duckduckgo"

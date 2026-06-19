@@ -26,6 +26,7 @@ from assistant.contracts import (
 from assistant.events import EventBus
 from assistant.policy.confirmations import ConfirmationManager
 from assistant.policy.permissions import PermissionManager
+from assistant.skills.base import ApplicationRegistrationRequired
 from assistant.skills.registry import SkillRegistry
 from assistant.storage.database import AuditStore, MetricsStore
 
@@ -39,11 +40,18 @@ class PermissionGrantRequest:
 
 
 @dataclass(frozen=True)
+class ApplicationRegistrationRequest:
+    call: SkillCall
+    application: str
+
+
+@dataclass(frozen=True)
 class ExecutionOutcome:
     result: SkillResult | None = None
     confirmation: ConfirmationRequest | None = None
     call: SkillCall | None = None
     permission_requests: tuple[PermissionGrantRequest, ...] = ()
+    registration_requests: tuple[ApplicationRegistrationRequest, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -112,8 +120,50 @@ class ExecutionEngine:
                     error=SkillError(code="invalid_call", message=str(exc)),
                 )
             )
-        required_permissions = skill.required_permissions(call)
-        checks = tuple(skill.permission_checks(call))
+        try:
+            required_permissions = skill.required_permissions(call)
+            checks = tuple(skill.permission_checks(call))
+        except ApplicationRegistrationRequired as exc:
+            await self.events.publish(
+                PipelineEvent(
+                    correlation_id=call.correlation_id,
+                    state=PipelineState.AWAITING_APPROVAL,
+                    message="Application registration is required before this action can run.",
+                    data={
+                        "registrations": [
+                            {
+                                "skill_id": call.skill_id,
+                                "application": exc.application,
+                            }
+                        ]
+                    },
+                )
+            )
+            return ExecutionOutcome(
+                result=SkillResult(
+                    status=ResultStatus.DENIED,
+                    summary="Application registration is required before this action can run.",
+                    error=SkillError(
+                        code="application_not_registered",
+                        message=str(exc),
+                        recoverable=True,
+                    ),
+                    data={
+                        "missing_registrations": [
+                            {
+                                "skill_id": call.skill_id,
+                                "application": exc.application,
+                            }
+                        ]
+                    },
+                ),
+                call=call,
+                registration_requests=(
+                    ApplicationRegistrationRequest(
+                        call=call, application=exc.application
+                    ),
+                ),
+            )
         decisions = [
             self.permissions.authorize(check_call, scopes, consume_once=False)
             for check_call, scopes in checks

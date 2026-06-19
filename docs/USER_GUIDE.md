@@ -51,6 +51,15 @@ outbound connections, including isolated skill workers. MQTT, Home Assistant,
 Wyoming, and HTTPS model download are optional network features and must be
 configured explicitly.
 
+Web and cloud-model skills are optional. Disable the global offline lock to use
+DuckDuckGo Instant Answer for keyless web searches. DuckDuckGo is the default;
+Brave Search remains selectable in Settings and requires a Brave Search API
+key. Configure an OpenAI or Anthropic API key to ask ChatGPT/Codex-capable
+OpenAI models or Claude. API keys are encrypted with Windows DPAPI and are not
+included in settings exports. Each invocation still requires the `network`
+permission. Supported commands include `search the web for ...`, `read
+https://...`, `ask ChatGPT ...`, `ask Codex ...`, and `ask Claude ...`.
+
 ## Skills and diagnostics
 
 Install only signed skill packages from trusted publishers. Updates that add a

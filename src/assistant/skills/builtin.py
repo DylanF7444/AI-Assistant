@@ -21,6 +21,7 @@ from assistant.contracts import (
     SkillResult,
 )
 from assistant.skills.base import Skill
+from assistant.skills.base import ApplicationRegistrationRequired
 from assistant.windows.adapters import (
     ApplicationAdapter,
     ClipboardAdapter,
@@ -299,9 +300,7 @@ class LauncherSkill(Skill):
     def _registered_path(self, args: LaunchInput) -> str:
         registered = self.resolver(args.application) if self.resolver else None
         if registered is None:
-            raise ValueError(
-                f"Application is not registered: {args.application}"
-            )
+            raise ApplicationRegistrationRequired(args.application)
         if args.registered_path and (
             Path(args.registered_path).resolve() != Path(registered).resolve()
         ):

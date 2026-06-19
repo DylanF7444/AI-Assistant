@@ -16,6 +16,12 @@ from assistant.contracts import (
 )
 
 
+class ApplicationRegistrationRequired(ValueError):
+    def __init__(self, application: str) -> None:
+        self.application = application
+        super().__init__(f"Application is not registered: {application}")
+
+
 class Skill(ABC):
     manifest: SkillManifest
     input_model: type[BaseModel]

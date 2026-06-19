@@ -22,12 +22,18 @@ from assistant.storage.database import ItemRow, SettingsStore
 from assistant.storage.macros import MacroDefinition, MacroStep
 from assistant.storage.history import HistoryStore
 from assistant.audio.capture import enumerate_devices
+from assistant.storage.secrets import SecretVault
 
 
 def run_desktop(container: Container) -> int:
     try:
-        from PySide6.QtCore import QObject, QSettings, Qt, QThread, QTimer, Signal
-        from PySide6.QtGui import QAction, QIcon, QKeySequence, QShortcut
+        from PySide6.QtCore import QObject, QSize, QSettings, Qt, QThread, QTimer, Signal
+        from PySide6.QtGui import (
+            QAction,
+            QIcon,
+            QKeySequence,
+            QShortcut,
+        )
         from PySide6.QtWidgets import (
             QApplication,
             QCheckBox,
@@ -47,6 +53,10 @@ def run_desktop(container: Container) -> int:
             QPushButton,
             QSizePolicy,
             QSystemTrayIcon,
+            QStyle,
+            QStyleOptionTab,
+            QStylePainter,
+            QTabBar,
             QTabWidget,
             QTableWidget,
             QTableWidgetItem,
@@ -61,6 +71,7 @@ def run_desktop(container: Container) -> int:
 
     class AsyncWorker(QThread):
         complete = Signal(object)
+        cancelled = Signal()
         failed = Signal(str)
 
         def __init__(self, coroutine: Any) -> None:
@@ -70,6 +81,8 @@ def run_desktop(container: Container) -> int:
         def run(self) -> None:
             try:
                 self.complete.emit(asyncio.run(self.coroutine))
+            except asyncio.CancelledError:
+                self.cancelled.emit()
             except Exception as error:
                 self.failed.emit(str(error))
 
@@ -77,6 +90,19 @@ def run_desktop(container: Container) -> int:
         push_to_talk = Signal()
         cancel = Signal()
         pipeline_event = Signal(object)
+
+    class HorizontalTabBar(QTabBar):
+        def tabSizeHint(self, index: int) -> QSize:
+            size = super().tabSizeHint(index)
+            return QSize(size.height(), size.width())
+
+        def paintEvent(self, event) -> None:
+            painter = QStylePainter(self)
+            option = QStyleOptionTab()
+            for index in range(self.count()):
+                self.initStyleOption(option, index)
+                option.shape = QTabBar.Shape.RoundedNorth
+                painter.drawControl(QStyle.ControlElement.CE_TabBarTab, option)
 
     class MainWindow(QMainWindow):
         def __init__(self) -> None:
@@ -96,6 +122,7 @@ def run_desktop(container: Container) -> int:
             self.hotkey_bridge.pipeline_event.connect(self._handle_pipeline_event)
             container.events.add_listener(self.hotkey_bridge.pipeline_event.emit)
             tabs = QTabWidget()
+            tabs.setTabBar(HorizontalTabBar())
             tabs.addTab(self._command_tab(), "Assistant")
             tabs.addTab(self._active_scripts_tab(), "Active Scripts")
             tabs.addTab(self._skills_tab(), "Skills")
@@ -831,6 +858,44 @@ def run_desktop(container: Container) -> int:
             self.setting_offline.setChecked(container.settings.offline_lock)
             self.setting_stt = QLineEdit(container.settings.stt_model)
             self.setting_llm = QLineEdit(container.settings.llm_model)
+            self.setting_openai_model = QLineEdit(container.settings.openai_model)
+            self.setting_openai_codex_model = QLineEdit(
+                container.settings.openai_codex_model
+            )
+            self.setting_anthropic_model = QLineEdit(
+                container.settings.anthropic_model
+            )
+            vault = SecretVault(container.settings.data_dir / "secrets")
+            self.setting_openai_key = QLineEdit()
+            self.setting_openai_key.setEchoMode(QLineEdit.EchoMode.Password)
+            self.setting_openai_key.setPlaceholderText(
+                "Stored; enter a new key to replace"
+                if vault.has("openai")
+                else "OpenAI API key"
+            )
+            self.setting_anthropic_key = QLineEdit()
+            self.setting_anthropic_key.setEchoMode(QLineEdit.EchoMode.Password)
+            self.setting_anthropic_key.setPlaceholderText(
+                "Stored; enter a new key to replace"
+                if vault.has("anthropic")
+                else "Anthropic API key"
+            )
+            self.setting_brave_key = QLineEdit()
+            self.setting_brave_key.setEchoMode(QLineEdit.EchoMode.Password)
+            self.setting_brave_key.setPlaceholderText(
+                "Stored; enter a new key to replace"
+                if vault.has("brave")
+                else "Brave Search API key"
+            )
+            self.setting_search_provider = QComboBox()
+            self.setting_search_provider.addItem(
+                "DuckDuckGo Instant Answer", "duckduckgo"
+            )
+            self.setting_search_provider.addItem("Brave Search", "brave")
+            selected = self.setting_search_provider.findData(
+                container.settings.search_provider
+            )
+            self.setting_search_provider.setCurrentIndex(max(0, selected))
             self.setting_piper_executable = QLineEdit(
                 str(container.settings.piper_executable or "")
             )
@@ -877,6 +942,13 @@ def run_desktop(container: Container) -> int:
             form.addRow("Input device", self.setting_input)
             form.addRow("STT model", self.setting_stt)
             form.addRow("Local LLM model", self.setting_llm)
+            form.addRow("OpenAI model", self.setting_openai_model)
+            form.addRow("OpenAI Codex model", self.setting_openai_codex_model)
+            form.addRow("OpenAI API key", self.setting_openai_key)
+            form.addRow("Anthropic model", self.setting_anthropic_model)
+            form.addRow("Anthropic API key", self.setting_anthropic_key)
+            form.addRow("Web search provider", self.setting_search_provider)
+            form.addRow("Brave Search API key", self.setting_brave_key)
             form.addRow("Piper executable", self.setting_piper_executable)
             form.addRow("Piper voice model", self.setting_piper_model)
             form.addRow("Speech mode", self.setting_speech)
@@ -898,6 +970,12 @@ def run_desktop(container: Container) -> int:
                     "audio_input_device": self.setting_input.currentData(),
                     "stt_model": self.setting_stt.text().strip(),
                     "llm_model": self.setting_llm.text().strip(),
+                    "openai_model": self.setting_openai_model.text().strip(),
+                    "openai_codex_model": (
+                        self.setting_openai_codex_model.text().strip()
+                    ),
+                    "anthropic_model": self.setting_anthropic_model.text().strip(),
+                    "search_provider": self.setting_search_provider.currentData(),
                     "piper_executable": self.setting_piper_executable.text().strip()
                     or None,
                     "piper_model": self.setting_piper_model.text().strip() or None,
@@ -933,6 +1011,16 @@ def run_desktop(container: Container) -> int:
             SettingsStore(container.database).set(
                 "application_settings", persisted
             )
+            vault = SecretVault(validated.data_dir / "secrets")
+            for name, field in (
+                ("openai", self.setting_openai_key),
+                ("anthropic", self.setting_anthropic_key),
+                ("brave", self.setting_brave_key),
+            ):
+                if field.text().strip():
+                    vault.set(name, field.text())
+                    field.clear()
+                    field.setPlaceholderText("Stored; enter a new key to replace")
             container.settings = validated
             container.orchestrator.speech_mode = validated.speech_mode
             container.orchestrator.response_detail = validated.response_detail
@@ -1277,20 +1365,27 @@ def run_desktop(container: Container) -> int:
                 self.application_list.addItem(f"{name} | {path}")
 
         def _register_application(self) -> None:
+            self._register_application_alias()
+
+        def _register_application_alias(
+            self, requested_name: str | None = None
+        ) -> bool:
             path, _ = QFileDialog.getOpenFileName(
                 self, "Select Application", "", "Applications (*.exe)"
             )
             if not path:
-                return
+                return False
             name, ok = QInputDialog.getText(
                 self,
                 "Application Name",
                 "Spoken/display name",
-                text=Path(path).stem,
+                text=requested_name or Path(path).stem,
             )
             if ok and name.strip():
                 container.aliases.set("application", name, str(Path(path).resolve()))
                 self._reload_applications()
+                return True
+            return False
 
         def _remove_application(self) -> None:
             row = self.application_list.currentRow()
@@ -1452,6 +1547,7 @@ def run_desktop(container: Container) -> int:
             )
             worker = AsyncWorker(container.orchestrator.handle_text(text))
             worker.complete.connect(self._show_result)
+            worker.cancelled.connect(self._show_cancelled)
             worker.failed.connect(self._show_error)
             worker.finished.connect(lambda: self._workers.remove(worker))
             self._workers.append(worker)
@@ -1460,7 +1556,9 @@ def run_desktop(container: Container) -> int:
         def _show_result(self, payload: Any) -> None:
             response, outcome = payload
             self._display_response(response)
-            if outcome.permission_requests:
+            if outcome.registration_requests:
+                self._request_registrations(outcome)
+            elif outcome.permission_requests:
                 self._request_permissions(outcome)
             elif outcome.confirmation:
                 self._request_confirmation(outcome)
@@ -1552,11 +1650,55 @@ def run_desktop(container: Container) -> int:
             self._workers.append(worker)
             worker.start()
 
-        def _show_continued_outcome(self, outcome: Any) -> None:
-            if outcome.permission_requests:
-                self.response.setPlainText(
-                    "The command still needs permission for another capability."
+        def _request_registrations(self, outcome: Any) -> None:
+            request = outcome.registration_requests[0]
+            dialog = QMessageBox(self)
+            dialog.setWindowTitle("Application Registration Required")
+            dialog.setIcon(QMessageBox.Icon.Warning)
+            dialog.setText("This command needs an application registered first.")
+            dialog.setInformativeText(
+                f"Register an executable for '{request.application}' to continue."
+            )
+            register_button = dialog.addButton(
+                "Register Application", QMessageBox.ButtonRole.AcceptRole
+            )
+            dialog.addButton("Not Now", QMessageBox.ButtonRole.RejectRole)
+            dialog.exec()
+            if dialog.clickedButton() is not register_button:
+                self._set_pipeline_state(
+                    PipelineState.CANCELLED, "Application was not registered"
                 )
+                return
+            if not self._register_application_alias(request.application):
+                self._set_pipeline_state(
+                    PipelineState.CANCELLED, "Application was not registered"
+                )
+                return
+            self._set_pipeline_state(
+                PipelineState.THINKING, "Preparing the registered application"
+            )
+            worker = AsyncWorker(container.engine.prepare(outcome.call))
+            worker.complete.connect(self._show_continued_outcome)
+            worker.failed.connect(self._show_error)
+            worker.finished.connect(lambda: self._workers.remove(worker))
+            self._workers.append(worker)
+            worker.start()
+
+        def _show_continued_outcome(self, outcome: Any) -> None:
+            if outcome.registration_requests:
+                message = "The command still needs an application registered."
+                self.response.setPlainText(message)
+                self._print_to_terminal(message)
+                self._set_response_type(ResponseType.CLARIFICATION)
+                self._set_pipeline_state(
+                    PipelineState.AWAITING_APPROVAL,
+                    "Application registration is required",
+                )
+                self._request_registrations(outcome)
+            elif outcome.permission_requests:
+                message = "The command still needs permission for another capability."
+                self.response.setPlainText(message)
+                self._print_to_terminal(message)
                 self._set_response_type(ResponseType.PERMISSION)
                 self._set_pipeline_state(
                     PipelineState.AWAITING_APPROVAL,
@@ -1631,7 +1773,16 @@ def run_desktop(container: Container) -> int:
 
         def _display_response(self, response: Any) -> None:
             self.response.setPlainText(response.display_text)
+            error = (
+                response.response_type == ResponseType.ERROR
+                or response.severity == "error"
+            )
+            self._print_to_terminal(response.display_text, error=error)
             self._set_response_type(response.response_type)
+
+        @staticmethod
+        def _print_to_terminal(message: str, *, error: bool = False) -> None:
+            print(message, file=sys.stderr if error else sys.stdout, flush=True)
 
         def _set_response_type(self, response_type: ResponseType) -> None:
             labels = {
@@ -1647,9 +1798,13 @@ def run_desktop(container: Container) -> int:
             self.response_type.setText(labels[response_type].upper())
 
         def _show_error(self, error: str) -> None:
+            self._print_to_terminal(f"Assistant error: {error}", error=True)
             self._set_response_type(ResponseType.ERROR)
             self._set_pipeline_state(PipelineState.ERROR, error)
             QMessageBox.critical(self, "Assistant Error", error)
+
+        def _show_cancelled(self) -> None:
+            self._set_pipeline_state(PipelineState.CANCELLED, "Stopped by you")
 
         def cancel(self) -> None:
             async def cancel_all():

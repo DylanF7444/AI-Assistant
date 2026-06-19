@@ -5,13 +5,21 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 CONTRACT_VERSION = "1.0"
 
 
 def utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def normalize_confidence(value: Any) -> Any:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and 1 < value <= 100:
+        return value / 100
+    return value
 
 
 class StrictModel(BaseModel):
@@ -74,6 +82,11 @@ class WordTimestamp(StrictModel):
     end_seconds: float = Field(ge=0)
     confidence: float | None = Field(default=None, ge=0, le=1)
 
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _normalize_confidence(cls, value: Any) -> Any:
+        return normalize_confidence(value)
+
 
 class Transcript(StrictModel):
     session_id: UUID
@@ -84,6 +97,11 @@ class Transcript(StrictModel):
     words: tuple[WordTimestamp, ...] = ()
     is_final: bool = True
 
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _normalize_confidence(cls, value: Any) -> Any:
+        return normalize_confidence(value)
+
 
 class Intent(StrictModel):
     name: str
@@ -92,6 +110,11 @@ class Intent(StrictModel):
     source: Literal["deterministic", "rule", "classifier", "llm"]
     ambiguous: bool = False
     ambiguity_reasons: tuple[str, ...] = ()
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _normalize_confidence(cls, value: Any) -> Any:
+        return normalize_confidence(value)
 
 
 class PermissionScope(StrictModel):

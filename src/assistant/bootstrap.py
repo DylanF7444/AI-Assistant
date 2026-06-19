@@ -38,6 +38,7 @@ from assistant.skills.windows import (
     WindowsSettingSkill,
 )
 from assistant.skills.macros import MacroSkill
+from assistant.skills.network import CloudAskSkill, WebFetchSkill, WebSearchSkill
 from assistant.skills.diagnostic import DiagnosticSkill
 from assistant.storage.database import AuditStore, Database, SettingsStore
 from assistant.storage.database import MetricsStore
@@ -46,11 +47,13 @@ from assistant.storage.history import HistoryStore
 from assistant.storage.macros import MacroStore
 from assistant.storage.aliases import AliasStore
 from assistant.storage.knowledge import KnowledgeBaseStore
+from assistant.storage.secrets import SecretVault
 from assistant.stt.faster_whisper import FasterWhisperProvider
 from assistant.tts.piper import PiperProvider
 from assistant.models import ModelManager
 from assistant.language.ollama import OllamaProvider
 from assistant.language.planner import LocalPlanner, SkillRetriever
+from assistant.integrations.web import CloudModelClient, WebClient
 from assistant.windows.adapters import (
     LocalFileSystemAdapter,
     WindowsApplicationAdapter,
@@ -84,34 +87,32 @@ class Container:
     knowledge_bases: KnowledgeBaseStore
 
 
-def build_container(settings: Settings | None = None) -> Container:
-    settings = settings or Settings()
-    database = Database(settings.database_url)
-    database.migrate()
+def _decode_trusted_keys(encoded_keys: dict[str, str]) -> dict[str, bytes]:
+    return {
+        key_id: base64.b64decode(value)
+        for key_id, value in encoded_keys.items()
+    }
+
+
+def _settings_with_persisted_values(settings: Settings, database: Database) -> Settings:
     persisted = SettingsStore(database).get("application_settings", {})
-    if persisted:
-        settings = Settings.model_validate(
-            {**settings.model_dump(), **persisted, "data_dir": settings.data_dir}
-        )
-    configure_logging(
-        settings.data_dir,
-        developer_mode=settings.profile == "development",
+    if not persisted:
+        return settings
+    return Settings.model_validate(
+        {**settings.model_dump(), **persisted, "data_dir": settings.data_dir}
     )
-    audit = AuditStore(database)
-    metrics = MetricsStore(database)
-    permissions = PermissionManager(database, audit)
-    aliases = AliasStore(database)
-    knowledge_bases = KnowledgeBaseStore(database)
-    registry = SkillRegistry(
-        settings.data_dir / "skills",
-        trusted_signing_keys={
-            key_id: base64.b64decode(value)
-            for key_id, value in settings.trusted_skill_keys.items()
-        },
-    )
+
+
+def _register_core_skills(registry: SkillRegistry) -> None:
     registry.register(TimerSkill())
     registry.register(DateTimeSkill())
     registry.register(CalculatorSkill())
+
+
+def _register_windows_skills(
+    registry: SkillRegistry,
+    aliases: AliasStore,
+) -> None:
     filesystem = LocalFileSystemAdapter()
     applications = WindowsApplicationAdapter()
     registry.register(FileSearchSkill(filesystem))
@@ -129,10 +130,63 @@ def build_container(settings: Settings | None = None) -> Container:
     registry.register(ProcessSkill(WindowsProcessAdapter()))
     registry.register(InputAutomationSkill(WindowsInputAutomationAdapter()))
     registry.register(WindowsSettingSkill(LocalWindowsSettingsAdapter()))
+
+
+def _register_productivity_skills(
+    registry: SkillRegistry, database: Database
+) -> None:
     registry.register(TaskSkill(database))
     registry.register(NoteSkill(database))
     registry.register(ReminderSkill(database))
     registry.register(UnitConversionSkill())
+
+
+def _register_network_skills(
+    registry: SkillRegistry,
+    settings: Settings,
+    secret_vault: SecretVault,
+) -> None:
+    web_client = WebClient()
+    registry.register(
+        WebSearchSkill(web_client, secret_vault.get, settings.search_provider)
+    )
+    registry.register(WebFetchSkill(web_client))
+    registry.register(
+        CloudAskSkill(
+            CloudModelClient(),
+            secret_vault.get,
+            {
+                "openai": settings.openai_model,
+                "codex": settings.openai_codex_model,
+                "anthropic": settings.anthropic_model,
+            },
+        )
+    )
+
+
+def build_container(settings: Settings | None = None) -> Container:
+    settings = settings or Settings()
+    database = Database(settings.database_url)
+    database.migrate()
+    settings = _settings_with_persisted_values(settings, database)
+    configure_logging(
+        settings.data_dir,
+        developer_mode=settings.profile == "development",
+    )
+    audit = AuditStore(database)
+    metrics = MetricsStore(database)
+    permissions = PermissionManager(database, audit)
+    aliases = AliasStore(database)
+    knowledge_bases = KnowledgeBaseStore(database)
+    secret_vault = SecretVault(settings.data_dir / "secrets")
+    registry = SkillRegistry(
+        settings.data_dir / "skills",
+        trusted_signing_keys=_decode_trusted_keys(settings.trusted_skill_keys),
+    )
+    _register_core_skills(registry)
+    _register_windows_skills(registry, aliases)
+    _register_productivity_skills(registry, database)
+    _register_network_skills(registry, settings, secret_vault)
     macro_store = MacroStore(database)
     registry.register(MacroSkill(macro_store, registry, permissions, audit))
     registry.register(HelpSkill(registry.list))
@@ -148,7 +202,12 @@ def build_container(settings: Settings | None = None) -> Container:
         else None
     )
     planner = (
-        LocalPlanner(llm, SkillRetriever(registry.list), knowledge_bases)
+        LocalPlanner(
+            llm,
+            SkillRetriever(registry.list),
+            knowledge_bases,
+            timeout_seconds=settings.planner_timeout_seconds,
+        )
         if llm
         else None
     )
@@ -185,10 +244,7 @@ def build_container(settings: Settings | None = None) -> Container:
     )
     model_manager = ModelManager(
         settings.data_dir / "models",
-        {
-            key_id: base64.b64decode(value)
-            for key_id, value in settings.trusted_model_keys.items()
-        },
+        _decode_trusted_keys(settings.trusted_model_keys),
     )
     tts = None
     if (

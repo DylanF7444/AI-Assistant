@@ -21,6 +21,10 @@ from assistant.router.normalization import normalize_text, spoken_number
         ("help!", "core.help"),
         ("what time?", "core.datetime"),
         ("calculate 2 plus 3.", "core.calculator"),
+        (
+            "How do I register an application so you can open it for me",
+            "conversation.answer",
+        ),
     ],
 )
 def test_deterministic_routes(text, name):
@@ -38,6 +42,15 @@ def test_unknown_request_needs_local_planner():
     result = DeterministicRouter().route("organize these files for me")
     assert result.needs_llm
     assert result.intent.ambiguous
+
+
+def test_application_registration_help_does_not_need_local_planner():
+    result = DeterministicRouter().route(
+        "How do I register an application so you can open it for me"
+    )
+    assert not result.needs_llm
+    assert "Applications tab" in result.intent.arguments["text"]
+    assert "open <name>" in result.intent.arguments["text"]
 
 
 def test_knowledge_question_is_not_misrouted_to_calculator():

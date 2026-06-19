@@ -25,6 +25,11 @@ class Settings(BaseModel):
     stt_device: Literal["auto", "cuda", "cpu"] = "auto"
     llm_provider: str = "ollama"
     llm_model: str = "qwen2.5:3b"
+    planner_timeout_seconds: float = Field(default=60.0, gt=0)
+    openai_model: str = "gpt-5.5"
+    openai_codex_model: str = "gpt-5.3-codex"
+    anthropic_model: str = "claude-sonnet-4-6"
+    search_provider: Literal["duckduckgo", "brave"] = "duckduckgo"
     tts_provider: str = "piper"
     piper_executable: Path | None = None
     piper_model: Path | None = None

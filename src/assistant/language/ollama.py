@@ -98,7 +98,7 @@ class OllamaProvider:
 
     async def cancel(self) -> None:
         if self._task:
-            self._task.cancel()
+            self._task.get_loop().call_soon_threadsafe(self._task.cancel)
 
     async def health(self) -> dict[str, Any]:
         try:
