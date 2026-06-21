@@ -193,7 +193,13 @@ def build_container(settings: Settings | None = None) -> Container:
     events = EventBus()
     confirmations = ConfirmationManager()
     engine = ExecutionEngine(
-        registry, permissions, confirmations, audit, events, metrics
+        registry,
+        permissions,
+        confirmations,
+        audit,
+        events,
+        metrics,
+        confirmation_overrides=settings.confirmation_overrides,
     )
     history = HistoryStore(database, settings.retain_transcripts_days)
     llm = (

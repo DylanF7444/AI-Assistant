@@ -26,6 +26,30 @@ from assistant.storage.secrets import SecretVault
 
 
 def run_desktop(container: Container) -> int:
+    confirmation_prompt_actions = (
+        ("risk:low", "All low-risk actions", False),
+        ("risk:medium", "All medium-risk actions", True),
+        ("risk:high", "All high-risk actions", True),
+        ("risk:critical", "All critical-risk actions", True),
+        ("skill:windows.launcher", "Open registered applications", True),
+        ("skill:windows.file_operation:open", "Open files", True),
+        ("skill:windows.file_operation:copy", "Copy files", True),
+        ("skill:windows.file_operation:move", "Move files", True),
+        ("skill:windows.file_operation:rename", "Rename files", True),
+        ("skill:windows.file_operation:delete", "Delete files", True),
+        ("skill:windows.application_window:focus", "Focus application windows", True),
+        ("skill:windows.application_window:minimize", "Minimize application windows", True),
+        ("skill:windows.application_window:maximize", "Maximize application windows", True),
+        ("skill:windows.application_window:close", "Close application windows", True),
+        ("skill:windows.process:list", "List processes", True),
+        ("skill:windows.process:terminate", "Terminate processes", True),
+        ("skill:windows.setting:set", "Change Windows settings", True),
+        ("skill:windows.clipboard:read", "Read clipboard", True),
+        ("skill:windows.clipboard:write", "Write clipboard", True),
+        ("skill:windows.input_automation:type_text", "Type into applications", True),
+        ("skill:windows.input_automation:click", "Click in applications", True),
+    )
+
     try:
         from PySide6.QtCore import QObject, QSize, QSettings, Qt, QThread, QTimer, Signal
         from PySide6.QtGui import (
@@ -51,6 +75,7 @@ def run_desktop(container: Container) -> int:
             QMessageBox,
             QProgressBar,
             QPushButton,
+            QScrollArea,
             QSizePolicy,
             QSystemTrayIcon,
             QStyle,
@@ -105,6 +130,14 @@ def run_desktop(container: Container) -> int:
                 painter.drawControl(QStyle.ControlElement.CE_TabBarTab, option)
 
     class MainWindow(QMainWindow):
+        ACTIVE_PIPELINE_STATES = {
+            PipelineState.LISTENING,
+            PipelineState.TRANSCRIBING,
+            PipelineState.THINKING,
+            PipelineState.EXECUTING,
+            PipelineState.SPEAKING,
+        }
+
         def __init__(self) -> None:
             super().__init__()
             self.setWindowTitle("Local Assistant")
@@ -113,6 +146,7 @@ def run_desktop(container: Container) -> int:
             self.setAccessibleName("Local Assistant command window")
             self._workers: list[AsyncWorker] = []
             self._hotkeys: list[int] = []
+            self._shortcuts: list[QShortcut] = []
             self._activity_started = time.perf_counter()
             self._status_frame = 0
             self._active_state = PipelineState.IDLE
@@ -145,8 +179,9 @@ def run_desktop(container: Container) -> int:
             self._scripts_timer.setInterval(1000)
             self._scripts_timer.timeout.connect(self._refresh_active_scripts)
             self._scripts_timer.start()
-            QShortcut(QKeySequence(container.settings.cancel_hotkey), self, self.cancel)
-            QShortcut(QKeySequence("Ctrl+Return"), self, self.run_command)
+            self._add_shortcut(container.settings.push_to_talk_hotkey, self.listen)
+            self._add_shortcut(container.settings.cancel_hotkey, self.cancel)
+            self._add_shortcut("Ctrl+Return", self.run_command)
             self._register_global_hotkeys()
             if container.wakeword:
                 self._start_wakeword()
@@ -497,15 +532,8 @@ def run_desktop(container: Container) -> int:
                 PipelineState.ERROR: "Something went wrong",
                 PipelineState.CANCELLED: "Cancelled",
             }
-            active_states = {
-                PipelineState.LISTENING,
-                PipelineState.TRANSCRIBING,
-                PipelineState.THINKING,
-                PipelineState.EXECUTING,
-                PipelineState.SPEAKING,
-            }
-            was_active = self._active_state in active_states
-            active = state in active_states
+            was_active = self._pipeline_is_busy()
+            active = state in self.ACTIVE_PIPELINE_STATES
             self._active_state = state
             self._status_frame = 0
             self.status.setText(labels[state])
@@ -538,6 +566,15 @@ def run_desktop(container: Container) -> int:
                 self.pipeline_progress.hide()
             self._append_activity(labels[state], message)
 
+        def _pipeline_is_busy(self) -> bool:
+            return self._active_state in self.ACTIVE_PIPELINE_STATES
+
+        def _add_shortcut(self, sequence: str, callback: Any) -> None:
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setAutoRepeat(False)
+            shortcut.activated.connect(callback)
+            self._shortcuts.append(shortcut)
+
         def _animate_status(self) -> None:
             self._status_frame = (self._status_frame + 1) % 4
             base = {
@@ -560,6 +597,7 @@ def run_desktop(container: Container) -> int:
                     keyboard.add_hotkey(
                         container.settings.push_to_talk_hotkey,
                         self.hotkey_bridge.push_to_talk.emit,
+                        trigger_on_release=True,
                     ),
                     keyboard.add_hotkey(
                         container.settings.cancel_hotkey,
@@ -583,6 +621,9 @@ def run_desktop(container: Container) -> int:
             worker.start()
 
         def listen(self) -> None:
+            if self._pipeline_is_busy():
+                self.statusBar().showMessage("Voice input is already active.", 1500)
+                return
             self._set_pipeline_state(PipelineState.LISTENING, "Microphone is active")
             worker = AsyncWorker(
                 container.orchestrator.listen_once(
@@ -852,8 +893,10 @@ def run_desktop(container: Container) -> int:
             return page
 
         def _settings_tab(self) -> QWidget:
-            page = QWidget()
-            form = QFormLayout(page)
+            page = QScrollArea()
+            page.setWidgetResizable(True)
+            content = QWidget()
+            form = QFormLayout(content)
             self.setting_offline = QCheckBox()
             self.setting_offline.setChecked(container.settings.offline_lock)
             self.setting_stt = QLineEdit(container.settings.stt_model)
@@ -936,6 +979,30 @@ def run_desktop(container: Container) -> int:
             self.setting_hide_sensitive.setChecked(
                 container.settings.hide_sensitive_display
             )
+            self.setting_confirmation_prompts = QTableWidget(
+                len(confirmation_prompt_actions), 2
+            )
+            self.setting_confirmation_prompts.setHorizontalHeaderLabels(
+                ["Action", "Prompt"]
+            )
+            self.setting_confirmation_prompts.setEditTriggers(
+                QTableWidget.EditTrigger.NoEditTriggers
+            )
+            self.setting_confirmation_prompt_rows = []
+            for row, (key, label, default) in enumerate(confirmation_prompt_actions):
+                checked = container.settings.confirmation_overrides.get(key, default)
+                self.setting_confirmation_prompts.setItem(
+                    row, 0, QTableWidgetItem(label)
+                )
+                checkbox = QCheckBox()
+                checkbox.setChecked(checked)
+                checkbox.setAccessibleName(f"Require prompt for {label}")
+                self.setting_confirmation_prompts.setCellWidget(row, 1, checkbox)
+                self.setting_confirmation_prompt_rows.append((key, default, checkbox))
+            self.setting_confirmation_prompts.horizontalHeader().setStretchLastSection(
+                True
+            )
+            self.setting_confirmation_prompts.setMinimumHeight(260)
             save = QPushButton("Save Settings")
             save.clicked.connect(self._save_settings)
             form.addRow("Global offline lock", self.setting_offline)
@@ -960,11 +1027,18 @@ def run_desktop(container: Container) -> int:
             form.addRow("Automatic gain control", self.setting_gain)
             form.addRow("Response detail", self.setting_detail)
             form.addRow("Hide sensitive display results", self.setting_hide_sensitive)
+            form.addRow("Require yes/no prompts", self.setting_confirmation_prompts)
             form.addRow(save)
+            page.setWidget(content)
             return page
 
         def _save_settings(self) -> None:
             try:
+                confirmation_overrides = {
+                    key: checkbox.isChecked()
+                    for key, default, checkbox in self.setting_confirmation_prompt_rows
+                    if checkbox.isChecked() != default
+                }
                 values = {
                     "offline_lock": self.setting_offline.isChecked(),
                     "audio_input_device": self.setting_input.currentData(),
@@ -990,6 +1064,7 @@ def run_desktop(container: Container) -> int:
                     "automatic_gain_control": self.setting_gain.isChecked(),
                     "response_detail": self.setting_detail.currentText(),
                     "hide_sensitive_display": self.setting_hide_sensitive.isChecked(),
+                    "confirmation_overrides": confirmation_overrides,
                 }
                 validated = container.settings.model_copy(update=values)
                 validated = type(container.settings).model_validate(
@@ -1026,6 +1101,9 @@ def run_desktop(container: Container) -> int:
             container.orchestrator.response_detail = validated.response_detail
             container.orchestrator.hide_sensitive_display = (
                 validated.hide_sensitive_display
+            )
+            container.engine.confirmation_overrides = dict(
+                validated.confirmation_overrides
             )
             container.audio_capture.noise_suppression = (
                 validated.noise_suppression

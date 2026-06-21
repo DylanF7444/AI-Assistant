@@ -40,6 +40,7 @@ class Settings(BaseModel):
     automatic_gain_control: bool = True
     wake_word_enabled: bool = False
     wake_word_model: Path | None = None
+    confirmation_overrides: dict[str, bool] = Field(default_factory=dict)
     trusted_model_keys: dict[str, str] = Field(default_factory=dict)
     trusted_skill_keys: dict[str, str] = Field(default_factory=dict)
     push_to_talk_hotkey: str = "ctrl+space"

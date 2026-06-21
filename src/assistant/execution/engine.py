@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -74,6 +75,7 @@ class ExecutionEngine:
         events: EventBus,
         metrics: MetricsStore | None = None,
         completed_key_limit: int = 1024,
+        confirmation_overrides: Mapping[str, bool] | None = None,
     ) -> None:
         self.registry = registry
         self.permissions = permissions
@@ -82,6 +84,7 @@ class ExecutionEngine:
         self.events = events
         self.metrics = metrics
         self.completed_key_limit = completed_key_limit
+        self.confirmation_overrides = dict(confirmation_overrides or {})
         self._jobs: dict[UUID, asyncio.Task[SkillResult]] = {}
         self._job_details: dict[UUID, tuple[str, str, dict[str, Any], datetime, float]] = {}
         self._job_loops: dict[UUID, asyncio.AbstractEventLoop] = {}
@@ -213,11 +216,7 @@ class ExecutionEngine:
                 permission_requests=missing,
             )
         risk = skill.risk_for(call)
-        if risk in {
-            RiskLevel.MEDIUM,
-            RiskLevel.HIGH,
-            RiskLevel.CRITICAL,
-        }:
+        if self._requires_confirmation(call, risk):
             preview = await skill.preview(call)
             targets = tuple(
                 target
@@ -263,7 +262,8 @@ class ExecutionEngine:
                 "Required permission is missing or outside its approved scope.",
                 ResultStatus.DENIED,
             )
-        if skill.risk_for(call) != RiskLevel.LOW:
+        risk = skill.risk_for(call)
+        if self._requires_confirmation(call, risk):
             if confirmation_id is None or not self.confirmations.approve(
                 confirmation_id, call, typed_token=typed_token
             ):
@@ -368,6 +368,27 @@ class ExecutionEngine:
             while len(self._completed_keys) > self.completed_key_limit:
                 self._completed_keys.popitem(last=False)
         return result
+
+    def _requires_confirmation(self, call: SkillCall, risk: RiskLevel) -> bool:
+        for key in self._confirmation_keys(call, risk):
+            if key in self.confirmation_overrides:
+                return self.confirmation_overrides[key]
+        return risk != RiskLevel.LOW
+
+    @staticmethod
+    def _confirmation_keys(call: SkillCall, risk: RiskLevel) -> tuple[str, ...]:
+        action_value = None
+        for field in ("operation", "action", "setting"):
+            value = call.arguments.get(field)
+            if isinstance(value, str) and value.strip():
+                action_value = value.strip().casefold()
+                break
+        keys = []
+        if action_value:
+            keys.append(f"skill:{call.skill_id}:{action_value}")
+        keys.append(f"skill:{call.skill_id}")
+        keys.append(f"risk:{risk.value}")
+        return tuple(keys)
 
     async def execute_plan(self, plan: ExecutionPlan) -> dict[str, SkillResult]:
         results: dict[str, SkillResult] = {}

@@ -123,6 +123,28 @@ def engine_for(tmp_path: Path, *skills: Skill):
     return engine, permissions, audit
 
 
+def engine_for_with_confirmation_overrides(
+    tmp_path: Path, overrides: dict[str, bool], *skills: Skill
+):
+    database = Database(f"sqlite:///{tmp_path / 'data.db'}")
+    database.migrate()
+    audit = AuditStore(database)
+    permissions = PermissionManager(database, audit)
+    registry = SkillRegistry()
+    for skill in skills:
+        registry.register(skill)
+    confirmations = ConfirmationManager()
+    engine = ExecutionEngine(
+        registry,
+        permissions,
+        confirmations,
+        audit,
+        EventBus(),
+        confirmation_overrides=overrides,
+    )
+    return engine, permissions, audit
+
+
 def make_call(skill_id, arguments=None, key="key"):
     return SkillCall(
         skill_id=skill_id,
@@ -221,6 +243,46 @@ async def test_confirmation_rejects_changed_arguments(tmp_path):
         changed, confirmation_id=prepared.confirmation.confirmation_id
     )
     assert result.status == ResultStatus.DENIED
+    assert skill.count == 0
+
+
+@pytest.mark.asyncio
+async def test_confirmation_can_be_disabled_for_specific_action(tmp_path):
+    skill = CountingSkill()
+    engine, permissions, _ = engine_for_with_confirmation_overrides(
+        tmp_path, {"skill:test.count": False}, skill
+    )
+    permissions.grant(
+        user_id="local-user",
+        skill_id="test.count",
+        capability="test.run",
+        grant_type=GrantType.ALWAYS,
+    )
+
+    call = make_call("test.count", {"target": "a"})
+    prepared = await engine.prepare(call)
+
+    assert prepared.confirmation is None
+    assert prepared.result.status == ResultStatus.COMPLETED
+    assert skill.count == 1
+
+
+@pytest.mark.asyncio
+async def test_confirmation_can_be_enabled_for_low_risk_actions(tmp_path):
+    skill = CountingSkill(risk=RiskLevel.LOW)
+    engine, permissions, _ = engine_for_with_confirmation_overrides(
+        tmp_path, {"risk:low": True}, skill
+    )
+    permissions.grant(
+        user_id="local-user",
+        skill_id="test.count",
+        capability="test.run",
+        grant_type=GrantType.ALWAYS,
+    )
+
+    prepared = await engine.prepare(make_call("test.count", {"target": "a"}))
+
+    assert prepared.confirmation is not None
     assert skill.count == 0
 
 
