@@ -10,6 +10,7 @@ from jsonschema import ValidationError, validate
 from assistant.contracts import Intent, SkillManifest, normalize_confidence
 from assistant.providers import LLMProvider
 from assistant.storage.knowledge import KnowledgeBaseStore
+from assistant.windows.process_names import normalize_process_name
 
 
 class SkillRetriever:
@@ -333,6 +334,15 @@ class LocalPlanner:
             and isinstance(arguments.get("source"), str)
         ):
             return {"application": arguments["source"]}
+        if (
+            manifest.skill_id == "windows.application_window"
+            and isinstance(arguments.get("process_name"), str)
+        ):
+            normalized = dict(arguments)
+            normalized["process_name"] = normalize_process_name(
+                normalized["process_name"]
+            )
+            return normalized
         return arguments
 
     @staticmethod

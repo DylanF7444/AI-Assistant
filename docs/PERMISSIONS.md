@@ -11,7 +11,15 @@ Permissions are denied by default and granted to one stable skill ID.
 - `input.control`: visible keyboard/mouse automation in approved applications.
 - `network`: make outbound connections while the global offline lock is off.
 - `messaging`: send to approved contacts.
-- `device.control`: operate an approved paired device.
+- `device.control`: operate an approved paired device or enable/disable one
+  approved local connected device by instance ID.
+- `device.read`: read local or paired-device status such as battery, storage,
+  performance, and connected devices.
+- `system.apps`: search installed local applications.
+- `system.display`: change local display settings such as brightness.
+- `system.network`: enable, disable, or toggle local radios such as Wi-Fi and
+  Bluetooth.
+- `system.power`: lock, restart, or shut down the local device.
 
 Grant modes are one-time, current session, always, and deny. Targets can narrow
 grants to folders, applications, contacts, or devices. Medium, high, and

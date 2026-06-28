@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+from pydantic import field_validator
 
 from assistant.contracts import (
     PermissionScope,
@@ -248,10 +249,22 @@ class FileSearchSkill(Skill):
 class LaunchInput(BaseModel):
     application: str
     registered_path: str | None = None
+    url: str | None = Field(default=None, max_length=2000)
+    private: bool = False
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value):
+        if value is None:
+            return value
+        if not isinstance(value, str) or not value.startswith("https://"):
+            raise ValueError("launcher URL must be public HTTPS")
+        return value
 
 
 class LaunchOutput(BaseModel):
     application: str
+    private: bool = False
 
 
 class LauncherSkill(Skill):
@@ -279,11 +292,20 @@ class LauncherSkill(Skill):
     async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult:
         args = self.validate(call.arguments)
         path = self._registered_path(args)
-        await self.adapter.launch(path)
+        launch_args = self._launch_arguments(args, path)
+        if launch_args:
+            await self.adapter.launch_with_args(path, launch_args)
+        else:
+            await self.adapter.launch(path)
+        destination = f" to {args.url}" if args.url else ""
+        mode = " in a private window" if args.private else ""
         return SkillResult(
             status=ResultStatus.COMPLETED,
-            summary=f"Opened {args.application}.",
-            data=LaunchOutput(application=args.application).model_dump(),
+            summary=f"Opened {args.application}{destination}{mode}.",
+            data=LaunchOutput(
+                application=args.application,
+                private=args.private,
+            ).model_dump(),
         )
 
     def required_permissions(self, call: SkillCall):
@@ -293,9 +315,32 @@ class LauncherSkill(Skill):
             PermissionScope(
                 capability="process.launch",
                 targets=(str(Path(path).resolve()),),
-                reason="Start this registered application path.",
+                reason=(
+                    "Start this registered application path with the requested "
+                    "browser arguments."
+                    if args.url or args.private
+                    else "Start this registered application path."
+                ),
             ),
         )
+
+    @classmethod
+    def _launch_arguments(cls, args: LaunchInput, path: str) -> tuple[str, ...]:
+        launch_args: list[str] = []
+        if args.private:
+            launch_args.append(cls._private_browser_flag(args.application, path))
+        if args.url:
+            launch_args.append(args.url)
+        return tuple(launch_args)
+
+    @staticmethod
+    def _private_browser_flag(application: str, path: str) -> str:
+        identity = f"{application} {Path(path).stem}".casefold()
+        if "firefox" in identity:
+            return "-private-window"
+        if "edge" in identity or "msedge" in identity:
+            return "--inprivate"
+        return "--incognito"
 
     def _registered_path(self, args: LaunchInput) -> str:
         registered = self.resolver(args.application) if self.resolver else None

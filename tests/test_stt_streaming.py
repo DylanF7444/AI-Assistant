@@ -93,5 +93,46 @@ async def test_explicit_cpu_uses_int8_compute_type(monkeypatch, tmp_path):
     assert calls == [(str(tmp_path), "cpu", "int8")]
 
 
+@pytest.mark.asyncio
+async def test_auto_falls_back_to_cpu_when_cuda_runtime_missing(monkeypatch, tmp_path):
+    calls = []
+
+    class FakeWhisperModel:
+        def __init__(self, model, *, device, compute_type):
+            calls.append((model, device, compute_type))
+
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper",
+        types.SimpleNamespace(WhisperModel=FakeWhisperModel),
+    )
+    provider = FasterWhisperProvider(str(tmp_path), "auto")
+    monkeypatch.setattr(provider, "health", lambda: _async_value({"healthy": True}))
+    monkeypatch.setattr(provider, "_cuda_runtime_available", lambda: False)
+
+    await provider._load()
+
+    assert calls == [(str(tmp_path), "cpu", "int8")]
+
+
+@pytest.mark.asyncio
+async def test_explicit_cuda_reports_missing_runtime(monkeypatch, tmp_path):
+    class FakeWhisperModel:
+        def __init__(self, model, *, device, compute_type):
+            raise AssertionError("CUDA should be rejected before model load")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper",
+        types.SimpleNamespace(WhisperModel=FakeWhisperModel),
+    )
+    provider = FasterWhisperProvider(str(tmp_path), "cuda")
+    monkeypatch.setattr(provider, "health", lambda: _async_value({"healthy": True}))
+    monkeypatch.setattr(provider, "_cuda_runtime_available", lambda: False)
+
+    with pytest.raises(RuntimeError, match="cublas64_12.dll"):
+        await provider._load()
+
+
 async def _async_value(value):
     return value

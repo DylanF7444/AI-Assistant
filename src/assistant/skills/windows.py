@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from assistant.contracts import (
     PermissionScope,
@@ -22,8 +22,10 @@ from assistant.windows.adapters import (
     NotificationAdapter,
     ProcessAdapter,
     InputAutomationAdapter,
+    WindowsDeviceAdapter,
     WindowsSettingsAdapter,
 )
+from assistant.windows.process_names import normalize_process_name
 
 
 class FileOperationInput(BaseModel):
@@ -169,13 +171,50 @@ class FileOperationSkill(Skill):
 
 
 class WindowInput(BaseModel):
-    operation: Literal["focus", "minimize", "maximize", "close"]
+    operation: Literal[
+        "focus",
+        "minimize",
+        "maximize",
+        "close",
+        "move_to_monitor",
+        "move",
+        "resize",
+    ]
     process_name: str = Field(pattern=r"^[^\\/:*?\"<>|]+\.exe$")
+    monitor: int | None = Field(default=None, ge=1)
+    x: int | None = None
+    y: int | None = None
+    width: int | None = Field(default=None, gt=0)
+    height: int | None = Field(default=None, gt=0)
+
+    @field_validator("process_name", mode="before")
+    @classmethod
+    def validate_process_name(cls, value):
+        if not isinstance(value, str):
+            return value
+        return normalize_process_name(value)
+
+    @model_validator(mode="after")
+    def operation_arguments(self):
+        if self.operation == "move_to_monitor" and self.monitor is None:
+            raise ValueError("move_to_monitor requires monitor")
+        if self.operation == "move" and (self.x is None or self.y is None):
+            raise ValueError("move requires x and y")
+        if self.operation == "resize" and (
+            self.width is None or self.height is None
+        ):
+            raise ValueError("resize requires width and height")
+        return self
 
 
 class WindowOutput(BaseModel):
     operation: str
     process_name: str
+    monitor: int | None = None
+    x: int | None = None
+    y: int | None = None
+    width: int | None = None
+    height: int | None = None
 
 
 class ApplicationWindowSkill(Skill):
@@ -187,7 +226,7 @@ class ApplicationWindowSkill(Skill):
         self.manifest = manifest(
             skill_id="windows.application_window",
             display_name="Application Window",
-            description="Focus, minimize, maximize, or close an approved application.",
+            description="Focus, minimize, maximize, close, move, or resize an approved application window.",
             input_model=self.input_model,
             output_model=self.output_model,
             permissions=(),
@@ -200,7 +239,7 @@ class ApplicationWindowSkill(Skill):
             PermissionScope(
                 capability="process.window",
                 targets=(args.process_name.casefold(),),
-                reason=f"{args.operation.title()} this exact application.",
+                reason=f"{args.operation.replace('_', ' ').title()} this exact application window.",
             ),
         )
 
@@ -213,19 +252,48 @@ class ApplicationWindowSkill(Skill):
 
     async def preview(self, call: SkillCall) -> str:
         args = self.validate(call.arguments)
+        if args.operation == "move_to_monitor":
+            return f"Move application {args.process_name} to monitor {args.monitor}"
+        if args.operation == "move":
+            return f"Move application {args.process_name} to ({args.x}, {args.y})"
+        if args.operation == "resize":
+            return (
+                f"Resize application {args.process_name} to "
+                f"{args.width} by {args.height}"
+            )
         return f"{args.operation.title()} application {args.process_name}"
 
     async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult:
         args = self.validate(call.arguments)
-        operation = getattr(self.adapter, args.operation)
-        changed = await operation(args.process_name)
+        if args.operation == "move_to_monitor":
+            changed = await self.adapter.move_to_monitor(
+                args.process_name, args.monitor or 1
+            )
+        elif args.operation == "move":
+            changed = await self.adapter.move(args.process_name, args.x or 0, args.y or 0)
+        elif args.operation == "resize":
+            changed = await self.adapter.resize(
+                args.process_name, args.width or 1, args.height or 1
+            )
+        else:
+            operation = getattr(self.adapter, args.operation)
+            changed = await operation(args.process_name)
         if not changed:
             raise RuntimeError(f"No visible window found for {args.process_name}")
         return SkillResult(
             status=ResultStatus.COMPLETED,
-            summary=f"{args.operation.title()} completed for {args.process_name}.",
+            summary=(
+                f"{args.operation.replace('_', ' ').title()} completed "
+                f"for {args.process_name}."
+            ),
             data=WindowOutput(
-                operation=args.operation, process_name=args.process_name
+                operation=args.operation,
+                process_name=args.process_name,
+                monitor=args.monitor,
+                x=args.x,
+                y=args.y,
+                width=args.width,
+                height=args.height,
             ).model_dump(),
         )
 
@@ -437,7 +505,7 @@ class InputAutomationSkill(Skill):
 
 
 class WindowsSettingInput(BaseModel):
-    operation: Literal["read", "set"]
+    operation: Literal["read", "set", "toggle"]
     setting: Literal["dark_mode"]
     enabled: bool | None = None
 
@@ -471,9 +539,10 @@ class WindowsSettingSkill(Skill):
 
     def required_permissions(self, call: SkillCall):
         args = self.validate(call.arguments)
+        operation = "read" if args.operation == "read" else "set"
         return (
             PermissionScope(
-                capability=f"settings.{args.operation}",
+                capability=f"settings.{operation}",
                 targets=(args.setting,),
                 reason=f"{args.operation.title()} the approved Windows setting.",
             ),
@@ -489,15 +558,24 @@ class WindowsSettingSkill(Skill):
     async def preview(self, call: SkillCall) -> str:
         args = self.validate(call.arguments)
         return (
-            f"Set Windows dark mode to {args.enabled}"
-            if args.operation == "set"
-            else "Read Windows dark mode"
+            "Read Windows dark mode"
+            if args.operation == "read"
+            else (
+                "Toggle Windows dark mode"
+                if args.operation == "toggle"
+                else f"Set Windows dark mode to {args.enabled}"
+            )
         )
 
     async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult:
         args = self.validate(call.arguments)
-        if args.operation == "set":
-            await self.adapter.set_dark_mode(bool(args.enabled))
+        if args.operation in {"set", "toggle"}:
+            enabled = (
+                not await self.adapter.get_dark_mode()
+                if args.operation == "toggle"
+                else bool(args.enabled)
+            )
+            await self.adapter.set_dark_mode(enabled)
         enabled = await self.adapter.get_dark_mode()
         return SkillResult(
             status=ResultStatus.COMPLETED,
@@ -506,3 +584,233 @@ class WindowsSettingSkill(Skill):
                 setting=args.setting, enabled=enabled
             ).model_dump(),
         )
+
+
+class DeviceControlInput(BaseModel):
+    operation: Literal[
+        "search_installed_apps",
+        "set_volume",
+        "change_volume",
+        "mute_audio",
+        "unmute_audio",
+        "set_brightness",
+        "change_brightness",
+        "toggle_wifi",
+        "toggle_bluetooth",
+        "lock_device",
+        "restart_device",
+        "shutdown_device",
+        "battery_status",
+        "storage_status",
+        "performance_status",
+        "connected_devices",
+        "enable_connected_device",
+        "disable_connected_device",
+    ]
+    query: str | None = Field(default=None, max_length=200)
+    level: int | None = Field(default=None, ge=0, le=100)
+    delta: int | None = Field(default=None, ge=-100, le=100)
+    enabled: bool | None = None
+    drive: str | None = Field(default=None, pattern=r"^[A-Za-z]:?\\?$")
+    instance_id: str | None = Field(default=None, min_length=1, max_length=500)
+    limit: int = Field(default=20, ge=1, le=200)
+
+    @model_validator(mode="after")
+    def operation_arguments(self):
+        if self.operation in {"set_volume", "set_brightness"} and self.level is None:
+            raise ValueError(f"{self.operation} requires level")
+        if self.operation in {"change_volume", "change_brightness"} and not self.delta:
+            raise ValueError(f"{self.operation} requires a non-zero delta")
+        if (
+            self.operation in {"enable_connected_device", "disable_connected_device"}
+            and not self.instance_id
+        ):
+            raise ValueError(f"{self.operation} requires instance_id")
+        return self
+
+
+class DeviceControlOutput(BaseModel):
+    operation: str
+    result: object
+
+
+class WindowsDeviceControlSkill(Skill):
+    input_model = DeviceControlInput
+    output_model = DeviceControlOutput
+
+    READ_OPERATIONS = {
+        "battery_status",
+        "storage_status",
+        "performance_status",
+        "connected_devices",
+    }
+    AUDIO_OPERATIONS = {"set_volume", "change_volume", "mute_audio", "unmute_audio"}
+    DISPLAY_OPERATIONS = {"set_brightness", "change_brightness"}
+    NETWORK_OPERATIONS = {"toggle_wifi", "toggle_bluetooth"}
+    POWER_OPERATIONS = {"lock_device", "restart_device", "shutdown_device"}
+
+    def __init__(self, adapter: WindowsDeviceAdapter) -> None:
+        self.adapter = adapter
+        self.manifest = manifest(
+            skill_id="windows.device_control",
+            display_name="Windows Device Control",
+            description="Control local Windows device settings and read device status.",
+            input_model=self.input_model,
+            output_model=self.output_model,
+            permissions=(),
+            risk=RiskLevel.CRITICAL,
+        )
+
+    def required_permissions(self, call: SkillCall):
+        args = self.validate(call.arguments)
+        capability = self._capability(args)
+        target = self._target(args)
+        return (
+            PermissionScope(
+                capability=capability,
+                targets=(target,),
+                reason=f"{args.operation.replace('_', ' ').title()} on this Windows device.",
+            ),
+        )
+
+    def risk_for(self, call: SkillCall) -> RiskLevel:
+        operation = self.validate(call.arguments).operation
+        if operation in {"restart_device", "shutdown_device"}:
+            return RiskLevel.CRITICAL
+        if operation == "lock_device":
+            return RiskLevel.HIGH
+        if operation in {"enable_connected_device", "disable_connected_device"}:
+            return RiskLevel.HIGH
+        if operation in self.READ_OPERATIONS or operation == "search_installed_apps":
+            return RiskLevel.LOW
+        return RiskLevel.MEDIUM
+
+    async def preview(self, call: SkillCall) -> str:
+        args = self.validate(call.arguments)
+        name = args.operation.replace("_", " ")
+        if args.operation in {"set_volume", "set_brightness"}:
+            return f"{name.title()} to {args.level}%"
+        if args.operation in {"change_volume", "change_brightness"}:
+            return f"{name.title()} by {args.delta}%"
+        if args.operation in {"toggle_wifi", "toggle_bluetooth"}:
+            state = "toggle" if args.enabled is None else ("on" if args.enabled else "off")
+            return f"{name.title()} {state}"
+        if args.operation in {"enable_connected_device", "disable_connected_device"}:
+            return f"{name.title()} {args.instance_id}"
+        return name.title()
+
+    async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult:
+        args = self.validate(call.arguments)
+        result: object
+        if args.operation == "search_installed_apps":
+            result = await self.adapter.search_installed_apps(args.query, args.limit)
+            summary = f"Found {len(result)} installed application{'s' if len(result) != 1 else ''}."
+        elif args.operation == "set_volume":
+            await self.adapter.set_volume(args.level or 0)
+            result = {"level": args.level}
+            summary = f"Volume set to {args.level}%."
+        elif args.operation == "change_volume":
+            await self.adapter.change_volume(args.delta or 0)
+            result = {"delta": args.delta}
+            summary = "Volume adjusted."
+        elif args.operation == "mute_audio":
+            await self.adapter.mute_audio(True)
+            result = {"muted": True}
+            summary = "Audio muted."
+        elif args.operation == "unmute_audio":
+            await self.adapter.mute_audio(False)
+            result = {"muted": False}
+            summary = "Audio unmuted."
+        elif args.operation == "set_brightness":
+            await self.adapter.set_brightness(args.level or 0)
+            result = {"level": args.level}
+            summary = f"Brightness set to {args.level}%."
+        elif args.operation == "change_brightness":
+            level = await self.adapter.change_brightness(args.delta or 0)
+            result = {"level": level, "delta": args.delta}
+            summary = f"Brightness adjusted to {level}%."
+        elif args.operation == "toggle_wifi":
+            enabled = await self.adapter.set_wifi_enabled(args.enabled)
+            result = {"enabled": enabled}
+            summary = f"Wi-Fi turned {'on' if enabled else 'off'}."
+        elif args.operation == "toggle_bluetooth":
+            enabled = await self.adapter.set_bluetooth_enabled(args.enabled)
+            result = {"enabled": enabled}
+            summary = f"Bluetooth turned {'on' if enabled else 'off'}."
+        elif args.operation == "lock_device":
+            await self.adapter.lock_device()
+            result = {"locked": True}
+            summary = "Device locked."
+        elif args.operation == "restart_device":
+            await self.adapter.restart_device()
+            result = {"restart_requested": True}
+            summary = "Restart requested."
+        elif args.operation == "shutdown_device":
+            await self.adapter.shutdown_device()
+            result = {"shutdown_requested": True}
+            summary = "Shutdown requested."
+        elif args.operation == "battery_status":
+            result = await self.adapter.battery_status()
+            summary = "Battery status retrieved."
+        elif args.operation == "storage_status":
+            result = await self.adapter.storage_status(args.drive)
+            summary = "Storage status retrieved."
+        elif args.operation == "performance_status":
+            result = await self.adapter.performance_status()
+            summary = "CPU and memory usage retrieved."
+        elif args.operation == "connected_devices":
+            result = await self.adapter.connected_devices(args.limit)
+            summary = f"Found {len(result)} connected device{'s' if len(result) != 1 else ''}."
+        elif args.operation == "enable_connected_device":
+            await self.adapter.set_connected_device_enabled(args.instance_id or "", True)
+            result = {"instance_id": args.instance_id, "enabled": True}
+            summary = "Connected device enabled."
+        elif args.operation == "disable_connected_device":
+            await self.adapter.set_connected_device_enabled(args.instance_id or "", False)
+            result = {"instance_id": args.instance_id, "enabled": False}
+            summary = "Connected device disabled."
+        else:
+            raise ValueError(f"Unsupported device operation: {args.operation}")
+        return SkillResult(
+            status=ResultStatus.COMPLETED,
+            summary=summary,
+            data=DeviceControlOutput(
+                operation=args.operation, result=result
+            ).model_dump(),
+            sensitive=args.operation in self.READ_OPERATIONS
+            or args.operation == "search_installed_apps",
+        )
+
+    @classmethod
+    def _capability(cls, args: DeviceControlInput) -> str:
+        if args.operation == "search_installed_apps":
+            return "system.apps"
+        if args.operation in cls.AUDIO_OPERATIONS:
+            return "media.control"
+        if args.operation in cls.DISPLAY_OPERATIONS:
+            return "system.display"
+        if args.operation in cls.NETWORK_OPERATIONS:
+            return "system.network"
+        if args.operation in cls.POWER_OPERATIONS:
+            return "system.power"
+        if args.operation in {"enable_connected_device", "disable_connected_device"}:
+            return "device.control"
+        return "device.read"
+
+    @staticmethod
+    def _target(args: DeviceControlInput) -> str:
+        if args.operation == "storage_status" and args.drive:
+            return args.drive.upper().rstrip("\\")
+        if args.operation == "search_installed_apps":
+            return args.query or "*"
+        if args.operation == "toggle_wifi":
+            return "wi-fi"
+        if args.operation == "toggle_bluetooth":
+            return "bluetooth"
+        if args.operation in {"set_volume", "change_volume", "mute_audio", "unmute_audio"}:
+            return "system-audio"
+        if args.operation in {"set_brightness", "change_brightness"}:
+            return "screen-brightness"
+        if args.operation in {"enable_connected_device", "disable_connected_device"}:
+            return args.instance_id or "*"
+        return args.operation

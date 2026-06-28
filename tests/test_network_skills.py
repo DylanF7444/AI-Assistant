@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 
 import pytest
 
 from assistant.contracts import PermissionContext, SkillCall
-from assistant.integrations.web import CloudModelClient, WebClient
+from assistant.integrations.web import CloudModelClient, CodexExecClient, WebClient
 from assistant.router.deterministic import DeterministicRouter
 from assistant.skills.network import CloudAskSkill, WebSearchSkill
 from assistant.storage.secrets import SecretVault
@@ -62,6 +63,16 @@ def test_network_routes_are_explicit():
     assert claude.arguments["provider"] == "anthropic"
     codex = router.route("ask Codex review this function").intent
     assert codex.arguments["provider"] == "codex"
+    news = router.route("ask Codex for today's news").intent
+    assert news.arguments["provider"] == "codex"
+    assert news.arguments["question"] == "today's news"
+    spoken_news = router.route("Ask codex for todays news").intent
+    assert spoken_news.arguments["provider"] == "codex"
+    assert spoken_news.arguments["question"] == "todays news"
+    code = router.route("make code to parse a CSV file").intent
+    assert code.name == "cloud.ask"
+    assert code.arguments["provider"] == "codex"
+    assert code.arguments["max_tokens"] == 4000
 
 
 @pytest.mark.asyncio
@@ -160,29 +171,51 @@ async def test_cloud_ask_parses_provider_responses(
 
 
 @pytest.mark.asyncio
-async def test_codex_uses_openai_key_and_configured_codex_model(monkeypatch):
-    monkeypatch.setattr(
-        "assistant.integrations.web._validate_public_https", lambda _url: None
-    )
-    opener = FakeOpener(
-        [{"output": [{"type": "message", "content": [{"type": "output_text", "text": "Review"}]}]}]
-    )
+async def test_codex_uses_exec_client_and_configured_codex_model():
     requested_keys = []
+    requested = []
+
+    class FakeCodexExecClient:
+        async def ask(self, question, *, model=None, cancel_event=None):
+            requested.append(
+                {"question": question, "model": model, "cancelled": cancel_event.is_set()}
+            )
+            return "Review"
+
     skill = CloudAskSkill(
-        CloudModelClient(opener),
+        CloudModelClient(),
         lambda name: requested_keys.append(name) or "api-key",
         {
             "openai": "openai-model",
             "codex": "gpt-5.3-codex",
             "anthropic": "claude-model",
         },
+        FakeCodexExecClient(),
     )
     result = await skill.execute(
         call("cloud.ask", {"provider": "codex", "question": "Review this"}),
         asyncio.Event(),
     )
-    assert requested_keys == ["openai"]
+    assert requested_keys == []
+    assert requested == [
+        {"question": "Review this", "model": "gpt-5.3-codex", "cancelled": False}
+    ]
     assert result.data["model"] == "gpt-5.3-codex"
+
+
+def test_codex_exec_prefers_user_profile_binary(monkeypatch, tmp_path):
+    old = tmp_path / "OpenAI" / "Codex" / "bin" / "old" / "codex.exe"
+    new = tmp_path / "OpenAI" / "Codex" / "bin" / "new" / "codex.exe"
+    old.parent.mkdir(parents=True)
+    new.parent.mkdir(parents=True)
+    old.write_text("")
+    new.write_text("")
+    os.utime(old, (1, 1))
+    os.utime(new, (2, 2))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr("assistant.integrations.web.shutil.which", lambda _name: "windowsapps-codex.exe")
+
+    assert CodexExecClient()._resolve_executable() == str(new)
 
 
 class ReversibleCipher:

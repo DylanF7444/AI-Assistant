@@ -10,10 +10,12 @@ from uuid import UUID, uuid4
 
 from assistant.contracts import (
     AudioSession,
+    ExecutionPlan,
     Intent,
     PermissionContext,
     PipelineEvent,
     PipelineState,
+    PlanStep,
     Response,
     ResponseType,
     SkillCall,
@@ -44,6 +46,7 @@ class AssistantOrchestrator:
         speech_mode: str = "voice_only",
         metrics: MetricsStore | None = None,
         response_detail: str = "normal",
+        show_reasoning_steps: bool = False,
         allow_sensitive_speech: bool = False,
         hide_sensitive_display: bool = False,
     ) -> None:
@@ -56,6 +59,7 @@ class AssistantOrchestrator:
         self.speech_mode = speech_mode
         self.metrics = metrics
         self.response_detail = response_detail
+        self.show_reasoning_steps = show_reasoning_steps
         self.allow_sensitive_speech = allow_sensitive_speech
         self.hide_sensitive_display = hide_sensitive_display
         self._active_correlation: UUID | None = None
@@ -193,6 +197,35 @@ class AssistantOrchestrator:
         )
 
     def _response_from_outcome(self, outcome: ExecutionOutcome) -> Response:
+        if outcome.registration_requests and outcome.permission_requests:
+            registrations = [
+                f"- {request.application}: choose the application executable to register it."
+                for request in outcome.registration_requests
+            ]
+            permissions = []
+            for request in outcome.permission_requests:
+                target_text = (
+                    f" for {', '.join(request.scope.targets)}"
+                    if request.scope.targets
+                    else ""
+                )
+                permissions.append(
+                    f"- {request.scope.capability}{target_text}: "
+                    f"{request.scope.reason}"
+                )
+            return Response(
+                display_text=(
+                    "I need a registration and permission before I can run this plan:\n"
+                    + "\n".join(registrations)
+                    + "\n"
+                    + "\n".join(permissions)
+                    + "\n\nRegister the application first, then review the permission request."
+                ),
+                speech_text="I need an application registration and permission. Please review the request on screen.",
+                response_type=ResponseType.PERMISSION,
+                severity="warning",
+                speak=True,
+            )
         if outcome.permission_requests:
             descriptions = []
             for request in outcome.permission_requests:
@@ -253,6 +286,49 @@ class AssistantOrchestrator:
             severity="warning",
         )
 
+    def _with_reasoning_steps(
+        self,
+        response: Response,
+        *,
+        request_text: str,
+        intent: Intent | None,
+        outcome_label: str,
+        step_summaries: tuple[str, ...] = (),
+    ) -> Response:
+        if not self.show_reasoning_steps:
+            return response
+        lines = [
+            "",
+            "Request breakdown:",
+            f"- Request: {request_text}",
+        ]
+        if intent is None:
+            lines.append("- Classification: clarification needed")
+        else:
+            lines.extend(
+                [
+                    (
+                        "- Classification: "
+                        f"{intent.name} via {intent.source} "
+                        f"(confidence {intent.confidence:.0%})"
+                    ),
+                    f"- Arguments: {json.dumps(intent.arguments, default=str)}",
+                ]
+            )
+            if intent.ambiguous and intent.ambiguity_reasons:
+                lines.append(
+                    "- Ambiguity: " + "; ".join(intent.ambiguity_reasons)
+                )
+        if step_summaries:
+            lines.append("- Steps:")
+            lines.extend(f"  {index}. {summary}" for index, summary in enumerate(step_summaries, 1))
+        else:
+            lines.append(f"- Step: {outcome_label.replace('_', ' ')}")
+        lines.append(f"- Result state: {outcome_label.replace('_', ' ')}")
+        return response.model_copy(
+            update={"display_text": response.display_text + "\n".join(lines)}
+        )
+
     @staticmethod
     def _outcome_label(outcome: ExecutionOutcome) -> str:
         if outcome.confirmation:
@@ -292,6 +368,12 @@ class AssistantOrchestrator:
                 speech_text=route.clarification,
                 response_type=ResponseType.CLARIFICATION,
             )
+            response = self._with_reasoning_steps(
+                response,
+                request_text=text,
+                intent=intent,
+                outcome_label="needs_clarification",
+            )
             return await self._finish_interaction(
                 correlation_id,
                 text,
@@ -303,6 +385,12 @@ class AssistantOrchestrator:
         if route.needs_llm:
             if self.planner is None:
                 response = self._planner_unavailable_response()
+                response = self._with_reasoning_steps(
+                    response,
+                    request_text=text,
+                    intent=None,
+                    outcome_label="planner_unavailable",
+                )
                 return await self._finish_interaction(
                     correlation_id,
                     text,
@@ -318,6 +406,12 @@ class AssistantOrchestrator:
             except Exception as exc:
                 logger.warning("Local planner failed", exc_info=exc)
                 response = self._planner_failed_response(exc)
+                response = self._with_reasoning_steps(
+                    response,
+                    request_text=text,
+                    intent=None,
+                    outcome_label="planner_failed",
+                )
                 return await self._finish_interaction(
                     correlation_id,
                     text,
@@ -327,12 +421,26 @@ class AssistantOrchestrator:
                     invoked_by_voice=invoked_by_voice,
                 )
         assert intent is not None
+        if route.intents:
+            return await self._handle_intent_plan(
+                correlation_id,
+                text,
+                route.intents,
+                session_id=session_id,
+                invoked_by_voice=invoked_by_voice,
+            )
         if intent.name in {"conversation.answer", "conversation.reject"}:
             response = Response(
                 display_text=intent.arguments["text"],
                 speech_text=intent.arguments["text"],
                 response_type=ResponseType.ANSWER,
                 severity="warning" if intent.name == "conversation.reject" else "info",
+            )
+            response = self._with_reasoning_steps(
+                response,
+                request_text=text,
+                intent=intent,
+                outcome_label="answered",
             )
             return await self._finish_interaction(
                 correlation_id,
@@ -349,6 +457,12 @@ class AssistantOrchestrator:
                 speech_text="Cancelled.",
                 response_type=ResponseType.CONTROL,
             )
+            response = self._with_reasoning_steps(
+                response,
+                request_text=text,
+                intent=intent,
+                outcome_label="cancelled",
+            )
             return await self._finish_interaction(
                 correlation_id,
                 text,
@@ -363,6 +477,12 @@ class AssistantOrchestrator:
                 display_text="I forgot the current session context.",
                 speech_text="Session context cleared.",
                 response_type=ResponseType.CONTROL,
+            )
+            response = self._with_reasoning_steps(
+                response,
+                request_text=text,
+                intent=intent,
+                outcome_label="forgotten",
             )
             return await self._finish_interaction(
                 correlation_id,
@@ -406,6 +526,12 @@ class AssistantOrchestrator:
                 response_type=ResponseType.ERROR,
                 severity="warning",
             )
+            response = self._with_reasoning_steps(
+                response,
+                request_text=text,
+                intent=intent,
+                outcome_label="preparation_failed",
+            )
             return await self._finish_interaction(
                 correlation_id,
                 text,
@@ -416,6 +542,15 @@ class AssistantOrchestrator:
             )
         response = self._response_from_outcome(outcome)
         outcome_label = self._outcome_label(outcome)
+        response = self._with_reasoning_steps(
+            response,
+            request_text=text,
+            intent=intent,
+            outcome_label=outcome_label,
+            step_summaries=(
+                f"Prepare {intent.name} with {json.dumps(intent.arguments, default=str)}",
+            ),
+        )
         return await self._finish_interaction(
             correlation_id,
             text,
@@ -426,7 +561,72 @@ class AssistantOrchestrator:
             invoked_by_voice=invoked_by_voice,
         )
 
+    async def _handle_intent_plan(
+        self,
+        correlation_id: UUID,
+        text: str,
+        intents: tuple[Intent, ...],
+        *,
+        session_id: str,
+        invoked_by_voice: bool,
+    ) -> tuple[Response, ExecutionOutcome]:
+        steps = []
+        previous_step_id: str | None = None
+        for index, intent in enumerate(intents, 1):
+            step_id = f"step_{index}"
+            call = SkillCall(
+                skill_id=intent.name,
+                arguments=intent.arguments,
+                permission_context=PermissionContext(session_id=session_id),
+                correlation_id=correlation_id,
+            )
+            steps.append(
+                PlanStep(
+                    step_id=step_id,
+                    call=call,
+                    depends_on=(previous_step_id,) if previous_step_id else (),
+                )
+            )
+            previous_step_id = step_id
+        outcome = await self.engine.prepare_plan(ExecutionPlan(steps=tuple(steps)))
+        response = self._response_from_outcome(outcome)
+        step_summaries = tuple(
+            f"Prepare {intent.name} with {json.dumps(intent.arguments, default=str)}"
+            for intent in intents
+        )
+        response = self._with_reasoning_steps(
+            response,
+            request_text=text,
+            intent=Intent(
+                name="compound.plan",
+                arguments={"steps": [intent.name for intent in intents]},
+                confidence=min(intent.confidence for intent in intents),
+                source="deterministic",
+            ),
+            outcome_label=self._outcome_label(outcome),
+            step_summaries=step_summaries,
+        )
+        return await self._finish_interaction(
+            correlation_id,
+            text,
+            response,
+            outcome,
+            intent_name="compound.plan",
+            outcome_label=self._outcome_label(outcome),
+            invoked_by_voice=invoked_by_voice,
+        )
+
     async def handle_transcript(self, transcript: Transcript) -> tuple[Response, ExecutionOutcome]:
+        if not transcript.normalized_text.strip():
+            response = Response(
+                display_text="No speech was detected.",
+                speech_text="I did not hear anything.",
+                response_type=ResponseType.STATUS,
+                severity="warning",
+            )
+            return await self._finish(
+                response, ExecutionOutcome(), invoked_by_voice=True
+            )
         route = self.router.route(transcript.normalized_text)
         intent = route.intent
         low_word = any(
@@ -521,17 +721,14 @@ class AssistantOrchestrator:
                 message="Listening",
             )
         )
-        await self.events.publish(
-            PipelineEvent(
-                correlation_id=correlation_id,
-                state=PipelineState.TRANSCRIBING,
-                message="Transcribing locally",
-            )
-        )
         final = None
+        last_non_empty = None
         try:
             async for transcript in stt.transcribe(session, audio):
-                final = transcript
+                if transcript.normalized_text.strip():
+                    last_non_empty = transcript
+                if transcript.is_final:
+                    final = transcript
                 await self.events.publish(
                     PipelineEvent(
                         correlation_id=correlation_id,
@@ -569,6 +766,7 @@ class AssistantOrchestrator:
             )
         finally:
             self._active_stt = None
+        final = final or last_non_empty
         if final is None:
             response = Response(
                 display_text="No speech was detected.",

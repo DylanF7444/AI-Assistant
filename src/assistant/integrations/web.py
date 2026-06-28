@@ -4,9 +4,15 @@ import asyncio
 import html
 import ipaddress
 import json
+import os
 import re
 import socket
+import shutil
+import subprocess
+import sys
+import time
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
@@ -277,3 +283,130 @@ class CloudModelClient:
         if not text:
             raise RuntimeError("The cloud model returned no text")
         return text
+
+
+class CodexExecClient:
+    def __init__(
+        self,
+        executable: str | Path = "codex",
+        *,
+        cwd: str | Path | None = None,
+        timeout_seconds: float = 120,
+        extra_args: tuple[str, ...] = (
+            "--ask-for-approval",
+            "never",
+            "--sandbox",
+            "read-only",
+        ),
+    ) -> None:
+        self.executable = str(executable)
+        self.cwd = Path(cwd) if cwd is not None else None
+        self.timeout_seconds = timeout_seconds
+        self.extra_args = extra_args
+
+    async def ask(
+        self,
+        question: str,
+        *,
+        model: str | None = None,
+        cancel_event: asyncio.Event | None = None,
+    ) -> str:
+        return await asyncio.to_thread(
+            self._ask_sync,
+            question,
+            model=model,
+            cancel_event=cancel_event,
+        )
+
+    def _ask_sync(
+        self,
+        question: str,
+        *,
+        model: str | None,
+        cancel_event: asyncio.Event | None,
+    ) -> str:
+        executable = self._resolve_executable()
+        command = [executable, "exec", *self.extra_args]
+        if model:
+            command.extend(["--model", model])
+        command.append(question)
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=str(self.cwd) if self.cwd is not None else None,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=(
+                    subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+                ),
+            )
+        except OSError as error:
+            raise RuntimeError(f"Could not start codex exec: {error}") from error
+        try:
+            deadline = time.monotonic() + self.timeout_seconds
+            while process.poll() is None:
+                if time.monotonic() >= deadline:
+                    process.kill()
+                    process.communicate()
+                    raise RuntimeError("codex exec exceeded its timeout")
+                if cancel_event is not None and cancel_event.is_set():
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                    raise RuntimeError("codex exec was cancelled")
+                try:
+                    stdout, stderr = process.communicate(timeout=0.2)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            else:
+                stdout, stderr = process.communicate(timeout=0)
+        except subprocess.TimeoutExpired as error:
+            process.kill()
+            process.communicate()
+            raise RuntimeError("codex exec exceeded its timeout") from error
+        try:
+            stdout
+        except UnboundLocalError:
+            stdout, stderr = process.communicate(timeout=0)
+        if process.returncode != 0:
+            detail = (stderr or stdout).strip()
+            raise RuntimeError(
+                f"codex exec failed with exit code {process.returncode}"
+                + (f": {detail}" if detail else "")
+            )
+        text = stdout.strip() or stderr.strip()
+        if not text:
+            raise RuntimeError("codex exec returned no text")
+        return text
+
+    def _resolve_executable(self) -> str:
+        if self.executable.casefold() != "codex":
+            return shutil.which(self.executable) or self.executable
+        bundled = self._latest_user_codex_binary()
+        if bundled is not None:
+            return str(bundled)
+        return shutil.which(self.executable) or self.executable
+
+    @staticmethod
+    def _latest_user_codex_binary() -> Path | None:
+        local_app_data = os.getenv("LOCALAPPDATA")
+        if not local_app_data:
+            return None
+        root = Path(local_app_data) / "OpenAI" / "Codex" / "bin"
+        if not root.exists():
+            return None
+        candidates = [
+            path
+            for path in root.glob("*/codex.exe")
+            if path.is_file()
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda path: path.stat().st_mtime)

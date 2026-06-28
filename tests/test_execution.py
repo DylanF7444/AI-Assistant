@@ -14,6 +14,7 @@ from assistant.contracts import (
     ResultStatus,
     RiskLevel,
     SkillCall,
+    SkillError,
     SkillResult,
 )
 from assistant.events import EventBus
@@ -302,6 +303,26 @@ async def test_plan_stops_after_failed_prerequisite(tmp_path):
     results = await engine.execute_plan(plan)
     assert results["bad"].status == ResultStatus.DENIED
     assert results["dependent"].status == ResultStatus.CANCELLED
+
+
+def test_plan_result_summary_includes_step_error_messages():
+    result = ExecutionEngine._aggregate_plan_results(
+        {
+            "step_1": SkillResult(
+                status=ResultStatus.COMPLETED,
+                summary="Opened brave.",
+            ),
+            "step_2": SkillResult(
+                status=ResultStatus.FAILED,
+                summary="The action failed.",
+                error=SkillError(code="skill_failed", message="Network is offline"),
+            ),
+        }
+    )
+
+    assert result.status == ResultStatus.PARTIAL
+    assert "step_2: The action failed." in result.display_text
+    assert "skill_failed: Network is offline" in result.display_text
 
 
 @pytest.mark.asyncio

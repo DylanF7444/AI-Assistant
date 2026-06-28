@@ -8,7 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from assistant.contracts import PermissionScope, ResultStatus, SkillCall, SkillResult
-from assistant.integrations.web import CloudModelClient, WebClient
+from assistant.integrations.web import CloudModelClient, CodexExecClient, WebClient
 from assistant.skills.base import Skill
 from assistant.skills.builtin import manifest
 
@@ -18,6 +18,15 @@ NETWORK_PERMISSION = (
         capability="network",
         targets=(),
         reason="Connect to an external internet service.",
+    ),
+)
+
+CODEX_EXEC_PERMISSION = (
+    *NETWORK_PERMISSION,
+    PermissionScope(
+        capability="process.launch",
+        targets=("codex",),
+        reason="Start the Codex CLI to ask an external AI model.",
     ),
 )
 
@@ -139,33 +148,55 @@ class CloudAskSkill(Skill):
         client: CloudModelClient,
         key: Callable[[str], str | None],
         default_models: dict[str, str],
+        codex_client: CodexExecClient | None = None,
     ) -> None:
         self.client = client
         self.key = key
         self.default_models = default_models
+        self.codex_client = codex_client or CodexExecClient()
         self.manifest = manifest(
             skill_id="cloud.ask",
             display_name="Cloud Ask",
             description=(
-                "Ask an OpenAI ChatGPT or Codex-capable model, or Anthropic Claude, "
-                "using the configured cloud API account."
+                "Ask ChatGPT/OpenAI or Anthropic Claude using cloud APIs, or ask "
+                "Codex through the local codex exec CLI."
             ),
             input_model=self.input_model,
             output_model=self.output_model,
             permissions=NETWORK_PERMISSION,
         )
 
+    def required_permissions(self, call: SkillCall):
+        args = self.validate(call.arguments)
+        return CODEX_EXEC_PERMISSION if args.provider == "codex" else NETWORK_PERMISSION
+
     async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult:
         args = self.validate(call.arguments)
-        api_provider = "openai" if args.provider == "codex" else args.provider
-        api_key = self.key(api_provider) or os.getenv(
-            "OPENAI_API_KEY" if api_provider == "openai" else "ANTHROPIC_API_KEY"
+        if args.provider == "codex":
+            model = args.model or self.default_models[args.provider]
+            answer = await self.codex_client.ask(
+                args.question,
+                model=model,
+                cancel_event=cancel_event,
+            )
+            return SkillResult(
+                status=ResultStatus.COMPLETED,
+                summary=f"Codex answered using {model}.",
+                display_text=answer,
+                speech_text=answer,
+                data=CloudAskOutput(
+                    provider=args.provider, model=model, answer=answer
+                ).model_dump(),
+                sensitive=True,
+            )
+        api_key = self.key(args.provider) or os.getenv(
+            "OPENAI_API_KEY" if args.provider == "openai" else "ANTHROPIC_API_KEY"
         )
         if not api_key:
             raise RuntimeError(f"An {args.provider.title()} API key is not configured")
         model = args.model or self.default_models[args.provider]
         answer = await self.client.ask(
-            api_provider, api_key, model, args.question, args.max_tokens
+            args.provider, api_key, model, args.question, args.max_tokens
         )
         return SkillResult(
             status=ResultStatus.COMPLETED,

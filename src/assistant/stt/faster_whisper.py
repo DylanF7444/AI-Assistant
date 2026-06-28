@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import importlib.util
+import os
 import tempfile
 import wave
 from collections.abc import AsyncIterator
@@ -40,6 +42,15 @@ class FasterWhisperProvider:
         )
         return model_dir.is_dir() and any(model_dir.iterdir())
 
+    def _cuda_runtime_available(self) -> bool:
+        if os.name != "nt":
+            return True
+        try:
+            ctypes.WinDLL("cublas64_12.dll")
+        except OSError:
+            return False
+        return True
+
     async def _load(self) -> None:
         if self._model is not None:
             return
@@ -55,15 +66,28 @@ class FasterWhisperProvider:
                 "cuda": [("cuda", "int8_float16")],
                 "cpu": [("cpu", "int8")],
             }[self.requested_device]
-            error = None
+            if not self._cuda_runtime_available():
+                if self.requested_device == "cuda":
+                    raise RuntimeError(
+                        "CUDA speech recognition was selected, but cublas64_12.dll "
+                        "is not available. Install the CUDA 12 runtime or switch "
+                        "the STT device to CPU/auto in Settings."
+                    )
+                candidates = [
+                    (device, compute_type)
+                    for device, compute_type in candidates
+                    if device != "cuda"
+                ]
+            errors = []
             for device, compute_type in candidates:
                 try:
                     return WhisperModel(
                         self.model_name, device=device, compute_type=compute_type
                     )
                 except Exception as exc:
-                    error = exc
-            raise RuntimeError("Unable to load faster-whisper") from error
+                    errors.append(f"{device}/{compute_type}: {exc}")
+            detail = "; ".join(errors) if errors else "no compatible device candidates"
+            raise RuntimeError(f"Unable to load faster-whisper ({detail})")
 
         self._model = await asyncio.to_thread(load)
 

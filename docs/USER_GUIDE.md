@@ -8,9 +8,11 @@ selected when they are included beside the installer. First run reports CPU,
 GPU, memory, audio devices, and recommended model placement.
 
 Open Settings to choose microphone/output devices, push-to-talk and cancel
-hotkeys, response detail, speech mode, retention, and privacy options. Register
-applications by friendly spoken name before asking the assistant to launch
-them; arbitrary executable paths are not accepted from transcripts or models.
+hotkeys, response detail, speech mode, retention, and privacy options. Enable
+Show request breakdown to include the classification, selected skill, arguments,
+and execution steps under each on-screen response. Register applications by
+friendly spoken name before asking the assistant to launch them; arbitrary
+executable paths are not accepted from transcripts or models.
 
 ## Local models
 
@@ -54,11 +56,13 @@ configured explicitly.
 Web and cloud-model skills are optional. Disable the global offline lock to use
 DuckDuckGo Instant Answer for keyless web searches. DuckDuckGo is the default;
 Brave Search remains selectable in Settings and requires a Brave Search API
-key. Configure an OpenAI or Anthropic API key to ask ChatGPT/Codex-capable
-OpenAI models or Claude. API keys are encrypted with Windows DPAPI and are not
-included in settings exports. Each invocation still requires the `network`
-permission. Supported commands include `search the web for ...`, `read
-https://...`, `ask ChatGPT ...`, `ask Codex ...`, and `ask Claude ...`.
+key. Configure an OpenAI or Anthropic API key to ask ChatGPT/OpenAI models or
+Claude. Codex requests use the locally installed `codex exec` CLI. API keys are
+encrypted with Windows DPAPI and are not included in settings exports. Cloud
+API invocations require the `network` permission; Codex invocations require
+`network` and `process.launch` for the Codex CLI. Supported commands include
+`search the web for ...`, `read https://...`, `ask ChatGPT ...`, `ask Codex ...`,
+`ask Claude ...`, and `make code to ...`.
 
 ## Skills and diagnostics
 

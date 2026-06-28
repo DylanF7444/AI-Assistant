@@ -94,6 +94,21 @@ def run_desktop(container: Container) -> int:
             "Desktop UI is not installed. Run: python -m pip install -e .[desktop]"
         ) from exc
 
+    class RequestTextEdit(QTextEdit):
+        submitted = Signal()
+
+        def keyPressEvent(self, event: Any) -> None:
+            is_enter = event.key() in (
+                Qt.Key.Key_Return,
+                Qt.Key.Key_Enter,
+            )
+            has_shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            if is_enter and not has_shift:
+                self.submitted.emit()
+                event.accept()
+                return
+            super().keyPressEvent(event)
+
     class AsyncWorker(QThread):
         complete = Signal(object)
         cancelled = Signal()
@@ -175,6 +190,9 @@ def run_desktop(container: Container) -> int:
             self._status_timer = QTimer(self)
             self._status_timer.setInterval(420)
             self._status_timer.timeout.connect(self._animate_status)
+            self._mic_level_timer = QTimer(self)
+            self._mic_level_timer.setInterval(60)
+            self._mic_level_timer.timeout.connect(self._update_mic_level)
             self._scripts_timer = QTimer(self)
             self._scripts_timer.setInterval(1000)
             self._scripts_timer.timeout.connect(self._refresh_active_scripts)
@@ -419,9 +437,22 @@ def run_desktop(container: Container) -> int:
             self.pipeline_progress.setTextVisible(False)
             self.pipeline_progress.setFixedHeight(4)
             self.pipeline_progress.hide()
+            mic_row = QHBoxLayout()
+            mic_label = QLabel("MIC")
+            mic_label.setObjectName("sectionLabel")
+            self.mic_level = QProgressBar()
+            self.mic_level.setObjectName("micLevel")
+            self.mic_level.setAccessibleName("Microphone input level")
+            self.mic_level.setTextVisible(False)
+            self.mic_level.setRange(0, 100)
+            self.mic_level.setValue(0)
+            self.mic_level.setFixedHeight(8)
+            mic_row.addWidget(mic_label)
+            mic_row.addWidget(self.mic_level, 1)
             status_layout.addLayout(status_row)
             status_layout.addWidget(self.status_detail)
             status_layout.addWidget(self.pipeline_progress)
+            status_layout.addLayout(mic_row)
             layout.addWidget(status_card)
 
             content = QHBoxLayout()
@@ -433,13 +464,14 @@ def run_desktop(container: Container) -> int:
             compose_layout.setSpacing(12)
             input_label = QLabel("YOUR REQUEST")
             input_label.setObjectName("sectionLabel")
-            self.transcript = QTextEdit()
+            self.transcript = RequestTextEdit()
             self.transcript.setObjectName("commandInput")
             self.transcript.setPlaceholderText(
                 "Ask a question, open an app, manage a file, or run a skill..."
             )
             self.transcript.setAccessibleName("Command input and transcript")
             self.transcript.setMinimumHeight(120)
+            self.transcript.submitted.connect(self.run_command)
             controls = QHBoxLayout()
             controls.setSpacing(10)
             self.listen_button = QPushButton("  Listen")
@@ -548,6 +580,11 @@ def run_desktop(container: Container) -> int:
             self.run_button.setEnabled(not active)
             self.listen_button.setEnabled(not active)
             self.cancel_button.setEnabled(active)
+            if state in {PipelineState.LISTENING, PipelineState.TRANSCRIBING}:
+                self._mic_level_timer.start()
+            else:
+                self._mic_level_timer.stop()
+                self.mic_level.setValue(0)
             if active:
                 if not was_active:
                     self._activity_started = time.perf_counter()
@@ -588,6 +625,11 @@ def run_desktop(container: Container) -> int:
                 self.status.setText(base + "." * self._status_frame)
                 elapsed = time.perf_counter() - self._activity_started
                 self.elapsed_status.setText(f"{elapsed:.1f}s")
+
+        def _update_mic_level(self) -> None:
+            level = min(1.0, max(0.0, container.audio_capture.level))
+            threshold = max(container.audio_capture.vad_threshold, 0.001)
+            self.mic_level.setValue(round(min(1.0, level / (threshold * 4)) * 100))
 
         def _register_global_hotkeys(self) -> None:
             try:
@@ -975,6 +1017,10 @@ def run_desktop(container: Container) -> int:
             self.setting_detail = QComboBox()
             self.setting_detail.addItems(["short", "normal", "detailed"])
             self.setting_detail.setCurrentText(container.settings.response_detail)
+            self.setting_show_reasoning = QCheckBox()
+            self.setting_show_reasoning.setChecked(
+                container.settings.show_reasoning_steps
+            )
             self.setting_hide_sensitive = QCheckBox()
             self.setting_hide_sensitive.setChecked(
                 container.settings.hide_sensitive_display
@@ -1026,6 +1072,7 @@ def run_desktop(container: Container) -> int:
             form.addRow("Noise suppression", self.setting_noise)
             form.addRow("Automatic gain control", self.setting_gain)
             form.addRow("Response detail", self.setting_detail)
+            form.addRow("Show request breakdown", self.setting_show_reasoning)
             form.addRow("Hide sensitive display results", self.setting_hide_sensitive)
             form.addRow("Require yes/no prompts", self.setting_confirmation_prompts)
             form.addRow(save)
@@ -1063,6 +1110,7 @@ def run_desktop(container: Container) -> int:
                     "noise_suppression": self.setting_noise.isChecked(),
                     "automatic_gain_control": self.setting_gain.isChecked(),
                     "response_detail": self.setting_detail.currentText(),
+                    "show_reasoning_steps": self.setting_show_reasoning.isChecked(),
                     "hide_sensitive_display": self.setting_hide_sensitive.isChecked(),
                     "confirmation_overrides": confirmation_overrides,
                 }
@@ -1099,6 +1147,9 @@ def run_desktop(container: Container) -> int:
             container.settings = validated
             container.orchestrator.speech_mode = validated.speech_mode
             container.orchestrator.response_detail = validated.response_detail
+            container.orchestrator.show_reasoning_steps = (
+                validated.show_reasoning_steps
+            )
             container.orchestrator.hide_sensitive_display = (
                 validated.hide_sensitive_display
             )
@@ -2024,6 +2075,15 @@ def run_desktop(container: Container) -> int:
         #pipelineProgress::chunk {
             background: #5a8cff;
             border-radius: 2px;
+        }
+        #micLevel {
+            border: 0;
+            background: #17263a;
+            border-radius: 4px;
+        }
+        #micLevel::chunk {
+            background: #41d6a3;
+            border-radius: 4px;
         }
         QTextEdit, QLineEdit, QComboBox, QListWidget, QTableWidget {
             background: #0b1524;

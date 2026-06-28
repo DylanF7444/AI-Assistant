@@ -10,12 +10,14 @@ def test_persisted_settings_load_on_restart(settings):
             "speech_mode": "never",
             "stt_model": "base.en",
             "retain_transcripts_days": 7,
+            "show_reasoning_steps": True,
         },
     )
     second = build_container(settings)
     assert second.settings.speech_mode == "never"
     assert second.settings.stt_model == "base.en"
     assert second.settings.retain_transcripts_days == 7
+    assert second.settings.show_reasoning_steps is True
 
 
 def test_duckduckgo_is_the_default_search_provider(settings):

@@ -35,6 +35,7 @@ from assistant.skills.windows import (
     NotificationSkill,
     ProcessSkill,
     InputAutomationSkill,
+    WindowsDeviceControlSkill,
     WindowsSettingSkill,
 )
 from assistant.skills.macros import MacroSkill
@@ -62,6 +63,7 @@ from assistant.windows.adapters import (
     WindowsNotificationAdapter,
     WindowsProcessAdapter,
     WindowsInputAutomationAdapter,
+    LocalWindowsDeviceAdapter,
     LocalWindowsSettingsAdapter,
 )
 
@@ -129,6 +131,7 @@ def _register_windows_skills(
     registry.register(NotificationSkill(WindowsNotificationAdapter()))
     registry.register(ProcessSkill(WindowsProcessAdapter()))
     registry.register(InputAutomationSkill(WindowsInputAutomationAdapter()))
+    registry.register(WindowsDeviceControlSkill(LocalWindowsDeviceAdapter()))
     registry.register(WindowsSettingSkill(LocalWindowsSettingsAdapter()))
 
 
@@ -218,13 +221,14 @@ def build_container(settings: Settings | None = None) -> Container:
         else None
     )
     orchestrator = AssistantOrchestrator(
-        DeterministicRouter(),
+        DeterministicRouter(application_names=lambda: aliases.all("application")),
         engine,
         events,
         history,
         planner=planner,
         metrics=metrics,
         response_detail=settings.response_detail,
+        show_reasoning_steps=settings.show_reasoning_steps,
         allow_sensitive_speech=settings.allow_sensitive_speech,
         hide_sensitive_display=settings.hide_sensitive_display,
     )

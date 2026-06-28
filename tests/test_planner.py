@@ -3,6 +3,7 @@ from jsonschema import ValidationError
 
 from assistant.language.planner import InvalidPlannerResponse, LocalPlanner, SkillRetriever
 from assistant.skills.builtin import CalculatorSkill, DateTimeSkill, LauncherSkill, TimerSkill
+from assistant.skills.windows import ApplicationWindowSkill
 from assistant.storage.database import Database
 from assistant.storage.knowledge import KnowledgeBaseStore
 
@@ -126,6 +127,33 @@ async def test_planner_normalizes_launcher_source_argument():
 
     assert intent.name == "windows.launcher"
     assert intent.arguments == {"application": "youtube"}
+
+
+@pytest.mark.asyncio
+async def test_planner_normalizes_window_process_name_punctuation():
+    window = ApplicationWindowSkill(FakeApplications())
+    provider = FakeProvider(
+        {
+            "disposition": "skill",
+            "skill_id": "windows.application_window",
+            "arguments": {
+                "operation": "close",
+                "process_name": "roblox.exe\ufe40",
+            },
+            "answer": "",
+            "confidence": 1,
+            "clarification": None,
+        }
+    )
+    planner = LocalPlanner(provider, SkillRetriever((window.manifest,)))
+
+    intent = await planner.plan("close roblox")
+
+    assert intent.name == "windows.application_window"
+    assert intent.arguments == {
+        "operation": "close",
+        "process_name": "RobloxPlayerBeta.exe",
+    }
 
 
 @pytest.mark.asyncio

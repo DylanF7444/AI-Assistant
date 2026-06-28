@@ -18,6 +18,7 @@ class Settings(BaseModel):
     diagnostic_audio: bool = False
     speech_mode: Literal["always", "voice_only", "never"] = "voice_only"
     response_detail: Literal["short", "normal", "detailed"] = "normal"
+    show_reasoning_steps: bool = False
     allow_sensitive_speech: bool = False
     hide_sensitive_display: bool = False
     stt_provider: str = "faster-whisper"

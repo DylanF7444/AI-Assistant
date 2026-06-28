@@ -240,6 +240,140 @@ class ExecutionEngine:
             return ExecutionOutcome(confirmation=confirmation, call=call)
         return ExecutionOutcome(result=await self.execute(call), call=call)
 
+    async def prepare_plan(self, plan: ExecutionPlan) -> ExecutionOutcome:
+        permission_requests: list[PermissionGrantRequest] = []
+        registration_requests: list[ApplicationRegistrationRequest] = []
+        confirmations: list[ConfirmationRequest] = []
+
+        for step in plan.steps:
+            call = step.call
+            try:
+                skill = self.registry.get(call.skill_id)
+                skill.validate(call.arguments)
+                required_permissions = skill.required_permissions(call)
+                checks = tuple(skill.permission_checks(call))
+            except ApplicationRegistrationRequired as exc:
+                registration_requests.append(
+                    ApplicationRegistrationRequest(call=call, application=exc.application)
+                )
+                continue
+            except (KeyError, ValidationError, ValueError) as exc:
+                return ExecutionOutcome(
+                    result=SkillResult(
+                        status=ResultStatus.DENIED,
+                        summary="The requested plan was rejected.",
+                        error=SkillError(code="invalid_call", message=str(exc)),
+                    ),
+                    call=call,
+                )
+
+            decisions = [
+                self.permissions.authorize(check_call, scopes, consume_once=False)
+                for check_call, scopes in checks
+            ]
+            for (check_call, _), decision in zip(checks, decisions, strict=True):
+                permission_requests.extend(
+                    PermissionGrantRequest(call=check_call, scope=scope)
+                    for scope in decision.missing
+                )
+            if any(not decision.allowed for decision in decisions):
+                continue
+
+            risk = skill.risk_for(call)
+            if self._requires_confirmation(call, risk):
+                preview = await skill.preview(call)
+                targets = tuple(
+                    target
+                    for permission in required_permissions
+                    for target in permission.targets
+                )
+                confirmations.append(
+                    self.confirmations.create(
+                        call,
+                        exact_action=preview,
+                        targets=targets,
+                        risk=risk,
+                    )
+                )
+
+        if registration_requests:
+            await self.events.publish(
+                PipelineEvent(
+                    correlation_id=plan.steps[0].call.correlation_id,
+                    state=PipelineState.AWAITING_APPROVAL,
+                    message="Application registration is required before this plan can run.",
+                    data={
+                        "registrations": [
+                            {
+                                "skill_id": request.call.skill_id,
+                                "application": request.application,
+                            }
+                            for request in registration_requests
+                        ]
+                    },
+                )
+            )
+            return ExecutionOutcome(
+                result=SkillResult(
+                    status=ResultStatus.DENIED,
+                    summary="Application registration is required before this plan can run.",
+                    error=SkillError(
+                        code="application_not_registered",
+                        message="One or more applications must be registered.",
+                        recoverable=True,
+                    ),
+                ),
+                call=plan.steps[0].call,
+                permission_requests=tuple(permission_requests),
+                registration_requests=tuple(registration_requests),
+            )
+        if permission_requests:
+            await self.events.publish(
+                PipelineEvent(
+                    correlation_id=plan.steps[0].call.correlation_id,
+                    state=PipelineState.AWAITING_APPROVAL,
+                    message="Permission is required before this plan can run.",
+                    data={
+                        "permissions": [
+                            {
+                                "skill_id": request.call.skill_id,
+                                **request.scope.model_dump(),
+                            }
+                            for request in permission_requests
+                        ]
+                    },
+                )
+            )
+            return ExecutionOutcome(
+                result=SkillResult(
+                    status=ResultStatus.DENIED,
+                    summary="Permission is required before this plan can run.",
+                    error=SkillError(
+                        code="permission_denied",
+                        message="Required permission has not been granted",
+                        recoverable=True,
+                    ),
+                ),
+                call=plan.steps[0].call,
+                permission_requests=tuple(permission_requests),
+            )
+        if confirmations:
+            confirmation = confirmations[0]
+            await self.events.publish(
+                PipelineEvent(
+                    correlation_id=confirmation.correlation_id,
+                    state=PipelineState.AWAITING_APPROVAL,
+                    message=confirmation.exact_action,
+                    data=confirmation.model_dump(mode="json"),
+                )
+            )
+            return ExecutionOutcome(confirmation=confirmation, call=plan.steps[0].call)
+
+        return ExecutionOutcome(
+            result=self._aggregate_plan_results(await self.execute_plan(plan)),
+            call=plan.steps[0].call,
+        )
+
     async def execute(
         self, call: SkillCall, *, confirmation_id: UUID | None = None, typed_token: str | None = None
     ) -> SkillResult:
@@ -444,6 +578,36 @@ class ExecutionEngine:
                     ResultStatus.TIMED_OUT,
                 )
         return results
+
+    @staticmethod
+    def _aggregate_plan_results(results: Mapping[str, SkillResult]) -> SkillResult:
+        if all(result.status == ResultStatus.COMPLETED for result in results.values()):
+            status = ResultStatus.COMPLETED
+            summary = "Plan completed."
+        elif any(result.status == ResultStatus.COMPLETED for result in results.values()):
+            status = ResultStatus.PARTIAL
+            summary = "Plan partially completed."
+        else:
+            status = ResultStatus.FAILED
+            summary = "Plan failed."
+        display_lines = []
+        for step_id, result in results.items():
+            detail = result.display_text or result.summary
+            if result.error:
+                detail = f"{detail}\n{result.error.code}: {result.error.message}"
+            display_lines.append(f"{step_id}: {detail}")
+        return SkillResult(
+            status=status,
+            summary=summary,
+            display_text="\n\n".join(display_lines),
+            data={
+                "steps": {
+                    step_id: result.model_dump(mode="json")
+                    for step_id, result in results.items()
+                }
+            },
+            sensitive=any(result.sensitive for result in results.values()),
+        )
 
     async def cancel(self, correlation_id: UUID | None = None) -> None:
         self.confirmations.cancel_all()

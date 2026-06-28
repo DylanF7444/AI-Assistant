@@ -9,6 +9,7 @@ BUILT_IN_CAPABILITIES = (
     "clipboard.read",
     "clipboard.write",
     "device.control",
+    "device.read",
     "filesystem.read",
     "filesystem.write",
     "input.control",
@@ -21,6 +22,10 @@ BUILT_IN_CAPABILITIES = (
     "process.window",
     "settings.get",
     "settings.set",
+    "system.apps",
+    "system.display",
+    "system.network",
+    "system.power",
 )
 
 
