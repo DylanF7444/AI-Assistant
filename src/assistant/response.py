@@ -29,6 +29,11 @@ def response_from_result(
             details.append(f"{result.error.code}: {result.error.message}")
         if details:
             display = display + "\n\n" + "\n".join(details)
+    elif result.error and result.status in {
+        ResultStatus.FAILED,
+        ResultStatus.TIMED_OUT,
+    }:
+        display = display + f"\n\n{result.error.code}: {result.error.message}"
     speech = result.speech_text or result.summary
     if result.sensitive and not allow_sensitive_speech:
         speech = "The requested action has been processed. See the screen for details."

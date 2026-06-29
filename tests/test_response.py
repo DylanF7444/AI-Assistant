@@ -1,4 +1,4 @@
-from assistant.contracts import ResponseType, ResultStatus, SkillResult
+from assistant.contracts import ResponseType, ResultStatus, SkillError, SkillResult
 from assistant.response import response_from_result
 
 
@@ -21,6 +21,23 @@ def test_failure_never_claims_success():
     )
     assert response.severity == "error"
     assert "Could not" in response.display_text
+
+
+def test_failure_includes_error_details_in_normal_mode():
+    response = response_from_result(
+        SkillResult(
+            status=ResultStatus.FAILED,
+            summary="The action failed.",
+            error=SkillError(
+                code="skill_failed",
+                message="Changing Wi-Fi requires administrator privileges.",
+            ),
+        )
+    )
+    assert "The action failed." in response.display_text
+    assert "skill_failed: Changing Wi-Fi requires administrator privileges." in (
+        response.display_text
+    )
 
 
 def test_detailed_mode_and_sensitive_display_privacy():

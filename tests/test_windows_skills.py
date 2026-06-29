@@ -16,7 +16,7 @@ from assistant.skills.windows import (
     WindowsDeviceControlSkill,
     WindowsSettingSkill,
 )
-from assistant.windows.adapters import ProcessInfo
+from assistant.windows.adapters import LocalWindowsDeviceAdapter, ProcessInfo
 
 
 class FakeFiles:
@@ -193,6 +193,27 @@ class FakeDeviceControl:
 
     async def set_connected_device_enabled(self, instance_id, enabled):
         self.calls.append(("set_connected_device_enabled", instance_id, enabled))
+
+
+@pytest.mark.asyncio
+async def test_local_wifi_toggle_explains_admin_requirement(monkeypatch):
+    async def fake_json_powershell(script):
+        return {"Name": "Wi-Fi", "Status": "Up"}
+
+    async def fake_powershell(script):
+        raise RuntimeError("Access is denied.")
+
+    monkeypatch.setattr(
+        LocalWindowsDeviceAdapter,
+        "_json_powershell",
+        staticmethod(fake_json_powershell),
+    )
+    monkeypatch.setattr(
+        LocalWindowsDeviceAdapter, "_powershell", staticmethod(fake_powershell)
+    )
+
+    with pytest.raises(RuntimeError, match="administrator privileges"):
+        await LocalWindowsDeviceAdapter().set_wifi_enabled(False)
 
 
 def call(skill_id, arguments):

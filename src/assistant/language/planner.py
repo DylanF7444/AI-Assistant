@@ -283,6 +283,13 @@ class LocalPlanner:
     @staticmethod
     def _conversation_intent(output: dict[str, Any]) -> Intent:
         answer = (output["answer"] or "").strip()
+        if not answer and output["disposition"] == "reject":
+            reason = output.get("arguments", {}).get("reason")
+            answer = (
+                reason.strip()
+                if isinstance(reason, str) and reason.strip()
+                else "I cannot handle that request with the available local skills."
+            )
         if not answer:
             raise ValidationError("Model returned an empty conversational response")
         return Intent(

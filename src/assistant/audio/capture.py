@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import array
 import math
+import re
 import time
 import wave
 from datetime import UTC, datetime
@@ -21,6 +22,16 @@ class AudioDevice:
     input_channels: int
     output_channels: int
     default_sample_rate: float
+    host_api: str = ""
+
+
+@dataclass(frozen=True)
+class DisplayAudioDevice:
+    index: int
+    label: str
+    input_channels: int
+    output_channels: int
+    default_sample_rate: float
 
 
 def enumerate_devices() -> tuple[AudioDevice, ...]:
@@ -28,6 +39,7 @@ def enumerate_devices() -> tuple[AudioDevice, ...]:
         import sounddevice as sd
     except ImportError:
         return ()
+    host_apis = sd.query_hostapis()
     return tuple(
         AudioDevice(
             index=index,
@@ -35,9 +47,104 @@ def enumerate_devices() -> tuple[AudioDevice, ...]:
             input_channels=item["max_input_channels"],
             output_channels=item["max_output_channels"],
             default_sample_rate=item["default_samplerate"],
+            host_api=host_apis[item["hostapi"]]["name"],
         )
         for index, item in enumerate(sd.query_devices())
     )
+
+
+_DEVICE_NAME_SUFFIX = re.compile(r"\s*\((\d+)-\s*(in|out)\)\s*$", re.IGNORECASE)
+_COMMON_DEVICE_WRAPPER = re.compile(
+    r"^(headset microphone|headset|microphone|speakers?)\s+\(([^)]+)\)$",
+    re.IGNORECASE,
+)
+_BLUETOOTH_INSTANCE_NAME = re.compile(r";\(([^)]+)\)")
+_BLUETOOTH_ROLE = re.compile(r"hands-free(?:\s+hf\s+audio)?", re.IGNORECASE)
+_NOISY_PREFIX = re.compile(
+    r"^(headset microphone|headset|microphone|input)\s+",
+    re.IGNORECASE,
+)
+_PSEUDO_INPUT_NAMES = {
+    "microsoft sound mapper - input",
+    "primary sound capture driver",
+}
+_PSEUDO_OUTPUT_NAMES = {
+    "microsoft sound mapper - output",
+    "primary sound driver",
+}
+_HOST_API_PRIORITY = {
+    "windows wasapi": 0,
+    "windows wdm-ks": 1,
+    "windows directsound": 2,
+    "mme": 3,
+}
+
+
+def display_audio_devices(
+    devices: tuple[AudioDevice, ...] | None = None,
+    *,
+    input_only: bool = False,
+    output_only: bool = False,
+) -> tuple[DisplayAudioDevice, ...]:
+    raw_devices = enumerate_devices() if devices is None else devices
+    candidates: dict[str, tuple[tuple[int, int, int], DisplayAudioDevice]] = {}
+    for order, device in enumerate(raw_devices):
+        if input_only and not device.input_channels:
+            continue
+        if output_only and not device.output_channels:
+            continue
+        if _is_pseudo_device(device.name, input_only=input_only, output_only=output_only):
+            continue
+        label = _clean_device_label(device.name)
+        if not label:
+            continue
+        candidate = DisplayAudioDevice(
+            index=device.index,
+            label=label,
+            input_channels=device.input_channels,
+            output_channels=device.output_channels,
+            default_sample_rate=device.default_sample_rate,
+        )
+        key = label.casefold()
+        rank = (
+            _HOST_API_PRIORITY.get(device.host_api.casefold(), 10),
+            0 if device.input_channels or device.output_channels else 1,
+            order,
+        )
+        if key not in candidates or rank < candidates[key][0]:
+            candidates[key] = (rank, candidate)
+    return tuple(item for _, item in sorted(candidates.values(), key=lambda row: row[0]))
+
+
+def _is_pseudo_device(
+    name: str, *, input_only: bool = False, output_only: bool = False
+) -> bool:
+    normalized = name.strip().casefold()
+    pseudo_names = set()
+    if input_only or not output_only:
+        pseudo_names.update(_PSEUDO_INPUT_NAMES)
+    if output_only or not input_only:
+        pseudo_names.update(_PSEUDO_OUTPUT_NAMES)
+    return normalized in pseudo_names or re.fullmatch(r"input\s*\(?\d+\)?", normalized) is not None
+
+
+def _clean_device_label(name: str) -> str:
+    label = " ".join(name.strip().split())
+    label = _DEVICE_NAME_SUFFIX.sub("", label)
+    label = label.replace("Audio Device", "").strip()
+    wrapper_match = _COMMON_DEVICE_WRAPPER.match(label)
+    if wrapper_match:
+        label = wrapper_match.group(2).strip()
+    bluetooth_match = _BLUETOOTH_INSTANCE_NAME.search(label)
+    if bluetooth_match:
+        device_name = bluetooth_match.group(1).strip()
+        role = "Hands-Free" if _BLUETOOTH_ROLE.search(label) else ""
+        label = f"{device_name} {role}".strip()
+    label = _NOISY_PREFIX.sub("", label)
+    label = re.sub(r"\s+", " ", label).strip()
+    if _BLUETOOTH_ROLE.search(label) and "Hands-Free" not in label:
+        label = _BLUETOOTH_ROLE.sub("Hands-Free", label)
+    return label
 
 
 class AudioCapture:

@@ -256,6 +256,32 @@ async def test_planner_uses_answer_when_model_mislabels_it_as_a_skill():
 
 
 @pytest.mark.asyncio
+async def test_planner_accepts_empty_reject_answer_with_reason():
+    planner = LocalPlanner(
+        FakeProvider(
+            {
+                "disposition": "reject",
+                "skill_id": "",
+                "arguments": {
+                    "reason": "The request cannot be handled by any registered skill."
+                },
+                "answer": "",
+                "confidence": 0.95,
+                "clarification": None,
+            }
+        ),
+        SkillRetriever(()),
+    )
+
+    intent = await planner.plan("turn off my wifi")
+
+    assert intent.name == "conversation.reject"
+    assert intent.arguments["text"] == (
+        "The request cannot be handled by any registered skill."
+    )
+
+
+@pytest.mark.asyncio
 async def test_planner_infers_missing_skill_id_from_valid_arguments():
     planner = LocalPlanner(
         FakeProvider(

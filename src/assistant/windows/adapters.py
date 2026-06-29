@@ -454,9 +454,21 @@ class LocalWindowsDeviceAdapter:
             raise RuntimeError("No Wi-Fi adapter was found")
         target = (adapter.get("Status") != "Up") if enabled is None else enabled
         verb = "Enable-NetAdapter" if target else "Disable-NetAdapter"
-        await self._powershell(
-            f"{verb} -Name {json.dumps(adapter['Name'])} -Confirm:$false"
-        )
+        try:
+            await self._powershell(
+                f"{verb} -Name {json.dumps(adapter['Name'])} -Confirm:$false"
+            )
+        except RuntimeError as exc:
+            message = str(exc)
+            if any(
+                phrase in message.casefold()
+                for phrase in ("access is denied", "administrator", "privilege")
+            ):
+                raise RuntimeError(
+                    "Changing Wi-Fi requires administrator privileges. "
+                    "Restart the assistant as administrator, then try again."
+                ) from exc
+            raise
         return bool(target)
 
     async def set_bluetooth_enabled(self, enabled: bool | None) -> bool:

@@ -419,7 +419,7 @@ class DeterministicRouter:
                     )
                 )
         if match := re.fullmatch(
-            r"(?:(?:turn|toggle) (wi-?fi|wifi|wireless)(?: (on|off))?|turn (on|off) (wi-?fi|wifi|wireless)|(?:enable|disable) (wi-?fi|wifi|wireless))",
+            r"(?:(?:turn|toggle) (?:my |the )?(wi-?fi|wifi|wireless)(?: (on|off))?|turn (on|off) (?:my |the )?(wi-?fi|wifi|wireless)|(?:enable|disable) (?:my |the )?(wi-?fi|wifi|wireless))",
             routed,
         ):
             enabled = None

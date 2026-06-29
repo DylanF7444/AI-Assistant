@@ -21,7 +21,7 @@ from assistant.models import ModelManifest
 from assistant.storage.database import ItemRow, SettingsStore
 from assistant.storage.macros import MacroDefinition, MacroStep
 from assistant.storage.history import HistoryStore
-from assistant.audio.capture import enumerate_devices
+from assistant.audio.capture import display_audio_devices
 from assistant.storage.secrets import SecretVault
 
 
@@ -992,9 +992,8 @@ def run_desktop(container: Container) -> int:
             self.setting_speech.setCurrentText(container.settings.speech_mode)
             self.setting_input = QComboBox()
             self.setting_input.addItem("System default", None)
-            for device in enumerate_devices():
-                if device.input_channels:
-                    self.setting_input.addItem(device.name, device.index)
+            for device in display_audio_devices(input_only=True):
+                self.setting_input.addItem(device.label, device.index)
             selected = self.setting_input.findData(
                 container.settings.audio_input_device
             )

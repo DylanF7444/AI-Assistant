@@ -229,6 +229,7 @@ def test_window_coordinate_move_and_resize_route():
             {"operation": "change_brightness", "delta": -15},
         ),
         ("turn off wifi", {"operation": "toggle_wifi", "enabled": False}),
+        ("turn off my wifi", {"operation": "toggle_wifi", "enabled": False}),
         ("toggle bluetooth", {"operation": "toggle_bluetooth", "enabled": None}),
         ("restart the computer", {"operation": "restart_device"}),
         ("shutdown computer", {"operation": "shutdown_device"}),
