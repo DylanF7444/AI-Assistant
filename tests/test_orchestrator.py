@@ -361,6 +361,43 @@ async def test_turn_off_my_wifi_does_not_use_local_planner(settings):
 
 
 @pytest.mark.asyncio
+async def test_set_my_device_volume_does_not_use_local_planner(settings):
+    container = build_container(settings)
+    container.orchestrator.planner = BrokenPlanner()
+
+    response, outcome = await container.orchestrator.handle_text(
+        "Set my device volume to 80"
+    )
+
+    assert response.response_type == ResponseType.PERMISSION
+    assert "local planner" not in response.display_text
+    assert len(outcome.permission_requests) == 1
+    request = outcome.permission_requests[0]
+    assert request.call.skill_id == "windows.device_control"
+    assert request.call.arguments == {
+        "operation": "set_volume",
+        "level": 80,
+    }
+    assert request.scope.capability == "media.control"
+
+
+@pytest.mark.asyncio
+async def test_unmute_my_audio_does_not_use_local_planner(settings):
+    container = build_container(settings)
+    container.orchestrator.planner = BrokenPlanner()
+
+    response, outcome = await container.orchestrator.handle_text("Unmute my audio")
+
+    assert response.response_type == ResponseType.PERMISSION
+    assert "local planner" not in response.display_text
+    assert len(outcome.permission_requests) == 1
+    request = outcome.permission_requests[0]
+    assert request.call.skill_id == "windows.device_control"
+    assert request.call.arguments == {"operation": "unmute_audio"}
+    assert request.scope.capability == "media.control"
+
+
+@pytest.mark.asyncio
 async def test_invalid_planner_output_does_not_claim_ollama_is_stopped(settings):
     container = build_container(settings)
     container.orchestrator.planner = InvalidPlanner()

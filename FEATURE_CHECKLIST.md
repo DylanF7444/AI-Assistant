@@ -34,13 +34,13 @@
 - [X] Close applications
 - [X] Switch between open apps (focus, minimize)
 - [ ] Search installed apps
-- [ ] Adjust system volume
-- [ ] Mute/unmute audio
+- [X] Adjust system volume
+- [X] Mute/unmute audio
 - [ ] Adjust screen brightness
 - [X] Toggle Wi-Fi
 - [ ] Toggle Bluetooth
 - [ ] Toggle dark/light mode
-- [ ] Lock the device
+- [X] Lock the device
 - [ ] Restart the device with confirmation
 - [ ] Shut down the device with confirmation
 - [ ] Show battery status

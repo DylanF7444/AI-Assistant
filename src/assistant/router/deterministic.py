@@ -327,8 +327,9 @@ class DeterministicRouter:
                     source="rule",
                 )
             )
+        audio_target = r"(?:(?:my|the) )?(?:(?:system|device|computer) )?(?:volume|sound|audio)"
         if match := re.fullmatch(
-            r"(?:set|adjust) (?:system )?(?:volume|sound|audio)(?: to)? (.+?)(?: percent|%)?",
+            rf"(?:set|adjust) {audio_target}(?: to)? (.+?)(?: percent|%)?",
             routed,
         ):
             if (level := self._percent(match.group(1))) is not None:
@@ -341,7 +342,7 @@ class DeterministicRouter:
                     )
                 )
         if match := re.fullmatch(
-            r"(increase|raise|decrease|lower|turn up|turn down) (?:system )?(?:volume|sound|audio)(?: by)? (.+?)(?: percent|%)?",
+            rf"(increase|raise|decrease|lower|turn up|turn down) {audio_target}(?: by)? (.+?)(?: percent|%)?",
             routed,
         ):
             if (value := self._percent(match.group(2))) is not None:
@@ -357,13 +358,7 @@ class DeterministicRouter:
                         source="rule",
                     )
                 )
-        if routed in {
-            "mute audio",
-            "mute sound",
-            "mute system audio",
-            "mute system sound",
-            "mute the audio",
-        }:
+        if re.fullmatch(rf"mute {audio_target}", routed):
             return RouteResult(
                 Intent(
                     name="windows.device_control",
@@ -372,14 +367,7 @@ class DeterministicRouter:
                     source="rule",
                 )
             )
-        if routed in {
-            "unmute audio",
-            "unmute sound",
-            "unmute volume",
-            "unmute system audio",
-            "unmute system sound",
-            "unmute the audio",
-        }:
+        if re.fullmatch(rf"unmute {audio_target}", routed):
             return RouteResult(
                 Intent(
                     name="windows.device_control",
@@ -440,7 +428,7 @@ class DeterministicRouter:
                 )
             )
         if match := re.fullmatch(
-            r"(?:(?:turn|toggle) bluetooth(?: (on|off))?|turn (on|off) bluetooth|(?:enable|disable) bluetooth)",
+            r"(?:(?:turn|toggle) (?:my |the )?bluetooth(?: (on|off))?|turn (on|off) (?:my |the )?bluetooth|(?:enable|disable) (?:my |the )?bluetooth)",
             routed,
         ):
             enabled = None

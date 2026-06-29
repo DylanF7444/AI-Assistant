@@ -1,3 +1,5 @@
+Start-Process powershell -Verb RunAs -ArgumentList '-NoExit', '-Command', 'cd "C:\Users\Dylan nonadmin\Desktop\PROJECTS\Assistant"; python -m assistant.app'
+
 # Local Assistant
 
 An offline-first Windows desktop assistant with typed skill contracts, explicit
