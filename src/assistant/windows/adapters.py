@@ -4,6 +4,7 @@ import os
 import csv
 import ctypes
 import json
+import re
 import shutil
 import subprocess
 import uuid
@@ -71,7 +72,11 @@ class WindowsDeviceAdapter(Protocol):
     async def set_brightness(self, level: int) -> None: ...
     async def change_brightness(self, delta: int) -> int: ...
     async def set_wifi_enabled(self, enabled: bool | None) -> bool: ...
+    async def connect_wifi_network(self, ssid: str) -> None: ...
+    async def disconnect_wifi_network(self, ssid: str | None = None) -> None: ...
     async def set_bluetooth_enabled(self, enabled: bool | None) -> bool: ...
+    async def connect_bluetooth_device(self, device_name: str) -> None: ...
+    async def disconnect_bluetooth_device(self, device_name: str) -> None: ...
     async def lock_device(self) -> None: ...
     async def restart_device(self) -> None: ...
     async def shutdown_device(self) -> None: ...
@@ -471,21 +476,68 @@ class LocalWindowsDeviceAdapter:
             raise
         return bool(target)
 
+    async def connect_wifi_network(self, ssid: str) -> None:
+        adapter = await self._wifi_adapter()
+        await self._run(
+            "netsh",
+            "wlan",
+            "connect",
+            f"name={ssid}",
+            f"ssid={ssid}",
+            f"interface={adapter['Name']}",
+        )
+
+    async def disconnect_wifi_network(self, ssid: str | None = None) -> None:
+        adapter = await self._wifi_adapter()
+        if ssid:
+            current = await self._current_wifi_ssid(adapter["Name"])
+            if current.casefold() != ssid.casefold():
+                raise RuntimeError(f"Wi-Fi is not connected to {ssid}")
+        await self._run("netsh", "wlan", "disconnect", f"interface={adapter['Name']}")
+
     async def set_bluetooth_enabled(self, enabled: bool | None) -> bool:
         devices = await self._json_powershell(
             "Get-PnpDevice -Class Bluetooth | "
             "Where-Object { $_.Status -in @('OK','Error') } | "
-            "Select-Object -First 1 -Property InstanceId,Status"
+            "Select-Object -Property FriendlyName,InstanceId,Status"
         )
-        device = self._first(devices)
+        rows = devices if isinstance(devices, list) else ([devices] if devices else [])
+        candidates = [
+            row
+            for row in rows
+            if isinstance(row, dict)
+            and row.get("InstanceId")
+            and not str(row.get("InstanceId")).upper().startswith("BTHENUM\\")
+        ]
+        device = candidates[0] if candidates else None
         if not device or not device.get("InstanceId"):
-            raise RuntimeError("No Bluetooth device was found")
+            raise RuntimeError("No controllable Bluetooth radio was found")
         target = (device.get("Status") != "OK") if enabled is None else enabled
         verb = "Enable-PnpDevice" if target else "Disable-PnpDevice"
-        await self._powershell(
-            f"{verb} -InstanceId {json.dumps(device['InstanceId'])} -Confirm:$false"
-        )
+        try:
+            await self._powershell(
+                f"{verb} -InstanceId {self._ps_single_quoted(str(device['InstanceId']))} -Confirm:$false"
+            )
+        except RuntimeError as exc:
+            message = str(exc)
+            if any(
+                phrase in message.casefold()
+                for phrase in ("access is denied", "administrator", "privilege")
+            ):
+                raise RuntimeError(
+                    "Changing Bluetooth requires administrator privileges. "
+                    "Restart the assistant as administrator, then try again."
+                ) from exc
+            raise
         return bool(target)
+
+    async def connect_bluetooth_device(self, device_name: str) -> None:
+        device = await self._bluetooth_peripheral(device_name)
+        await self._set_bluetooth_peripheral_enabled(device, True)
+
+    async def disconnect_bluetooth_device(self, device_name: str) -> None:
+        device = await self._bluetooth_peripheral(device_name)
+        await self._set_bluetooth_peripheral_enabled(device, False)
 
     async def lock_device(self) -> None:
         if not ctypes.windll.user32.LockWorkStation():
@@ -571,8 +623,188 @@ class LocalWindowsDeviceAdapter:
     ) -> None:
         verb = "Enable-PnpDevice" if enabled else "Disable-PnpDevice"
         await self._powershell(
-            f"{verb} -InstanceId {json.dumps(instance_id)} -Confirm:$false"
+            f"{verb} -InstanceId {self._ps_single_quoted(instance_id)} -Confirm:$false"
         )
+
+    async def _wifi_adapter(self) -> dict:
+        adapters = await self._json_powershell(
+            "Get-NetAdapter | Where-Object { $_.NdisPhysicalMedium -eq 9 -or "
+            "$_.Name -match 'wi-?fi|wireless|wlan' } | "
+            "Select-Object -First 1 -Property Name,Status"
+        )
+        adapter = self._first(adapters)
+        if not adapter or not adapter.get("Name"):
+            raise RuntimeError("No Wi-Fi adapter was found")
+        return adapter
+
+    async def _current_wifi_ssid(self, interface_name: str) -> str:
+        output = await self._run("netsh", "wlan", "show", "interfaces")
+        in_target_interface = False
+        current_ssid = ""
+        for line in output.splitlines():
+            key, _, value = line.partition(":")
+            key = key.strip().casefold()
+            value = value.strip()
+            if key == "name":
+                in_target_interface = value.casefold() == interface_name.casefold()
+            elif in_target_interface and key == "ssid" and value:
+                current_ssid = value
+                break
+        return current_ssid
+
+    async def _bluetooth_peripheral(self, device_name: str) -> dict:
+        candidates = await self._bluetooth_peripheral_matches(device_name)
+        if not candidates and self._is_audio_device_alias(device_name):
+            for resolved_name in await self._bluetooth_audio_device_names(device_name):
+                candidates = await self._bluetooth_peripheral_matches(resolved_name)
+                if candidates:
+                    break
+        if not candidates:
+            raise RuntimeError(f"No paired Bluetooth device matched {device_name}")
+        exact = [
+            row
+            for row in candidates
+            if str(row.get("FriendlyName", "")).casefold() == device_name.casefold()
+        ]
+        return exact[0] if exact else candidates[0]
+
+    async def _bluetooth_peripheral_matches(self, device_name: str) -> list[dict]:
+        devices = await self._json_powershell(
+            "Get-PnpDevice -Class Bluetooth | "
+            "Where-Object { $_.FriendlyName -and $_.FriendlyName -like "
+            f"{self._ps_single_quoted('*' + device_name + '*')} }} | "
+            "Select-Object -Property FriendlyName,InstanceId,Status"
+        )
+        rows = devices if isinstance(devices, list) else ([devices] if devices else [])
+        return [
+            row
+            for row in rows
+            if isinstance(row, dict)
+            and row.get("InstanceId")
+            and str(row.get("InstanceId")).upper().startswith("BTHENUM\\")
+        ]
+
+    async def _bluetooth_audio_device_names(self, alias: str) -> list[str]:
+        devices = await self._json_powershell(
+            "Get-PnpDevice -PresentOnly | "
+            "Where-Object { $_.FriendlyName } | "
+            "Select-Object -Property FriendlyName,Class,Status,InstanceId"
+        )
+        rows = devices if isinstance(devices, list) else ([devices] if devices else [])
+        names: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("FriendlyName") or "").strip()
+            if not self._looks_like_audio_endpoint(name, str(row.get("Class") or "")):
+                continue
+            if not self._audio_alias_matches(alias, name):
+                continue
+            for candidate in self._audio_device_search_names(name):
+                folded = candidate.casefold()
+                if folded and folded not in {item.casefold() for item in names}:
+                    names.append(candidate)
+        return names
+
+    @staticmethod
+    def _is_audio_device_alias(value: str) -> bool:
+        return value.casefold().strip() in {
+            "headphone",
+            "headphones",
+            "headset",
+            "headsets",
+            "earbud",
+            "earbuds",
+            "speaker",
+            "speakers",
+        }
+
+    @classmethod
+    def _audio_alias_matches(cls, alias: str, name: str) -> bool:
+        if not cls._is_audio_device_alias(alias):
+            return alias.casefold() in name.casefold()
+        folded_name = name.casefold()
+        return any(
+            word in folded_name
+            for word in (
+                "headphone",
+                "headphones",
+                "headset",
+                "earbud",
+                "earbuds",
+                "hands-free",
+                "stereo",
+                "speaker",
+                "audio",
+            )
+        )
+
+    @staticmethod
+    def _looks_like_audio_endpoint(name: str, device_class: str) -> bool:
+        folded = f"{device_class} {name}".casefold()
+        return any(
+            word in folded
+            for word in (
+                "audio",
+                "media",
+                "headphone",
+                "headphones",
+                "headset",
+                "earbud",
+                "earbuds",
+                "hands-free",
+                "stereo",
+                "speaker",
+            )
+        )
+
+    @staticmethod
+    def _audio_device_search_names(name: str) -> list[str]:
+        candidates: list[str] = []
+        for match in re.finditer(r"\(([^()]+)\)", name):
+            value = match.group(1).strip()
+            value = re.sub(
+                r"\b(?:stereo|hands-free|headphones?|headsets?|speakers?|audio)\b",
+                "",
+                value,
+                flags=re.IGNORECASE,
+            ).strip(" -")
+            if value:
+                candidates.append(value)
+        cleaned = re.sub(
+            r"\b(?:stereo|hands-free|headphones?|headsets?|speakers?|audio)\b",
+            "",
+            name,
+            flags=re.IGNORECASE,
+        ).strip(" -()")
+        if cleaned:
+            candidates.append(cleaned)
+        return candidates
+
+    async def _set_bluetooth_peripheral_enabled(
+        self, device: dict, enabled: bool
+    ) -> None:
+        verb = "Enable-PnpDevice" if enabled else "Disable-PnpDevice"
+        try:
+            await self._powershell(
+                f"{verb} -InstanceId {self._ps_single_quoted(str(device['InstanceId']))} -Confirm:$false"
+            )
+        except RuntimeError as exc:
+            message = str(exc)
+            if any(
+                phrase in message.casefold()
+                for phrase in ("access is denied", "administrator", "privilege")
+            ):
+                action = "Connecting to" if enabled else "Disconnecting from"
+                raise RuntimeError(
+                    f"{action} Bluetooth devices requires administrator privileges. "
+                    "Restart the assistant as administrator, then try again."
+                ) from exc
+            raise
+
+    @staticmethod
+    def _ps_single_quoted(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
 
     @staticmethod
     def _registry_value(key, name: str) -> str | None:

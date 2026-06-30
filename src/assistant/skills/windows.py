@@ -596,7 +596,11 @@ class DeviceControlInput(BaseModel):
         "set_brightness",
         "change_brightness",
         "toggle_wifi",
+        "connect_wifi_network",
+        "disconnect_wifi_network",
         "toggle_bluetooth",
+        "connect_bluetooth_device",
+        "disconnect_bluetooth_device",
         "lock_device",
         "restart_device",
         "shutdown_device",
@@ -611,6 +615,8 @@ class DeviceControlInput(BaseModel):
     level: int | None = Field(default=None, ge=0, le=100)
     delta: int | None = Field(default=None, ge=-100, le=100)
     enabled: bool | None = None
+    network_name: str | None = Field(default=None, min_length=1, max_length=100)
+    device_name: str | None = Field(default=None, min_length=1, max_length=200)
     drive: str | None = Field(default=None, pattern=r"^[A-Za-z]:?\\?$")
     instance_id: str | None = Field(default=None, min_length=1, max_length=500)
     limit: int = Field(default=20, ge=1, le=200)
@@ -626,6 +632,14 @@ class DeviceControlInput(BaseModel):
             and not self.instance_id
         ):
             raise ValueError(f"{self.operation} requires instance_id")
+        if self.operation == "connect_wifi_network" and not self.network_name:
+            raise ValueError("connect_wifi_network requires network_name")
+        if (
+            self.operation
+            in {"connect_bluetooth_device", "disconnect_bluetooth_device"}
+            and not self.device_name
+        ):
+            raise ValueError(f"{self.operation} requires device_name")
         return self
 
 
@@ -646,7 +660,14 @@ class WindowsDeviceControlSkill(Skill):
     }
     AUDIO_OPERATIONS = {"set_volume", "change_volume", "mute_audio", "unmute_audio"}
     DISPLAY_OPERATIONS = {"set_brightness", "change_brightness"}
-    NETWORK_OPERATIONS = {"toggle_wifi", "toggle_bluetooth"}
+    NETWORK_OPERATIONS = {
+        "toggle_wifi",
+        "connect_wifi_network",
+        "disconnect_wifi_network",
+        "toggle_bluetooth",
+        "connect_bluetooth_device",
+        "disconnect_bluetooth_device",
+    }
     POWER_OPERATIONS = {"lock_device", "restart_device", "shutdown_device"}
 
     def __init__(self, adapter: WindowsDeviceAdapter) -> None:
@@ -695,6 +716,11 @@ class WindowsDeviceControlSkill(Skill):
         if args.operation in {"toggle_wifi", "toggle_bluetooth"}:
             state = "toggle" if args.enabled is None else ("on" if args.enabled else "off")
             return f"{name.title()} {state}"
+        if args.operation in {"connect_wifi_network", "disconnect_wifi_network"}:
+            target = args.network_name or "current network"
+            return f"{name.title()} {target}"
+        if args.operation in {"connect_bluetooth_device", "disconnect_bluetooth_device"}:
+            return f"{name.title()} {args.device_name}"
         if args.operation in {"enable_connected_device", "disable_connected_device"}:
             return f"{name.title()} {args.instance_id}"
         return name.title()
@@ -733,10 +759,30 @@ class WindowsDeviceControlSkill(Skill):
             enabled = await self.adapter.set_wifi_enabled(args.enabled)
             result = {"enabled": enabled}
             summary = f"Wi-Fi turned {'on' if enabled else 'off'}."
+        elif args.operation == "connect_wifi_network":
+            await self.adapter.connect_wifi_network(args.network_name or "")
+            result = {"network_name": args.network_name, "connected": True}
+            summary = f"Connected to Wi-Fi network {args.network_name}."
+        elif args.operation == "disconnect_wifi_network":
+            await self.adapter.disconnect_wifi_network(args.network_name)
+            result = {"network_name": args.network_name, "connected": False}
+            summary = (
+                f"Disconnected from Wi-Fi network {args.network_name}."
+                if args.network_name
+                else "Disconnected from Wi-Fi."
+            )
         elif args.operation == "toggle_bluetooth":
             enabled = await self.adapter.set_bluetooth_enabled(args.enabled)
             result = {"enabled": enabled}
             summary = f"Bluetooth turned {'on' if enabled else 'off'}."
+        elif args.operation == "connect_bluetooth_device":
+            await self.adapter.connect_bluetooth_device(args.device_name or "")
+            result = {"device_name": args.device_name, "connected": True}
+            summary = f"Connected Bluetooth device {args.device_name}."
+        elif args.operation == "disconnect_bluetooth_device":
+            await self.adapter.disconnect_bluetooth_device(args.device_name or "")
+            result = {"device_name": args.device_name, "connected": False}
+            summary = f"Disconnected Bluetooth device {args.device_name}."
         elif args.operation == "lock_device":
             await self.adapter.lock_device()
             result = {"locked": True}
@@ -805,8 +851,12 @@ class WindowsDeviceControlSkill(Skill):
             return args.query or "*"
         if args.operation == "toggle_wifi":
             return "wi-fi"
+        if args.operation in {"connect_wifi_network", "disconnect_wifi_network"}:
+            return args.network_name or "wi-fi"
         if args.operation == "toggle_bluetooth":
             return "bluetooth"
+        if args.operation in {"connect_bluetooth_device", "disconnect_bluetooth_device"}:
+            return args.device_name or "bluetooth"
         if args.operation in {"set_volume", "change_volume", "mute_audio", "unmute_audio"}:
             return "system-audio"
         if args.operation in {"set_brightness", "change_brightness"}:

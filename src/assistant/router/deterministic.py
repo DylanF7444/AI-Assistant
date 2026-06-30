@@ -407,6 +407,66 @@ class DeterministicRouter:
                     )
                 )
         if match := re.fullmatch(
+            r"connect (?:to )?(?:my |the )?(?:wi-?fi|wifi|wireless)(?: network)? (.+)",
+            routed,
+        ):
+            return RouteResult(
+                Intent(
+                    name="windows.device_control",
+                    arguments={
+                        "operation": "connect_wifi_network",
+                        "network_name": match.group(1).strip(),
+                    },
+                    confidence=0.96,
+                    source="rule",
+                )
+            )
+        if match := re.fullmatch(
+            r"disconnect (?:from )?(?:my |the )?(?:wi-?fi|wifi|wireless)(?: network)?(?: (.+))?",
+            routed,
+        ):
+            arguments = {"operation": "disconnect_wifi_network"}
+            if match.group(1):
+                arguments["network_name"] = match.group(1).strip()
+            return RouteResult(
+                Intent(
+                    name="windows.device_control",
+                    arguments=arguments,
+                    confidence=0.96,
+                    source="rule",
+                )
+            )
+        if match := re.fullmatch(
+            r"connect (?:to )?(?:my |the )?bluetooth(?: device)? (.+)",
+            routed,
+        ):
+            return RouteResult(
+                Intent(
+                    name="windows.device_control",
+                    arguments={
+                        "operation": "connect_bluetooth_device",
+                        "device_name": match.group(1).strip(),
+                    },
+                    confidence=0.96,
+                    source="rule",
+                )
+            )
+        if match := re.fullmatch(
+            r"disconnect (?:from )?(?:my |the )?bluetooth(?: device)? (.+)",
+            routed,
+        ):
+            return RouteResult(
+                Intent(
+                    name="windows.device_control",
+                    arguments={
+                        "operation": "disconnect_bluetooth_device",
+                        "device_name": match.group(1).strip(),
+                    },
+                    confidence=0.96,
+                    source="rule",
+                )
+            )
+        if match := re.fullmatch(
             r"(?:(?:turn|toggle) (?:my |the )?(wi-?fi|wifi|wireless)(?: (on|off))?|turn (on|off) (?:my |the )?(wi-?fi|wifi|wireless)|(?:enable|disable) (?:my |the )?(wi-?fi|wifi|wireless))",
             routed,
         ):

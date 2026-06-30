@@ -162,9 +162,21 @@ class FakeDeviceControl:
         self.calls.append(("set_wifi_enabled", enabled))
         return True if enabled is None else enabled
 
+    async def connect_wifi_network(self, ssid):
+        self.calls.append(("connect_wifi_network", ssid))
+
+    async def disconnect_wifi_network(self, ssid=None):
+        self.calls.append(("disconnect_wifi_network", ssid))
+
     async def set_bluetooth_enabled(self, enabled):
         self.calls.append(("set_bluetooth_enabled", enabled))
         return False if enabled is None else enabled
+
+    async def connect_bluetooth_device(self, device_name):
+        self.calls.append(("connect_bluetooth_device", device_name))
+
+    async def disconnect_bluetooth_device(self, device_name):
+        self.calls.append(("disconnect_bluetooth_device", device_name))
 
     async def lock_device(self):
         self.calls.append(("lock_device",))
@@ -214,6 +226,194 @@ async def test_local_wifi_toggle_explains_admin_requirement(monkeypatch):
 
     with pytest.raises(RuntimeError, match="administrator privileges"):
         await LocalWindowsDeviceAdapter().set_wifi_enabled(False)
+
+
+@pytest.mark.asyncio
+async def test_local_bluetooth_toggle_targets_radio_not_profile_device(monkeypatch):
+    commands = []
+
+    async def fake_json_powershell(script):
+        return [
+            {
+                "FriendlyName": "Bluetooth A2DP Source",
+                "InstanceId": r"BTHENUM\{0000110E-0000-1000-8000-00805F9B34FB}_LOCALMFG&005D\8&1098DC82&0&DEVICE",
+                "Status": "OK",
+            },
+            {
+                "FriendlyName": "Intel(R) Wireless Bluetooth(R)",
+                "InstanceId": r"USB\VID_8087&PID_0033\5&2C2A",
+                "Status": "OK",
+            },
+        ]
+
+    async def fake_powershell(script):
+        commands.append(script)
+        return ""
+
+    monkeypatch.setattr(
+        LocalWindowsDeviceAdapter,
+        "_json_powershell",
+        staticmethod(fake_json_powershell),
+    )
+    monkeypatch.setattr(
+        LocalWindowsDeviceAdapter, "_powershell", staticmethod(fake_powershell)
+    )
+
+    enabled = await LocalWindowsDeviceAdapter().set_bluetooth_enabled(False)
+
+    assert enabled is False
+    assert commands == [
+        "Disable-PnpDevice -InstanceId 'USB\\VID_8087&PID_0033\\5&2C2A' -Confirm:$false"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_local_bluetooth_toggle_rejects_profile_only_devices(monkeypatch):
+    async def fake_json_powershell(script):
+        return {
+            "FriendlyName": "Bluetooth A2DP Source",
+            "InstanceId": r"BTHENUM\{0000110E-0000-1000-8000-00805F9B34FB}\DEVICE",
+            "Status": "OK",
+        }
+
+    monkeypatch.setattr(
+        LocalWindowsDeviceAdapter,
+        "_json_powershell",
+        staticmethod(fake_json_powershell),
+    )
+
+    with pytest.raises(RuntimeError, match="No controllable Bluetooth radio"):
+        await LocalWindowsDeviceAdapter().set_bluetooth_enabled(True)
+
+
+@pytest.mark.asyncio
+async def test_local_wifi_connect_and_named_disconnect_target_interface(monkeypatch):
+    calls = []
+
+    async def fake_json_powershell(script):
+        return {"Name": "Wi-Fi", "Status": "Up"}
+
+    async def fake_run(*args):
+        calls.append(args)
+        if args == ("netsh", "wlan", "show", "interfaces"):
+            return """
+Name                   : Wi-Fi
+State                  : connected
+SSID                   : Office
+"""
+        return ""
+
+    monkeypatch.setattr(
+        LocalWindowsDeviceAdapter,
+        "_json_powershell",
+        staticmethod(fake_json_powershell),
+    )
+    monkeypatch.setattr(LocalWindowsDeviceAdapter, "_run", staticmethod(fake_run))
+
+    adapter = LocalWindowsDeviceAdapter()
+    await adapter.connect_wifi_network("Office")
+    await adapter.disconnect_wifi_network("Office")
+
+    assert calls == [
+        (
+            "netsh",
+            "wlan",
+            "connect",
+            "name=Office",
+            "ssid=Office",
+            "interface=Wi-Fi",
+        ),
+        ("netsh", "wlan", "show", "interfaces"),
+        ("netsh", "wlan", "disconnect", "interface=Wi-Fi"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_local_bluetooth_disconnect_targets_paired_device_by_name(monkeypatch):
+    commands = []
+
+    async def fake_json_powershell(script):
+        return [
+            {
+                "FriendlyName": "Intel(R) Wireless Bluetooth(R)",
+                "InstanceId": r"USB\VID_8087&PID_0033\5&2C2A",
+                "Status": "OK",
+            },
+            {
+                "FriendlyName": "Dylan Headphones",
+                "InstanceId": r"BTHENUM\DEV_1234\7&ABC",
+                "Status": "OK",
+            },
+        ]
+
+    async def fake_powershell(script):
+        commands.append(script)
+        return ""
+
+    monkeypatch.setattr(
+        LocalWindowsDeviceAdapter,
+        "_json_powershell",
+        staticmethod(fake_json_powershell),
+    )
+    monkeypatch.setattr(
+        LocalWindowsDeviceAdapter, "_powershell", staticmethod(fake_powershell)
+    )
+
+    await LocalWindowsDeviceAdapter().disconnect_bluetooth_device("headphones")
+
+    assert commands == [
+        "Disable-PnpDevice -InstanceId 'BTHENUM\\DEV_1234\\7&ABC' -Confirm:$false"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_local_bluetooth_disconnect_resolves_generic_headphones_alias(monkeypatch):
+    commands = []
+
+    async def fake_json_powershell(script):
+        if "Get-PnpDevice -PresentOnly" in script:
+            return [
+                {
+                    "FriendlyName": "Keyboard",
+                    "Class": "Keyboard",
+                    "InstanceId": r"HID\KEYBOARD",
+                    "Status": "OK",
+                },
+                {
+                    "FriendlyName": "Headphones (soundcore q20i Stereo)",
+                    "Class": "AudioEndpoint",
+                    "InstanceId": r"SWD\MMDEVAPI\{0.0.0.00000000}",
+                    "Status": "OK",
+                },
+            ]
+        if "*headphones*" in script:
+            return []
+        if "*soundcore q20i*" in script:
+            return {
+                "FriendlyName": "soundcore q20i",
+                "InstanceId": r"BTHENUM\DEV_5678\9&DEF",
+                "Status": "OK",
+            }
+        return []
+
+    async def fake_powershell(script):
+        commands.append(script)
+        return ""
+
+    monkeypatch.setattr(
+        LocalWindowsDeviceAdapter,
+        "_json_powershell",
+        staticmethod(fake_json_powershell),
+    )
+    monkeypatch.setattr(
+        LocalWindowsDeviceAdapter, "_powershell", staticmethod(fake_powershell)
+    )
+
+    await LocalWindowsDeviceAdapter().disconnect_bluetooth_device("headphones")
+
+    assert commands == [
+        "Disable-PnpDevice -InstanceId 'BTHENUM\\DEV_5678\\9&DEF' -Confirm:$false"
+    ]
 
 
 def call(skill_id, arguments):
@@ -459,6 +659,22 @@ async def test_windows_device_control_covers_remaining_checklist_commands():
         ({"operation": "unmute_audio"}, ("mute_audio", False)),
         ({"operation": "set_brightness", "level": 70}, ("set_brightness", 70)),
         ({"operation": "toggle_bluetooth"}, ("set_bluetooth_enabled", None)),
+        (
+            {"operation": "connect_wifi_network", "network_name": "Office"},
+            ("connect_wifi_network", "Office"),
+        ),
+        (
+            {"operation": "disconnect_wifi_network", "network_name": "Office"},
+            ("disconnect_wifi_network", "Office"),
+        ),
+        (
+            {"operation": "connect_bluetooth_device", "device_name": "Headphones"},
+            ("connect_bluetooth_device", "Headphones"),
+        ),
+        (
+            {"operation": "disconnect_bluetooth_device", "device_name": "Headphones"},
+            ("disconnect_bluetooth_device", "Headphones"),
+        ),
         ({"operation": "lock_device"}, ("lock_device",)),
         ({"operation": "shutdown_device"}, ("shutdown_device",)),
         ({"operation": "storage_status", "drive": "C:"}, ("storage_status", "C:")),
@@ -479,3 +695,10 @@ async def test_windows_device_control_covers_remaining_checklist_commands():
     assert skill.required_permissions(disable_call)[0].capability == "device.control"
     assert skill.required_permissions(disable_call)[0].targets == ("USB\\VID_1",)
     assert skill.risk_for(disable_call) == RiskLevel.HIGH
+
+    bluetooth_call = call(
+        "windows.device_control",
+        {"operation": "disconnect_bluetooth_device", "device_name": "Headphones"},
+    )
+    assert skill.required_permissions(bluetooth_call)[0].capability == "system.network"
+    assert skill.required_permissions(bluetooth_call)[0].targets == ("Headphones",)

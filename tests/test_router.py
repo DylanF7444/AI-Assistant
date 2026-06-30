@@ -235,8 +235,28 @@ def test_window_coordinate_move_and_resize_route():
         ),
         ("turn off wifi", {"operation": "toggle_wifi", "enabled": False}),
         ("turn off my wifi", {"operation": "toggle_wifi", "enabled": False}),
+        (
+            "connect to wifi Office",
+            {"operation": "connect_wifi_network", "network_name": "office"},
+        ),
+        (
+            "disconnect from wifi Office",
+            {"operation": "disconnect_wifi_network", "network_name": "office"},
+        ),
+        ("disconnect wifi", {"operation": "disconnect_wifi_network"}),
         ("turn off my bluetooth", {"operation": "toggle_bluetooth", "enabled": False}),
         ("toggle bluetooth", {"operation": "toggle_bluetooth", "enabled": None}),
+        (
+            "connect bluetooth headphones",
+            {"operation": "connect_bluetooth_device", "device_name": "headphones"},
+        ),
+        (
+            "disconnect from bluetooth headphones",
+            {
+                "operation": "disconnect_bluetooth_device",
+                "device_name": "headphones",
+            },
+        ),
         ("restart the computer", {"operation": "restart_device"}),
         ("shutdown computer", {"operation": "shutdown_device"}),
         ("what's my battery level", {"operation": "battery_status"}),

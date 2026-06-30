@@ -38,7 +38,7 @@
 - [X] Mute/unmute audio
 - [ ] Adjust screen brightness
 - [X] Toggle Wi-Fi
-- [ ] Toggle Bluetooth
+- [X] Toggle Bluetooth
 - [ ] Toggle dark/light mode
 - [X] Lock the device
 - [ ] Restart the device with confirmation
