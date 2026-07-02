@@ -542,6 +542,22 @@ def test_window_movement_requires_operation_specific_arguments():
         WindowInput(operation="move_to_monitor", process_name="brave.exe")
 
 
+def test_installed_application_executable_resolution(tmp_path):
+    install = tmp_path / "Example App"
+    install.mkdir()
+    app = install / "ExampleApp.exe"
+    app.write_bytes(b"")
+    updater = install / "Update.exe"
+    updater.write_bytes(b"")
+
+    assert LocalWindowsDeviceAdapter._display_icon_executable(
+        f'"{app}",0'
+    ) == app.resolve()
+    assert LocalWindowsDeviceAdapter._application_executable_path(
+        "Example App", None, str(install)
+    ) == str(app.resolve())
+
+
 def test_window_input_trims_trailing_planner_punctuation():
     skill = ApplicationWindowSkill(FakeApps())
     skill_call = call(

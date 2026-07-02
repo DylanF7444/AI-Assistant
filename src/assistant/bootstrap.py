@@ -229,6 +229,7 @@ def build_container(settings: Settings | None = None) -> Container:
         metrics=metrics,
         response_detail=settings.response_detail,
         show_reasoning_steps=settings.show_reasoning_steps,
+        terminal_debug=settings.terminal_debug,
         allow_sensitive_speech=settings.allow_sensitive_speech,
         hide_sensitive_display=settings.hide_sensitive_display,
     )
@@ -238,6 +239,7 @@ def build_container(settings: Settings | None = None) -> Container:
         max_seconds=settings.max_utterance_seconds,
         noise_suppression=settings.noise_suppression,
         automatic_gain_control=settings.automatic_gain_control,
+        clap_threshold=settings.voice_activation_clap_threshold,
         diagnostic_dir=(
             settings.data_dir / "diagnostic-audio"
             if settings.diagnostic_audio

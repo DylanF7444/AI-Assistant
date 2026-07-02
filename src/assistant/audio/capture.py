@@ -14,6 +14,8 @@ from typing import Any
 from pathlib import Path
 from uuid import uuid4
 
+from assistant.audio.activation import ClapDetector
+
 
 @dataclass(frozen=True)
 class AudioDevice:
@@ -160,6 +162,7 @@ class AudioCapture:
         noise_suppression: bool = True,
         automatic_gain_control: bool = True,
         diagnostic_dir: Path | None = None,
+        clap_threshold: float = 0.35,
     ) -> None:
         self.sample_rate = sample_rate
         self.device = device
@@ -171,6 +174,8 @@ class AudioCapture:
         self.automatic_gain_control = automatic_gain_control
         self.diagnostic_dir = diagnostic_dir
         self.level = 0.0
+        self.clap_detector = ClapDetector(threshold=clap_threshold)
+        self._clap_detected = False
         self._stop = asyncio.Event()
         self._playback_active = False
 
@@ -199,6 +204,11 @@ class AudioCapture:
 
     def set_playback_active(self, active: bool) -> None:
         self._playback_active = active
+
+    def consume_clap_detection(self) -> bool:
+        detected = self._clap_detected
+        self._clap_detected = False
+        return detected
 
     async def chunks(self) -> AsyncIterator[bytes]:
         try:
@@ -238,6 +248,9 @@ class AudioCapture:
                     if self._playback_active:
                         pre_roll.clear()
                         continue
+                    raw_level = self.rms(payload)
+                    if self.clap_detector.observe(raw_level):
+                        self._clap_detected = True
                     payload = self.process(payload)
                     now = time.monotonic()
                     self.level = self.rms(payload)

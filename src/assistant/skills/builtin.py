@@ -250,9 +250,10 @@ class LaunchInput(BaseModel):
     application: str
     registered_path: str | None = None
     url: str | None = Field(default=None, max_length=2000)
+    fallback_url: str | None = Field(default=None, max_length=2000)
     private: bool = False
 
-    @field_validator("url")
+    @field_validator("url", "fallback_url")
     @classmethod
     def validate_url(cls, value):
         if value is None:
@@ -291,13 +292,19 @@ class LauncherSkill(Skill):
 
     async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult:
         args = self.validate(call.arguments)
-        path = self._registered_path(args)
-        launch_args = self._launch_arguments(args, path)
-        if launch_args:
-            await self.adapter.launch_with_args(path, launch_args)
+        path = self._resolved_path(args)
+        if path:
+            launch_args = self._launch_arguments(args, path)
+            if launch_args:
+                await self.adapter.launch_with_args(path, launch_args)
+            else:
+                await self.adapter.launch(path)
+            destination = f" to {args.url}" if args.url else ""
         else:
-            await self.adapter.launch(path)
-        destination = f" to {args.url}" if args.url else ""
+            if not args.fallback_url:
+                raise ApplicationRegistrationRequired(args.application)
+            await self.adapter.open_url(args.fallback_url or "")
+            destination = f" to {args.fallback_url}"
         mode = " in a private window" if args.private else ""
         return SkillResult(
             status=ResultStatus.COMPLETED,
@@ -310,7 +317,17 @@ class LauncherSkill(Skill):
 
     def required_permissions(self, call: SkillCall):
         args = self.validate(call.arguments)
-        path = self._registered_path(args)
+        path = self._resolved_path(args)
+        if path is None:
+            if args.fallback_url:
+                return (
+                    PermissionScope(
+                        capability="network",
+                        targets=(args.fallback_url,),
+                        reason="Open this public HTTPS website in the default browser.",
+                    ),
+                )
+            raise ApplicationRegistrationRequired(args.application)
         return (
             PermissionScope(
                 capability="process.launch",
@@ -343,9 +360,15 @@ class LauncherSkill(Skill):
         return "--incognito"
 
     def _registered_path(self, args: LaunchInput) -> str:
-        registered = self.resolver(args.application) if self.resolver else None
+        registered = self._resolved_path(args)
         if registered is None:
             raise ApplicationRegistrationRequired(args.application)
+        return registered
+
+    def _resolved_path(self, args: LaunchInput) -> str | None:
+        registered = self.resolver(args.application) if self.resolver else None
+        if registered is None:
+            return None
         if args.registered_path and (
             Path(args.registered_path).resolve() != Path(registered).resolve()
         ):

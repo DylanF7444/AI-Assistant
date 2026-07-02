@@ -443,3 +443,168 @@ async def test_planner_receives_relevant_knowledge_excerpts(tmp_path):
 
     assert intent.arguments["text"] == "Atlas launches on October 14."
     assert "Atlas launches on October 14." in provider.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_complex_planner_returns_schema_valid_steps():
+    provider = FakeProvider(
+        {
+            "disposition": "plan",
+            "skill_id": "",
+            "arguments": {},
+            "answer": None,
+            "confidence": 0.9,
+            "clarification": None,
+            "steps": [
+                {
+                    "step_id": "math",
+                    "skill_id": "core.calculator",
+                    "arguments": {"expression": "2 + 2"},
+                    "depends_on": [],
+                },
+                {
+                    "step_id": "date",
+                    "skill_id": "core.datetime",
+                    "arguments": {"query": "date"},
+                    "depends_on": [],
+                },
+            ],
+        }
+    )
+    planner = LocalPlanner(
+        provider,
+        SkillRetriever((CalculatorSkill.manifest, DateTimeSkill.manifest)),
+    )
+
+    decision = await planner.plan_decision("calculate 2 plus 2 and tell me the date")
+
+    assert [step.step_id for step in decision.steps] == ["math", "date"]
+    assert [step.intent.name for step in decision.steps] == [
+        "core.calculator",
+        "core.datetime",
+    ]
+    assert "You may return plan" in provider.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_complex_planner_can_request_clarification():
+    provider = FakeProvider(
+        {
+            "disposition": "clarify",
+            "skill_id": "",
+            "arguments": {},
+            "answer": None,
+            "confidence": 0.8,
+            "clarification": "Which folder should I search?",
+            "steps": [],
+        }
+    )
+    planner = LocalPlanner(provider, SkillRetriever((TimerSkill.manifest,)))
+
+    decision = await planner.plan_decision("search for the report")
+
+    assert decision.needs_clarification
+    assert decision.clarification == "Which folder should I search?"
+
+
+@pytest.mark.asyncio
+async def test_complex_planner_repairs_hallucinated_step_skill():
+    provider = FakeProvider(
+        [
+            {
+                "disposition": "plan",
+                "skill_id": "",
+                "arguments": {},
+                "answer": None,
+                "confidence": 1,
+                "clarification": None,
+                "steps": [
+                    {
+                        "step_id": "shell",
+                        "skill_id": "shell.run",
+                        "arguments": {"command": "format c:"},
+                        "depends_on": [],
+                    },
+                    {
+                        "step_id": "math",
+                        "skill_id": "core.calculator",
+                        "arguments": {"expression": "1 + 1"},
+                        "depends_on": [],
+                    },
+                ],
+            },
+            {
+                "disposition": "reject",
+                "skill_id": "",
+                "arguments": {},
+                "answer": "I cannot run shell commands.",
+                "confidence": 1,
+                "clarification": None,
+                "steps": [],
+            },
+        ]
+    )
+    planner = LocalPlanner(provider, SkillRetriever((CalculatorSkill.manifest,)))
+
+    decision = await planner.plan_decision("run a shell command and calculate")
+
+    assert decision.intent.name == "conversation.reject"
+    assert provider.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_complex_planner_rejects_step_output_placeholders():
+    provider = FakeProvider(
+        [
+            {
+                "disposition": "plan",
+                "skill_id": "",
+                "arguments": {},
+                "answer": None,
+                "confidence": 0.9,
+                "clarification": None,
+                "steps": [
+                    {
+                        "step_id": "search",
+                        "skill_id": "web.search",
+                        "arguments": {"query": "project atlas", "count": 5},
+                        "depends_on": [],
+                    },
+                    {
+                        "step_id": "fetch",
+                        "skill_id": "web.fetch",
+                        "arguments": {
+                            "url": "<from step search>",
+                            "max_characters": 12000,
+                        },
+                        "depends_on": ["search"],
+                    },
+                ],
+            },
+            {
+                "disposition": "clarify",
+                "skill_id": "",
+                "arguments": {},
+                "answer": None,
+                "confidence": 0.8,
+                "clarification": "Which search result should I open?",
+                "steps": [],
+            },
+        ]
+    )
+    from assistant.skills.network import WebFetchSkill, WebSearchSkill
+
+    planner = LocalPlanner(
+        provider,
+        SkillRetriever(
+            (
+                WebSearchSkill(None, lambda _name: None).manifest,
+                WebFetchSkill(None).manifest,
+            )
+        ),
+    )
+
+    decision = await planner.plan_decision("search for Project Atlas and open it")
+
+    assert decision.clarification == "Which search result should I open?"
+    assert provider.calls == 2

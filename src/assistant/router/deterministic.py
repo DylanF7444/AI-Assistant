@@ -56,6 +56,24 @@ class DeterministicRouter:
         "firefox",
         "mozilla firefox",
     }
+    WEBSITE_APPLICATIONS = {
+        "amazon": "https://www.amazon.com",
+        "chat gpt": "https://chatgpt.com",
+        "chatgpt": "https://chatgpt.com",
+        "facebook": "https://www.facebook.com",
+        "github": "https://github.com",
+        "gmail": "https://mail.google.com",
+        "google": "https://www.google.com",
+        "google maps": "https://www.google.com/maps",
+        "instagram": "https://www.instagram.com",
+        "linkedin": "https://www.linkedin.com",
+        "netflix": "https://www.netflix.com",
+        "reddit": "https://www.reddit.com",
+        "stack overflow": "https://stackoverflow.com",
+        "twitch": "https://www.twitch.tv",
+        "wikipedia": "https://www.wikipedia.org",
+        "youtube": "https://www.youtube.com",
+    }
 
     def route(self, text: str) -> RouteResult:
         normalized = normalize_text(text)
@@ -798,9 +816,14 @@ class DeterministicRouter:
         if match := re.fullmatch(r"(?:open|launch|start) (.+)", routed):
             raw_target = match.group(1)
             application, follow_up = self._split_launch_target(raw_target)
+            arguments: dict[str, object] = {"application": application}
+            if not follow_up and (
+                fallback_url := self._website_fallback_url(application)
+            ):
+                arguments["fallback_url"] = fallback_url
             intent = Intent(
                 name="windows.launcher",
-                arguments={"application": application},
+                arguments=arguments,
                 confidence=0.9,
                 source="rule",
             )
@@ -1174,6 +1197,8 @@ class DeterministicRouter:
     @staticmethod
     def _website_url(target: str) -> str | None:
         target = DeterministicRouter._normalize_website_target(target)
+        if fallback_url := DeterministicRouter._website_fallback_url(target):
+            return fallback_url
         if not target or re.search(r"\s", target):
             return None
         if re.match(r"^[a-z][a-z0-9+.-]*://", target, re.I):
@@ -1206,3 +1231,28 @@ class DeterministicRouter:
         for pattern, replacement in replacements:
             target = re.sub(pattern, replacement, target, flags=re.I)
         return target
+
+    @staticmethod
+    def _website_fallback_url(target: str) -> str | None:
+        target = re.sub(
+            r"^(?:a|an|the)\s+",
+            "",
+            target.strip().casefold(),
+        )
+        if target in DeterministicRouter.WEBSITE_APPLICATIONS:
+            return DeterministicRouter.WEBSITE_APPLICATIONS[target]
+        return DeterministicRouter._domain_url(target)
+
+    @staticmethod
+    def _domain_url(target: str) -> str | None:
+        if not target or re.search(r"\s", target):
+            return None
+        if re.match(r"^[a-z][a-z0-9+.-]*://", target, re.I):
+            return None
+        parsed = urlsplit(f"https://{target}")
+        hostname = parsed.hostname or ""
+        if not parsed.netloc or "." not in parsed.netloc:
+            return None
+        if not re.fullmatch(r"[a-z0-9.-]+\.[a-z]{2,}", hostname, re.I):
+            return None
+        return urlunsplit(parsed)

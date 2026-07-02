@@ -18,14 +18,73 @@ from assistant.policy.permissions import GrantType
 from assistant.policy.capabilities import available_capabilities
 from assistant.response import response_from_result
 from assistant.models import ModelManifest
+from assistant.audio.activation import keyword_request, parse_voice_prompt_response
 from assistant.storage.database import ItemRow, SettingsStore
 from assistant.storage.macros import MacroDefinition, MacroStep
 from assistant.storage.history import HistoryStore
 from assistant.audio.capture import display_audio_devices
 from assistant.storage.secrets import SecretVault
+from assistant.windows.adapters import LocalWindowsDeviceAdapter
 
 
 def run_desktop(container: Container) -> int:
+    capability_details = {
+        "clipboard.read": ("Read clipboard", "Read the current clipboard contents."),
+        "clipboard.write": ("Write clipboard", "Replace the current clipboard contents."),
+        "device.control": ("Control devices", "Change or disable connected devices."),
+        "device.read": ("Read device information", "Inspect device status and details."),
+        "filesystem.read": ("Read files", "Open files or folders for reading."),
+        "filesystem.write": ("Change files", "Create, edit, move, rename, or delete files."),
+        "input.control": ("Control mouse and keyboard", "Type, click, or automate input."),
+        "media.control": ("Control media", "Change playback, volume, or media state."),
+        "messaging": ("Send messages", "Send messages through configured accounts."),
+        "network": ("Use the network", "Open websites or call network services."),
+        "notification.create": ("Show notifications", "Create local system notifications."),
+        "process.launch": ("Open applications", "Start registered applications or commands."),
+        "process.terminate": ("Stop applications", "Terminate running processes."),
+        "process.window": ("Manage windows", "Focus, move, resize, minimize, or close windows."),
+        "settings.get": ("Read settings", "Read assistant or system settings."),
+        "settings.set": ("Change settings", "Modify assistant or system settings."),
+        "system.apps": ("Inspect applications", "List or search installed applications."),
+        "system.display": ("Change display", "Adjust display-related system controls."),
+        "system.network": ("Change network settings", "Modify Wi-Fi, Bluetooth, or network state."),
+        "system.power": ("Power controls", "Sleep, restart, or shut down the system."),
+    }
+
+    def friendly_identifier(value: str) -> str:
+        return value.replace(".", " ").replace("_", " ").replace("-", " ").title()
+
+    def skill_choice_label(manifest: Any) -> str:
+        description = manifest.description.rstrip(".")
+        return f"{manifest.display_name} - {description} [{friendly_identifier(manifest.skill_id)}]"
+
+    def capability_name(capability: str) -> str:
+        return capability_details.get(capability, (friendly_identifier(capability), ""))[0]
+
+    def capability_description(capability: str) -> str:
+        return capability_details.get(capability, ("", "Permission declared by this skill."))[1]
+
+    def capability_table_label(capability: str) -> str:
+        return f"{capability_name(capability)} ({capability})"
+
+    def capability_choice_label(capability: str) -> str:
+        return f"{capability_name(capability)} - {capability_description(capability)}"
+
+    def target_summary(targets: Any) -> str:
+        values = tuple(targets or ())
+        if not values or values == ("*",):
+            return "Any target"
+        return "; ".join(values)
+
+    def grant_type_label(value: str) -> str:
+        labels = {
+            GrantType.ONCE.value: "Just once",
+            GrantType.SESSION.value: "This session",
+            GrantType.ALWAYS.value: "Always",
+            GrantType.DENY.value: "Denied",
+        }
+        return labels.get(value, value)
+
     confirmation_prompt_actions = (
         ("risk:low", "All low-risk actions", False),
         ("risk:medium", "All medium-risk actions", True),
@@ -57,6 +116,7 @@ def run_desktop(container: Container) -> int:
             QIcon,
             QKeySequence,
             QShortcut,
+            QTextCursor,
         )
         from PySide6.QtWidgets import (
             QApplication,
@@ -126,6 +186,124 @@ def run_desktop(container: Container) -> int:
             except Exception as error:
                 self.failed.emit(str(error))
 
+    class PassiveVoiceWorker(QThread):
+        complete = Signal(object)
+        failed = Signal(str)
+        partial_transcript = Signal(str)
+
+        def __init__(self, mode: str) -> None:
+            super().__init__()
+            self.mode = mode
+            self._stop_requested = False
+
+        def stop(self) -> None:
+            self._stop_requested = True
+
+        def run(self) -> None:
+            try:
+                asyncio.run(self._run())
+            except asyncio.CancelledError:
+                return
+            except Exception as error:
+                self.failed.emit(str(error))
+
+        async def _run(self) -> None:
+            while not self._stop_requested:
+                if self.mode == "persistent":
+                    await self._listen_persistent()
+                else:
+                    await self._listen_for_activation()
+
+        async def _listen_persistent(self) -> None:
+            transcript = await container.orchestrator.transcribe_once(
+                container.stt,
+                container.audio_capture.chunks(),
+                publish_events=False,
+                on_transcript=self._show_transcript,
+            )
+            if self._stop_requested or transcript is None:
+                return
+            self.complete.emit(await container.orchestrator.handle_transcript(transcript))
+
+        async def _listen_for_activation(self) -> None:
+            transcript = await container.orchestrator.transcribe_once(
+                container.stt,
+                container.audio_capture.chunks(),
+                publish_events=False,
+                on_transcript=self._show_transcript,
+            )
+            if self._stop_requested:
+                return
+            settings = container.settings
+            clap_detected = (
+                settings.voice_activation_clap_enabled
+                and container.audio_capture.consume_clap_detection()
+            )
+            request = None
+            if settings.voice_activation_keyword_enabled and transcript is not None:
+                request = keyword_request(
+                    transcript.normalized_text,
+                    settings.voice_activation_keyword,
+                )
+            if request is None and not clap_detected:
+                return
+            if request:
+                self.complete.emit(
+                    await container.orchestrator.handle_text(
+                        request,
+                        session_id=str(transcript.session_id)
+                        if transcript is not None
+                        else "voice-activation",
+                        invoked_by_voice=True,
+                    )
+                )
+            else:
+                self.complete.emit(
+                    await container.orchestrator.listen_once(
+                        container.stt,
+                        container.audio_capture.chunks(),
+                    )
+                )
+
+        def _show_transcript(self, transcript: Any) -> None:
+            if transcript.raw_text.strip():
+                self.partial_transcript.emit(transcript.raw_text)
+
+    class VoicePromptWorker(QThread):
+        complete = Signal(str)
+        failed = Signal(str)
+        partial_transcript = Signal(str)
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._stop_requested = False
+
+        def stop(self) -> None:
+            self._stop_requested = True
+
+        def run(self) -> None:
+            try:
+                asyncio.run(self._run())
+            except asyncio.CancelledError:
+                return
+            except Exception as error:
+                self.failed.emit(str(error))
+
+        async def _run(self) -> None:
+            transcript = await container.orchestrator.transcribe_once(
+                container.stt,
+                container.audio_capture.chunks(),
+                publish_events=False,
+                on_transcript=self._show_transcript,
+            )
+            if self._stop_requested or transcript is None:
+                return
+            self.complete.emit(transcript.normalized_text or transcript.raw_text)
+
+        def _show_transcript(self, transcript: Any) -> None:
+            if transcript.raw_text.strip():
+                self.partial_transcript.emit(transcript.raw_text)
+
     class HotkeyBridge(QObject):
         push_to_talk = Signal()
         cancel = Signal()
@@ -162,6 +340,9 @@ def run_desktop(container: Container) -> int:
             self._workers: list[AsyncWorker] = []
             self._hotkeys: list[int] = []
             self._shortcuts: list[QShortcut] = []
+            self._passive_voice_worker: PassiveVoiceWorker | None = None
+            self._passive_voice_restart_enabled = False
+            self._voice_prompt_active = False
             self._activity_started = time.perf_counter()
             self._status_frame = 0
             self._active_state = PipelineState.IDLE
@@ -203,6 +384,7 @@ def run_desktop(container: Container) -> int:
             self._register_global_hotkeys()
             if container.wakeword:
                 self._start_wakeword()
+            self._start_passive_voice()
             self._first_run()
 
         def _active_scripts_tab(self) -> QWidget:
@@ -361,9 +543,12 @@ def run_desktop(container: Container) -> int:
                     "Active" if self._hotkeys else "Window only",
                 ),
                 (
-                    "Wake word",
-                    "Voice detection",
-                    "Active" if container.wakeword else "Disabled",
+                    "Voice activation",
+                    container.settings.voice_activation_mode,
+                    "Active"
+                    if self._passive_voice_worker
+                    and self._passive_voice_worker.isRunning()
+                    else "Hotkey only",
                 ),
                 ("Pipeline events", "Assistant activity", "Active"),
             ]
@@ -427,6 +612,10 @@ def run_desktop(container: Container) -> int:
             self.status.setAccessibleName("Assistant status")
             self.status_detail = QLabel("Waiting for your request")
             self.status_detail.setObjectName("statusDetail")
+            self.status_transcript = QLabel("")
+            self.status_transcript.setObjectName("statusTranscript")
+            self.status_transcript.setAccessibleName("Live speech transcript")
+            self.status_transcript.setWordWrap(True)
             self.elapsed_status = QLabel("")
             self.elapsed_status.setObjectName("elapsedStatus")
             status_row.addWidget(self.status_dot)
@@ -447,10 +636,16 @@ def run_desktop(container: Container) -> int:
             self.mic_level.setRange(0, 100)
             self.mic_level.setValue(0)
             self.mic_level.setFixedHeight(8)
+            self.mic_level_value = QLabel("0%")
+            self.mic_level_value.setObjectName("micLevelValue")
+            self.mic_level_value.setAccessibleName("Microphone input level percentage")
+            self.mic_level_value.setMinimumWidth(36)
             mic_row.addWidget(mic_label)
             mic_row.addWidget(self.mic_level, 1)
+            mic_row.addWidget(self.mic_level_value)
             status_layout.addLayout(status_row)
             status_layout.addWidget(self.status_detail)
+            status_layout.addWidget(self.status_transcript)
             status_layout.addWidget(self.pipeline_progress)
             status_layout.addLayout(mic_row)
             layout.addWidget(status_card)
@@ -584,7 +779,7 @@ def run_desktop(container: Container) -> int:
                 self._mic_level_timer.start()
             else:
                 self._mic_level_timer.stop()
-                self.mic_level.setValue(0)
+                self._set_mic_level_value(0)
             if active:
                 if not was_active:
                     self._activity_started = time.perf_counter()
@@ -629,7 +824,14 @@ def run_desktop(container: Container) -> int:
         def _update_mic_level(self) -> None:
             level = min(1.0, max(0.0, container.audio_capture.level))
             threshold = max(container.audio_capture.vad_threshold, 0.001)
-            self.mic_level.setValue(round(min(1.0, level / (threshold * 4)) * 100))
+            self._set_mic_level_value(
+                round(min(1.0, level / (threshold * 4)) * 100)
+            )
+
+        def _set_mic_level_value(self, value: int) -> None:
+            value = max(0, min(100, value))
+            self.mic_level.setValue(value)
+            self.mic_level_value.setText(f"{value}%")
 
         def _register_global_hotkeys(self) -> None:
             try:
@@ -662,6 +864,74 @@ def run_desktop(container: Container) -> int:
             self._workers.append(worker)
             worker.start()
 
+        def _start_passive_voice(self) -> None:
+            if self._voice_prompt_active:
+                return
+            self._stop_passive_voice()
+            if container.settings.voice_activation_mode == "hotkey":
+                return
+            self._passive_voice_restart_enabled = True
+            worker = PassiveVoiceWorker(container.settings.voice_activation_mode)
+            worker.complete.connect(self._show_result)
+            worker.failed.connect(self._show_error)
+            worker.partial_transcript.connect(self._show_voice_transcript)
+            worker.finished.connect(
+                lambda worker=worker: self._handle_passive_voice_finished(worker)
+            )
+            self._passive_voice_worker = worker
+            worker.start()
+            self._apply_passive_voice_indicators()
+
+        def _stop_passive_voice(self) -> None:
+            self._passive_voice_restart_enabled = False
+            worker = self._passive_voice_worker
+            if worker is None:
+                return
+            worker.stop()
+            asyncio.run(container.audio_capture.stop())
+            worker.wait(1500)
+            if self._passive_voice_worker is worker:
+                self._passive_voice_worker = None
+            self._mic_level_timer.stop()
+            self._set_mic_level_value(0)
+
+        def _handle_passive_voice_finished(self, worker: PassiveVoiceWorker) -> None:
+            if self._passive_voice_worker is not worker:
+                return
+            self._passive_voice_worker = None
+            if (
+                self._passive_voice_restart_enabled
+                and container.settings.voice_activation_mode != "hotkey"
+            ):
+                QTimer.singleShot(250, self._start_passive_voice)
+
+        def _apply_passive_voice_indicators(self) -> None:
+            if (
+                self._passive_voice_worker
+                and self._passive_voice_worker.isRunning()
+            ):
+                self.status.setText("Listening")
+                self.status_dot.setProperty("state", PipelineState.LISTENING.value)
+                self.status_dot.style().unpolish(self.status_dot)
+                self.status_dot.style().polish(self.status_dot)
+                self.status_detail.setText(self._passive_voice_status())
+                self.listen_button.setEnabled(False)
+                self._mic_level_timer.start()
+
+        def _passive_voice_status(self) -> str:
+            if container.settings.voice_activation_mode == "persistent":
+                return "Persistent voice mode is listening"
+            if container.settings.voice_activation_mode == "keyword_clap":
+                triggers = []
+                if container.settings.voice_activation_keyword_enabled:
+                    triggers.append(
+                        f'"{container.settings.voice_activation_keyword}"'
+                    )
+                if container.settings.voice_activation_clap_enabled:
+                    triggers.append("a clap")
+                return "Listening for " + " or ".join(triggers)
+            return "Waiting for your request"
+
         def listen(self) -> None:
             if self._pipeline_is_busy():
                 self.statusBar().showMessage("Voice input is already active.", 1500)
@@ -682,6 +952,106 @@ def run_desktop(container: Container) -> int:
             self._set_pipeline_state(event.state, event.message, event.progress)
             if event.state == PipelineState.TRANSCRIBING and event.message:
                 self.transcript.setPlainText(event.message)
+                self._set_status_transcript(event.message)
+
+        def _show_voice_transcript(self, text: str) -> None:
+            self.transcript.setPlainText(text)
+            self.transcript.moveCursor(QTextCursor.MoveOperation.End)
+            self._set_status_transcript(text)
+
+        def _set_status_transcript(self, text: str) -> None:
+            text = " ".join(text.split())
+            self.status_transcript.setText(f"Heard: {text}" if text else "")
+
+        def _voice_prompt_choice(
+            self,
+            *,
+            title: str,
+            text: str,
+            informative_text: str,
+            kind: str,
+            buttons: list[tuple[str, str, Any]],
+            default_choice: str,
+            expected_token: str | None = None,
+        ) -> str:
+            restart_passive = (
+                container.settings.voice_activation_mode != "hotkey"
+                and self._passive_voice_restart_enabled
+            )
+            self._voice_prompt_active = True
+            self._stop_passive_voice()
+            choice = {"value": default_choice}
+            button_choices: dict[Any, str] = {}
+            dialog = QMessageBox(self)
+            dialog.setWindowTitle(title)
+            dialog.setIcon(QMessageBox.Icon.Warning)
+            dialog.setText(text)
+            dialog.setInformativeText(informative_text)
+            for value, label, role in buttons:
+                button_choices[dialog.addButton(label, role)] = value
+
+            worker = VoicePromptWorker()
+
+            def accept_spoken(transcript: str) -> None:
+                self._set_status_transcript(transcript)
+                response = parse_voice_prompt_response(
+                    transcript,
+                    kind,
+                    expected_token=expected_token,
+                )
+                if response is None:
+                    self.statusBar().showMessage(
+                        "I did not catch a valid prompt response.", 1800
+                    )
+                    return
+                if response.action == "approve":
+                    choice["value"] = "approve"
+                elif response.action == "deny":
+                    choice["value"] = "deny"
+                elif response.action == "once":
+                    choice["value"] = "once"
+                elif response.action == "session":
+                    choice["value"] = "session"
+                elif response.action == "always":
+                    choice["value"] = "always"
+                elif response.action == "requested_targets":
+                    choice["value"] = "requested_targets"
+                elif response.action == "any_target":
+                    choice["value"] = "any_target"
+                elif response.action == "token":
+                    choice["value"] = response.value or default_choice
+                dialog.done(1)
+
+            worker.complete.connect(accept_spoken)
+            worker.failed.connect(
+                lambda error: self.statusBar().showMessage(
+                    f"Voice prompt unavailable: {error}", 2500
+                )
+            )
+            worker.partial_transcript.connect(self._show_voice_transcript)
+            worker.finished.connect(lambda: self._discard_worker(worker))
+            self._workers.append(worker)
+            worker.start()
+            self._set_pipeline_state(
+                PipelineState.AWAITING_APPROVAL,
+                "Waiting for your approval by voice or button",
+            )
+            dialog.exec()
+            clicked = dialog.clickedButton()
+            if clicked in button_choices:
+                choice["value"] = button_choices[clicked]
+            worker.stop()
+            asyncio.run(container.audio_capture.stop())
+            worker.wait(1500)
+            self._discard_worker(worker)
+            self._voice_prompt_active = False
+            if restart_passive:
+                QTimer.singleShot(250, self._start_passive_voice)
+            return choice["value"]
+
+        def _discard_worker(self, worker: Any) -> None:
+            if worker in self._workers:
+                self._workers.remove(worker)
 
         def _skills_tab(self) -> QWidget:
             page = QWidget()
@@ -827,6 +1197,7 @@ def run_desktop(container: Container) -> int:
             self.permission_table.setHorizontalHeaderLabels(
                 ["Skill", "Capability", "Mode", "Targets", "Effect"]
             )
+            self.permission_table.horizontalHeader().setStretchLastSection(True)
             self._reload_permissions()
             controls = QHBoxLayout()
             grant = QPushButton("Grant Permission")
@@ -844,57 +1215,101 @@ def run_desktop(container: Container) -> int:
             for value in container.permissions.list_grants():
                 row = self.permission_table.rowCount()
                 self.permission_table.insertRow(row)
+                manifest = container.registry.get(value["skill_id"]).manifest
                 fields = [
-                    value["skill_id"],
-                    value["capability"],
-                    value["grant_type"],
-                    "; ".join(value["targets"]),
+                    f"{manifest.display_name} ({friendly_identifier(value['skill_id'])})",
+                    capability_table_label(value["capability"]),
+                    grant_type_label(value["grant_type"]),
+                    target_summary(value["targets"]),
                     value["effect"],
                 ]
                 for column, field in enumerate(fields):
-                    self.permission_table.setItem(
-                        row, column, QTableWidgetItem(str(field))
-                    )
+                    item = QTableWidgetItem(str(field))
+                    if column == 0:
+                        item.setData(Qt.ItemDataRole.UserRole, value["skill_id"])
+                    elif column == 1:
+                        item.setData(Qt.ItemDataRole.UserRole, value["capability"])
+                    self.permission_table.setItem(row, column, item)
 
         def _grant_permission(self) -> None:
-            skill_ids = [item.skill_id for item in container.registry.list()]
-            skill_id, ok = QInputDialog.getItem(
-                self, "Grant Permission", "Skill", skill_ids, editable=False
+            skill_choices = {
+                skill_choice_label(item): item.skill_id
+                for item in container.registry.list()
+            }
+            skill_label, ok = QInputDialog.getItem(
+                self,
+                "Grant Permission",
+                "Skill",
+                list(skill_choices),
+                editable=False,
             )
             if not ok:
                 return
+            skill_id = skill_choices[skill_label]
             manifest = container.registry.get(skill_id).manifest
-            capabilities = available_capabilities(manifest.permissions)
-            capability, ok = QInputDialog.getItem(
+            capability_choices = {
+                capability_choice_label(capability): capability
+                for capability in available_capabilities(manifest.permissions)
+            }
+            capability_label, ok = QInputDialog.getItem(
                 self,
                 "Grant Permission",
                 "Capability",
-                capabilities,
+                list(capability_choices),
                 editable=False,
             )
-            if not ok or not capability:
+            if not ok or not capability_label:
                 return
-            target, ok = QInputDialog.getText(
-                self, "Grant Permission", "Optional exact target or approved folder"
+            capability = capability_choices[capability_label]
+            target_mode, ok = QInputDialog.getItem(
+                self,
+                "Grant Permission",
+                "Targets",
+                [
+                    "Any target",
+                    "One exact target or approved folder",
+                ],
+                editable=False,
             )
             if not ok:
                 return
+            target = ""
+            if target_mode != "Any target":
+                target, ok = QInputDialog.getText(
+                    self,
+                    "Grant Permission",
+                    "Exact target, website, application, or approved folder",
+                )
+                if not ok:
+                    return
             mode, ok = QInputDialog.getItem(
                 self,
                 "Grant Permission",
                 "Grant mode",
-                [GrantType.ONCE.value, GrantType.SESSION.value, GrantType.ALWAYS.value, GrantType.DENY.value],
+                [
+                    "Just once",
+                    "This session",
+                    "Always",
+                    "Deny",
+                ],
                 editable=False,
             )
             if not ok:
                 return
+            modes = {
+                "Just once": GrantType.ONCE,
+                "This session": GrantType.SESSION,
+                "Always": GrantType.ALWAYS,
+                "Deny": GrantType.DENY,
+            }
+            grant_type = modes[mode]
             container.permissions.grant(
                 user_id="local-user",
                 skill_id=skill_id,
                 capability=capability,
-                grant_type=GrantType(mode),
+                grant_type=grant_type,
                 targets=(target,) if target else (),
-                session_id="desktop" if mode == GrantType.SESSION.value else None,
+                session_id="desktop" if grant_type == GrantType.SESSION else None,
                 correlation_id="desktop-permission-manager",
             )
             self._reload_permissions()
@@ -905,8 +1320,8 @@ def run_desktop(container: Container) -> int:
                 return
             container.permissions.revoke(
                 "local-user",
-                self.permission_table.item(row, 0).text(),
-                self.permission_table.item(row, 1).text(),
+                self.permission_table.item(row, 0).data(Qt.ItemDataRole.UserRole),
+                self.permission_table.item(row, 1).data(Qt.ItemDataRole.UserRole),
                 "desktop-permission-manager",
             )
             self._reload_permissions()
@@ -987,9 +1402,45 @@ def run_desktop(container: Container) -> int:
             self.setting_piper_model = QLineEdit(
                 str(container.settings.piper_model or "")
             )
+            self.setting_piper_executable_label = QLabel("Piper executable")
+            self.setting_piper_model_label = QLabel("Piper voice model")
             self.setting_speech = QComboBox()
             self.setting_speech.addItems(["always", "voice_only", "never"])
             self.setting_speech.setCurrentText(container.settings.speech_mode)
+            self.setting_voice_activation_mode = QComboBox()
+            self.setting_voice_activation_mode.addItem("Hotkey only", "hotkey")
+            self.setting_voice_activation_mode.addItem(
+                "Keyword or clap", "keyword_clap"
+            )
+            self.setting_voice_activation_mode.addItem(
+                "Persistent voice", "persistent"
+            )
+            selected = self.setting_voice_activation_mode.findData(
+                container.settings.voice_activation_mode
+            )
+            self.setting_voice_activation_mode.setCurrentIndex(max(0, selected))
+            self.setting_voice_keyword_enabled = QCheckBox()
+            self.setting_voice_keyword_enabled.setChecked(
+                container.settings.voice_activation_keyword_enabled
+            )
+            self.setting_voice_keyword = QLineEdit(
+                container.settings.voice_activation_keyword
+            )
+            self.setting_voice_keyword_enabled_label = QLabel(
+                "Enable activation keyword"
+            )
+            self.setting_voice_keyword_label = QLabel("Activation keyword")
+            self.setting_voice_clap_enabled = QCheckBox()
+            self.setting_voice_clap_enabled.setChecked(
+                container.settings.voice_activation_clap_enabled
+            )
+            self.setting_voice_clap_threshold = QLineEdit(
+                str(container.settings.voice_activation_clap_threshold)
+            )
+            self.setting_voice_clap_enabled_label = QLabel("Enable clap activation")
+            self.setting_voice_clap_threshold_label = QLabel(
+                "Clap sensitivity threshold"
+            )
             self.setting_input = QComboBox()
             self.setting_input.addItem("System default", None)
             for device in display_audio_devices(input_only=True):
@@ -1019,6 +1470,10 @@ def run_desktop(container: Container) -> int:
             self.setting_show_reasoning = QCheckBox()
             self.setting_show_reasoning.setChecked(
                 container.settings.show_reasoning_steps
+            )
+            self.setting_terminal_debug = QCheckBox()
+            self.setting_terminal_debug.setChecked(
+                container.settings.terminal_debug
             )
             self.setting_hide_sensitive = QCheckBox()
             self.setting_hide_sensitive.setChecked(
@@ -1061,9 +1516,25 @@ def run_desktop(container: Container) -> int:
             form.addRow("Anthropic API key", self.setting_anthropic_key)
             form.addRow("Web search provider", self.setting_search_provider)
             form.addRow("Brave Search API key", self.setting_brave_key)
-            form.addRow("Piper executable", self.setting_piper_executable)
-            form.addRow("Piper voice model", self.setting_piper_model)
+            form.addRow(
+                self.setting_piper_executable_label, self.setting_piper_executable
+            )
+            form.addRow(self.setting_piper_model_label, self.setting_piper_model)
             form.addRow("Speech mode", self.setting_speech)
+            form.addRow("Voice activation", self.setting_voice_activation_mode)
+            form.addRow(
+                self.setting_voice_keyword_enabled_label,
+                self.setting_voice_keyword_enabled,
+            )
+            form.addRow(self.setting_voice_keyword_label, self.setting_voice_keyword)
+            form.addRow(
+                self.setting_voice_clap_enabled_label,
+                self.setting_voice_clap_enabled,
+            )
+            form.addRow(
+                self.setting_voice_clap_threshold_label,
+                self.setting_voice_clap_threshold,
+            )
             form.addRow("Push-to-talk hotkey", self.setting_ptt)
             form.addRow("Cancel hotkey", self.setting_cancel)
             form.addRow("Transcript retention days", self.setting_retention)
@@ -1072,11 +1543,50 @@ def run_desktop(container: Container) -> int:
             form.addRow("Automatic gain control", self.setting_gain)
             form.addRow("Response detail", self.setting_detail)
             form.addRow("Show request breakdown", self.setting_show_reasoning)
+            form.addRow("Terminal debug output", self.setting_terminal_debug)
             form.addRow("Hide sensitive display results", self.setting_hide_sensitive)
             form.addRow("Require yes/no prompts", self.setting_confirmation_prompts)
             form.addRow(save)
+            self.setting_speech.currentTextChanged.connect(
+                lambda _text: self._update_voice_settings_visibility()
+            )
+            self.setting_voice_activation_mode.currentIndexChanged.connect(
+                lambda _index: self._update_voice_settings_visibility()
+            )
+            self.setting_voice_keyword_enabled.toggled.connect(
+                lambda _checked: self._update_voice_settings_visibility()
+            )
+            self.setting_voice_clap_enabled.toggled.connect(
+                lambda _checked: self._update_voice_settings_visibility()
+            )
+            self._update_voice_settings_visibility()
             page.setWidget(content)
             return page
+
+        def _update_voice_settings_visibility(self) -> None:
+            speech_enabled = self.setting_speech.currentText() != "never"
+            self.setting_piper_executable_label.setVisible(speech_enabled)
+            self.setting_piper_executable.setVisible(speech_enabled)
+            self.setting_piper_model_label.setVisible(speech_enabled)
+            self.setting_piper_model.setVisible(speech_enabled)
+
+            activation_mode = self.setting_voice_activation_mode.currentData()
+            keyword_clap_active = activation_mode == "keyword_clap"
+            keyword_active = (
+                keyword_clap_active and self.setting_voice_keyword_enabled.isChecked()
+            )
+            clap_active = (
+                keyword_clap_active and self.setting_voice_clap_enabled.isChecked()
+            )
+
+            self.setting_voice_keyword_enabled_label.setVisible(keyword_clap_active)
+            self.setting_voice_keyword_enabled.setVisible(keyword_clap_active)
+            self.setting_voice_keyword_label.setVisible(keyword_active)
+            self.setting_voice_keyword.setVisible(keyword_active)
+            self.setting_voice_clap_enabled_label.setVisible(keyword_clap_active)
+            self.setting_voice_clap_enabled.setVisible(keyword_clap_active)
+            self.setting_voice_clap_threshold_label.setVisible(clap_active)
+            self.setting_voice_clap_threshold.setVisible(clap_active)
 
         def _save_settings(self) -> None:
             try:
@@ -1100,6 +1610,21 @@ def run_desktop(container: Container) -> int:
                     or None,
                     "piper_model": self.setting_piper_model.text().strip() or None,
                     "speech_mode": self.setting_speech.currentText(),
+                    "voice_activation_mode": (
+                        self.setting_voice_activation_mode.currentData()
+                    ),
+                    "voice_activation_keyword_enabled": (
+                        self.setting_voice_keyword_enabled.isChecked()
+                    ),
+                    "voice_activation_keyword": (
+                        self.setting_voice_keyword.text().strip()
+                    ),
+                    "voice_activation_clap_enabled": (
+                        self.setting_voice_clap_enabled.isChecked()
+                    ),
+                    "voice_activation_clap_threshold": float(
+                        self.setting_voice_clap_threshold.text().strip()
+                    ),
                     "push_to_talk_hotkey": self.setting_ptt.text().strip(),
                     "cancel_hotkey": self.setting_cancel.text().strip(),
                     "retain_transcripts_days": int(
@@ -1110,6 +1635,7 @@ def run_desktop(container: Container) -> int:
                     "automatic_gain_control": self.setting_gain.isChecked(),
                     "response_detail": self.setting_detail.currentText(),
                     "show_reasoning_steps": self.setting_show_reasoning.isChecked(),
+                    "terminal_debug": self.setting_terminal_debug.isChecked(),
                     "hide_sensitive_display": self.setting_hide_sensitive.isChecked(),
                     "confirmation_overrides": confirmation_overrides,
                 }
@@ -1149,6 +1675,7 @@ def run_desktop(container: Container) -> int:
             container.orchestrator.show_reasoning_steps = (
                 validated.show_reasoning_steps
             )
+            container.orchestrator.terminal_debug = validated.terminal_debug
             container.orchestrator.hide_sensitive_display = (
                 validated.hide_sensitive_display
             )
@@ -1161,6 +1688,10 @@ def run_desktop(container: Container) -> int:
             container.audio_capture.automatic_gain_control = (
                 validated.automatic_gain_control
             )
+            container.audio_capture.clap_detector.threshold = (
+                validated.voice_activation_clap_threshold
+            )
+            self._start_passive_voice()
             QMessageBox.information(
                 self,
                 "Settings Saved",
@@ -1474,16 +2005,24 @@ def run_desktop(container: Container) -> int:
             controls = QHBoxLayout()
             add = QPushButton("Register Application")
             add.clicked.connect(self._register_application)
+            self.bulk_register_applications_button = QPushButton("Register Installed Apps")
+            self.bulk_register_applications_button.clicked.connect(
+                self._register_installed_applications
+            )
             delete = QPushButton("Remove Selected")
             delete.clicked.connect(self._remove_application)
             controls.addWidget(add)
+            controls.addWidget(self.bulk_register_applications_button)
             controls.addWidget(delete)
             layout.addWidget(
                 QLabel(
                     "Only applications registered here can be launched by skills."
                 )
             )
+            self.application_status = QLabel("")
+            self.application_status.setObjectName("pageSubtitle")
             layout.addWidget(self.application_list)
+            layout.addWidget(self.application_status)
             layout.addLayout(controls)
             return page
 
@@ -1494,6 +2033,59 @@ def run_desktop(container: Container) -> int:
 
         def _register_application(self) -> None:
             self._register_application_alias()
+
+        def _register_installed_applications(self) -> None:
+            if (
+                QMessageBox.question(
+                    self,
+                    "Register Installed Apps",
+                    "Scan installed applications and register every launchable executable found?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                != QMessageBox.Yes
+            ):
+                return
+            self.bulk_register_applications_button.setEnabled(False)
+            self.application_status.setText("Scanning installed applications...")
+
+            async def scan_apps():
+                return await LocalWindowsDeviceAdapter().search_installed_apps(
+                    limit=500
+                )
+
+            worker = AsyncWorker(scan_apps())
+            worker.complete.connect(self._finish_register_installed_applications)
+            worker.failed.connect(self._fail_register_installed_applications)
+            worker.finished.connect(lambda: self._workers.remove(worker))
+            self._workers.append(worker)
+            worker.start()
+
+        def _finish_register_installed_applications(self, apps: list[dict]) -> None:
+            aliases = {
+                str(app["name"]): str(Path(app["executable_path"]).resolve())
+                for app in apps
+                if app.get("name")
+                and app.get("executable_path")
+                and Path(str(app["executable_path"])).is_file()
+            }
+            added, updated = container.aliases.set_many("application", aliases)
+            skipped = len(apps) - len(aliases)
+            self._reload_applications()
+            self.bulk_register_applications_button.setEnabled(True)
+            self.application_status.setText(
+                f"Registered {added} new and updated {updated}; skipped {skipped} without launchable executables."
+            )
+            QMessageBox.information(
+                self,
+                "Installed Apps Registered",
+                self.application_status.text(),
+            )
+
+        def _fail_register_installed_applications(self, error: str) -> None:
+            self.bulk_register_applications_button.setEnabled(True)
+            self.application_status.setText("Installed application scan failed.")
+            self._show_error(error)
 
         def _register_application_alias(
             self, requested_name: str | None = None
@@ -1691,53 +2283,91 @@ def run_desktop(container: Container) -> int:
             elif outcome.confirmation:
                 self._request_confirmation(outcome)
             else:
-                self._set_pipeline_state(PipelineState.IDLE, "Request complete")
+                self._set_pipeline_state(
+                    PipelineState.IDLE,
+                    self._passive_voice_status()
+                    if self._passive_voice_worker
+                    and self._passive_voice_worker.isRunning()
+                    else "Request complete",
+                )
+                self._apply_passive_voice_indicators()
 
         def _request_permissions(self, outcome: Any) -> None:
             details = []
             for request in outcome.permission_requests:
-                targets = (
-                    "\nTargets: " + ", ".join(request.scope.targets)
-                    if request.scope.targets
-                    else ""
-                )
+                manifest = container.registry.get(request.call.skill_id).manifest
                 details.append(
-                    f"{request.scope.capability}\n"
-                    f"{request.scope.reason}{targets}"
+                    f"{manifest.display_name}\n"
+                    f"{capability_name(request.scope.capability)}: "
+                    f"{capability_description(request.scope.capability)}\n"
+                    f"Why: {request.scope.reason}\n"
+                    f"Targets: {target_summary(request.scope.targets)}"
                 )
-            dialog = QMessageBox(self)
-            dialog.setWindowTitle("Permission Required")
-            dialog.setIcon(QMessageBox.Icon.Warning)
-            dialog.setText("This command needs permission to continue.")
-            dialog.setInformativeText("\n\n".join(details))
-            grant_button = dialog.addButton(
-                "Grant Permission", QMessageBox.ButtonRole.AcceptRole
+            decision = self._voice_prompt_choice(
+                title="Permission Required",
+                text="This command needs permission to continue.",
+                informative_text="\n\n".join(details),
+                kind="approval",
+                buttons=[
+                    (
+                        "approve",
+                        "Grant Permission",
+                        QMessageBox.ButtonRole.AcceptRole,
+                    ),
+                    ("deny", "Not Now", QMessageBox.ButtonRole.RejectRole),
+                ],
+                default_choice="deny",
             )
-            dialog.addButton("Not Now", QMessageBox.ButtonRole.RejectRole)
-            dialog.exec()
-            if dialog.clickedButton() is not grant_button:
+            if decision != "approve":
                 self._set_pipeline_state(
                     PipelineState.CANCELLED, "Permission was not granted"
                 )
                 return
             labels = {
-                "Just once": GrantType.ONCE,
-                "For this session": GrantType.SESSION,
-                "Always": GrantType.ALWAYS,
+                "once": GrantType.ONCE,
+                "session": GrantType.SESSION,
+                "always": GrantType.ALWAYS,
             }
-            mode_label, ok = QInputDialog.getItem(
-                self,
-                "Grant Permission",
-                "How long should this permission last?",
-                list(labels),
-                editable=False,
+            mode_label = self._voice_prompt_choice(
+                title="Grant Permission",
+                text="How long should this permission last?",
+                informative_text="Choose just once, this session, or always.",
+                kind="permission_duration",
+                buttons=[
+                    ("once", "Just once", QMessageBox.ButtonRole.AcceptRole),
+                    ("session", "This session", QMessageBox.ButtonRole.AcceptRole),
+                    ("always", "Always", QMessageBox.ButtonRole.AcceptRole),
+                    ("deny", "Cancel", QMessageBox.ButtonRole.RejectRole),
+                ],
+                default_choice="deny",
             )
-            if not ok:
+            if mode_label not in labels:
                 self._set_pipeline_state(
                     PipelineState.CANCELLED, "Permission was not granted"
                 )
                 return
             grant_type = labels[mode_label]
+            target_mode = self._voice_prompt_choice(
+                title="Grant Permission",
+                text="Which targets should this grant cover?",
+                informative_text="Choose only the requested targets or any target.",
+                kind="permission_targets",
+                buttons=[
+                    (
+                        "requested_targets",
+                        "Only Requested Targets",
+                        QMessageBox.ButtonRole.AcceptRole,
+                    ),
+                    ("any_target", "Any Target", QMessageBox.ButtonRole.AcceptRole),
+                    ("deny", "Cancel", QMessageBox.ButtonRole.RejectRole),
+                ],
+                default_choice="deny",
+            )
+            if target_mode not in {"requested_targets", "any_target"}:
+                self._set_pipeline_state(
+                    PipelineState.CANCELLED, "Permission was not granted"
+                )
+                return
             grants: dict[tuple[str, str, str, str], set[str]] = {}
             for request in outcome.permission_requests:
                 context = request.call.permission_context
@@ -1747,7 +2377,8 @@ def run_desktop(container: Container) -> int:
                     request.scope.capability,
                     context.session_id,
                 )
-                grants.setdefault(key, set()).update(request.scope.targets)
+                targets = () if target_mode == "any_target" else request.scope.targets
+                grants.setdefault(key, set()).update(targets)
             for (
                 user_id,
                 skill_id,
@@ -1780,19 +2411,24 @@ def run_desktop(container: Container) -> int:
 
         def _request_registrations(self, outcome: Any) -> None:
             request = outcome.registration_requests[0]
-            dialog = QMessageBox(self)
-            dialog.setWindowTitle("Application Registration Required")
-            dialog.setIcon(QMessageBox.Icon.Warning)
-            dialog.setText("This command needs an application registered first.")
-            dialog.setInformativeText(
-                f"Register an executable for '{request.application}' to continue."
+            decision = self._voice_prompt_choice(
+                title="Application Registration Required",
+                text="This command needs an application registered first.",
+                informative_text=(
+                    f"Register an executable for '{request.application}' to continue."
+                ),
+                kind="approval",
+                buttons=[
+                    (
+                        "approve",
+                        "Register Application",
+                        QMessageBox.ButtonRole.AcceptRole,
+                    ),
+                    ("deny", "Not Now", QMessageBox.ButtonRole.RejectRole),
+                ],
+                default_choice="deny",
             )
-            register_button = dialog.addButton(
-                "Register Application", QMessageBox.ButtonRole.AcceptRole
-            )
-            dialog.addButton("Not Now", QMessageBox.ButtonRole.RejectRole)
-            dialog.exec()
-            if dialog.clickedButton() is not register_button:
+            if decision != "approve":
                 self._set_pipeline_state(
                     PipelineState.CANCELLED, "Application was not registered"
                 )
@@ -1841,14 +2477,18 @@ def run_desktop(container: Container) -> int:
 
         def _request_confirmation(self, outcome: Any) -> None:
             request = outcome.confirmation
-            approved = QMessageBox.question(
-                self,
-                f"Confirm {request.risk.value.title()} Risk Action",
-                request.exact_action,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
+            decision = self._voice_prompt_choice(
+                title=f"Confirm {request.risk.value.title()} Risk Action",
+                text=request.exact_action,
+                informative_text="Approve or deny this action.",
+                kind="approval",
+                buttons=[
+                    ("approve", "Yes", QMessageBox.ButtonRole.AcceptRole),
+                    ("deny", "No", QMessageBox.ButtonRole.RejectRole),
+                ],
+                default_choice="deny",
             )
-            if approved != QMessageBox.StandardButton.Yes:
+            if decision != "approve":
                 container.confirmations.deny(request.confirmation_id)
                 self._set_pipeline_state(
                     PipelineState.CANCELLED, "Action was not confirmed"
@@ -1857,12 +2497,27 @@ def run_desktop(container: Container) -> int:
             typed_token = None
             if request.requires_typed_token:
                 expected = str(request.confirmation_id)[-6:]
-                typed_token, ok = QInputDialog.getText(
-                    self,
-                    "Critical Action Confirmation",
-                    f"Type {expected} to confirm this critical action.",
+                typed_token = self._voice_prompt_choice(
+                    title="Critical Action Confirmation",
+                    text=f"Type {expected} to confirm this critical action.",
+                    informative_text="Speak or type the confirmation token.",
+                    kind="critical_token",
+                    buttons=[
+                        ("type", "Type Token", QMessageBox.ButtonRole.AcceptRole),
+                        ("deny", "Cancel", QMessageBox.ButtonRole.RejectRole),
+                    ],
+                    default_choice="deny",
+                    expected_token=expected,
                 )
-                if not ok:
+                if typed_token == "type":
+                    typed_token, ok = QInputDialog.getText(
+                        self,
+                        "Critical Action Confirmation",
+                        f"Type {expected} to confirm this critical action.",
+                    )
+                    if not ok:
+                        typed_token = None
+                if typed_token != expected:
                     container.confirmations.deny(request.confirmation_id)
                     self._set_pipeline_state(
                         PipelineState.CANCELLED, "Action was not confirmed"
@@ -1932,6 +2587,14 @@ def run_desktop(container: Container) -> int:
             QMessageBox.critical(self, "Assistant Error", error)
 
         def _show_cancelled(self) -> None:
+            if (
+                self._passive_voice_worker
+                and self._passive_voice_worker.isRunning()
+            ):
+                self._append_activity("Cancelled", "Stopped current command")
+                self._set_pipeline_state(PipelineState.IDLE, self._passive_voice_status())
+                self._apply_passive_voice_indicators()
+                return
             self._set_pipeline_state(PipelineState.CANCELLED, "Stopped by you")
 
         def cancel(self) -> None:
@@ -1941,11 +2604,7 @@ def run_desktop(container: Container) -> int:
                 await container.orchestrator.cancel()
 
             worker = AsyncWorker(cancel_all())
-            worker.complete.connect(
-                lambda _: self._set_pipeline_state(
-                    PipelineState.CANCELLED, "Stopped by you"
-                )
-            )
+            worker.complete.connect(lambda _: self._show_cancelled())
             worker.finished.connect(lambda: self._workers.remove(worker))
             self._workers.append(worker)
             worker.start()
@@ -1959,6 +2618,7 @@ def run_desktop(container: Container) -> int:
                     keyboard.remove_hotkey(hotkey)
             except Exception:
                 pass
+            self._stop_passive_voice()
             if container.wakeword:
                 asyncio.run(container.wakeword.cancel())
             event.accept()
@@ -2059,8 +2719,12 @@ def run_desktop(container: Container) -> int:
             font-size: 12pt;
             font-weight: 650;
         }
-        #statusDetail, #elapsedStatus, #activityHint {
+        #statusDetail, #statusTranscript, #elapsedStatus, #activityHint {
             color: #8496ad;
+        }
+        #statusTranscript {
+            color: #cbd7e6;
+            font-size: 9pt;
         }
         #elapsedStatus {
             font-family: "Consolas";
@@ -2083,6 +2747,11 @@ def run_desktop(container: Container) -> int:
         #micLevel::chunk {
             background: #41d6a3;
             border-radius: 4px;
+        }
+        #micLevelValue {
+            color: #9db0c8;
+            font-family: "Consolas";
+            font-size: 8.5pt;
         }
         QTextEdit, QLineEdit, QComboBox, QListWidget, QTableWidget {
             background: #0b1524;
@@ -2222,8 +2891,8 @@ def run_desktop(container: Container) -> int:
     menu.addAction(quit_action)
     tray.setContextMenu(menu)
     tray.setToolTip(
-        "Local Assistant - passive listening "
-        + ("ON" if container.wakeword else "off")
+        "Local Assistant - voice activation "
+        + ("ON" if container.settings.voice_activation_mode != "hotkey" else "off")
     )
     tray.show()
     window.show()

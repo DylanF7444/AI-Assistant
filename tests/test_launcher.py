@@ -11,12 +11,16 @@ class FakeApplications:
     def __init__(self):
         self.launched = None
         self.launched_with_args = None
+        self.opened_url = None
 
     async def launch(self, path):
         self.launched = path
 
     async def launch_with_args(self, path, arguments):
         self.launched_with_args = (path, arguments)
+
+    async def open_url(self, url):
+        self.opened_url = url
 
     async def focus(self, name):
         return True
@@ -86,6 +90,48 @@ async def test_launcher_opens_registered_path_with_https_url(tmp_path: Path):
     assert "https://example.com/search?q=test" in result.summary
     with pytest.raises(ValueError, match="public HTTPS"):
         skill.validate({"application": "approved", "url": "file:///C:/secret.txt"})
+
+
+@pytest.mark.asyncio
+async def test_launcher_opens_fallback_url_in_default_browser_when_unregistered():
+    adapter = FakeApplications()
+    skill = LauncherSkill(adapter, resolver=lambda name: None)
+
+    result = await skill.execute(
+        call({"application": "youtube", "fallback_url": "https://www.youtube.com"}),
+        asyncio.Event(),
+    )
+
+    assert adapter.launched is None
+    assert adapter.launched_with_args is None
+    assert adapter.opened_url == "https://www.youtube.com"
+    assert "https://www.youtube.com" in result.summary
+    permission = skill.required_permissions(
+        call({"application": "youtube", "fallback_url": "https://www.youtube.com"})
+    )[0]
+    assert permission.capability == "network"
+    assert permission.targets == ("https://www.youtube.com",)
+
+
+@pytest.mark.asyncio
+async def test_launcher_prefers_registered_application_over_website_fallback(
+    tmp_path: Path,
+):
+    approved = tmp_path / "youtube.exe"
+    approved.write_bytes(b"")
+    adapter = FakeApplications()
+    skill = LauncherSkill(adapter, resolver=lambda name: str(approved))
+
+    await skill.execute(
+        call({"application": "youtube", "fallback_url": "https://www.youtube.com"}),
+        asyncio.Event(),
+    )
+
+    assert adapter.launched == str(approved)
+    assert adapter.opened_url is None
+    assert skill.required_permissions(
+        call({"application": "youtube", "fallback_url": "https://www.youtube.com"})
+    )[0].capability == "process.launch"
 
 
 @pytest.mark.asyncio

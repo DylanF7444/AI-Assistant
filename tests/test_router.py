@@ -95,6 +95,49 @@ def test_launch_command_uses_registered_app_prefix_before_follow_up():
 @pytest.mark.parametrize(
     ("text", "arguments"),
     [
+        (
+            "open youtube",
+            {"application": "youtube", "fallback_url": "https://www.youtube.com"},
+        ),
+        (
+            "open chatgpt",
+            {"application": "chatgpt", "fallback_url": "https://chatgpt.com"},
+        ),
+        (
+            "open stack overflow",
+            {
+                "application": "stack overflow",
+                "fallback_url": "https://stackoverflow.com",
+            },
+        ),
+        (
+            "open vlr.gg",
+            {"application": "vlr.gg", "fallback_url": "https://vlr.gg"},
+        ),
+    ],
+)
+def test_website_names_route_to_launcher_with_default_browser_fallback(
+    text, arguments
+):
+    result = DeterministicRouter().route(text)
+    assert not result.needs_llm
+    assert result.intent.name == "windows.launcher"
+    assert result.intent.arguments == arguments
+
+
+def test_registered_website_name_still_routes_with_fallback_for_launcher_precedence():
+    router = DeterministicRouter(application_names=lambda: {"youtube": "path"})
+    result = router.route("open youtube")
+    assert result.intent.name == "windows.launcher"
+    assert result.intent.arguments == {
+        "application": "youtube",
+        "fallback_url": "https://www.youtube.com",
+    }
+
+
+@pytest.mark.parametrize(
+    ("text", "arguments"),
+    [
         ("open a brave tab", {"application": "brave"}),
         ("open a chrome browser tab", {"application": "chrome"}),
         ("open a firefox window", {"application": "firefox"}),

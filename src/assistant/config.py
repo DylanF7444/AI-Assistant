@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Literal
 
 from platformdirs import user_data_path
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class Settings(BaseModel):
@@ -16,9 +16,15 @@ class Settings(BaseModel):
     offline_lock: bool = True
     retain_transcripts_days: int = Field(default=0, ge=0)
     diagnostic_audio: bool = False
+    voice_activation_mode: Literal["hotkey", "keyword_clap", "persistent"] = "hotkey"
+    voice_activation_keyword: str = Field(default="assistant", min_length=1)
+    voice_activation_keyword_enabled: bool = True
+    voice_activation_clap_enabled: bool = False
+    voice_activation_clap_threshold: float = Field(default=0.35, gt=0, le=1)
     speech_mode: Literal["always", "voice_only", "never"] = "voice_only"
     response_detail: Literal["short", "normal", "detailed"] = "normal"
     show_reasoning_steps: bool = False
+    terminal_debug: bool = True
     allow_sensitive_speech: bool = False
     hide_sensitive_display: bool = False
     stt_provider: str = "faster-whisper"
@@ -50,6 +56,26 @@ class Settings(BaseModel):
     audio_output_device: str | None = None
     silence_timeout_seconds: float = Field(default=1.0, gt=0)
     max_utterance_seconds: float = Field(default=30.0, gt=0)
+
+    @field_validator("voice_activation_keyword")
+    @classmethod
+    def _keyword_must_not_be_blank(cls, value: str) -> str:
+        keyword = " ".join(value.split())
+        if not keyword:
+            raise ValueError("voice activation keyword cannot be blank")
+        return keyword
+
+    @model_validator(mode="after")
+    def _keyword_clap_mode_needs_trigger(self) -> "Settings":
+        if (
+            self.voice_activation_mode == "keyword_clap"
+            and not self.voice_activation_keyword_enabled
+            and not self.voice_activation_clap_enabled
+        ):
+            raise ValueError(
+                "keyword/clap voice activation needs a keyword or clap trigger"
+            )
+        return self
 
     @property
     def database_url(self) -> str:

@@ -14,7 +14,11 @@ from assistant.contracts import (
     Transcript,
     WordTimestamp,
 )
-from assistant.language.planner import InvalidPlannerResponse
+from assistant.language.planner import (
+    InvalidPlannerResponse,
+    PlannedIntentStep,
+    PlannerDecision,
+)
 from assistant.storage.database import HistoryRow
 
 
@@ -157,6 +161,44 @@ class CapturingPlanner:
         pass
 
 
+class ComplexPlanner:
+    async def plan_decision(self, text, recent_context=()):
+        return PlannerDecision(
+            steps=(
+                PlannedIntentStep(
+                    step_id="math",
+                    intent=Intent(
+                        name="core.calculator",
+                        arguments={"expression": "2 + 2"},
+                        confidence=0.95,
+                        source="llm",
+                    ),
+                ),
+                PlannedIntentStep(
+                    step_id="time",
+                    intent=Intent(
+                        name="core.datetime",
+                        arguments={"query": "date"},
+                        confidence=0.95,
+                        source="llm",
+                    ),
+                    depends_on=("math",),
+                ),
+            )
+        )
+
+    async def cancel(self):
+        pass
+
+
+class ClarifyingDecisionPlanner:
+    async def plan_decision(self, text, recent_context=()):
+        return PlannerDecision(clarification="Which folder should I search?")
+
+    async def cancel(self):
+        pass
+
+
 @pytest.mark.asyncio
 async def test_text_to_command_to_response(settings):
     container = build_container(settings)
@@ -180,6 +222,31 @@ async def test_reasoning_steps_can_be_shown(settings):
     assert "core.calculator" in response.display_text
     assert "Prepare core.calculator" in response.display_text
     assert "Request breakdown:" not in (response.speech_text or "")
+
+
+@pytest.mark.asyncio
+async def test_terminal_debug_is_printed_for_text_requests(settings, capsys):
+    container = build_container(settings)
+
+    await container.orchestrator.handle_text("calculate 4 times 5")
+
+    captured = capsys.readouterr()
+    assert "[assistant debug]" in captured.err
+    assert "request=calculate 4 times 5" in captured.err
+    assert "intent=core.calculator" in captured.err
+    assert 'arguments={"expression": "4 * 5"}' in captured.err
+    assert "result_status=completed" in captured.err
+
+
+@pytest.mark.asyncio
+async def test_terminal_debug_can_be_disabled(settings, capsys):
+    settings.terminal_debug = False
+    container = build_container(settings)
+
+    await container.orchestrator.handle_text("calculate 4 times 5")
+
+    captured = capsys.readouterr()
+    assert "[assistant debug]" not in captured.err
 
 
 @pytest.mark.asyncio
@@ -237,6 +304,41 @@ async def test_listen_once_stays_listening_until_transcript_arrives(settings):
     assert "2" in response.display_text
     assert outcome.result is not None
     assert PipelineState.TRANSCRIBING in [event.state for event in events]
+
+
+@pytest.mark.asyncio
+async def test_passive_transcribe_once_can_stay_quiet_until_request(settings):
+    container = build_container(settings)
+    stt = GatedSTT()
+    release_audio = asyncio.Event()
+    events = []
+    transcripts = []
+    container.events.add_listener(events.append)
+
+    async def audio():
+        await release_audio.wait()
+        yield b"\x01\x00" * 400
+
+    task = asyncio.create_task(
+        container.orchestrator.transcribe_once(
+            stt,
+            audio(),
+            publish_events=False,
+            on_transcript=transcripts.append,
+        )
+    )
+    await asyncio.wait_for(stt.started.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    assert events == []
+
+    release_audio.set()
+    transcript = await task
+
+    assert transcript is not None
+    assert transcript.normalized_text == "calculate 1 plus 1"
+    assert events == []
+    assert [item.raw_text for item in transcripts] == ["calculate 1 plus 1"]
 
 
 @pytest.mark.asyncio
@@ -306,6 +408,37 @@ async def test_low_confidence_sensitive_target_requires_clarification(settings):
     response, outcome = await container.orchestrator.handle_transcript(transcript)
     assert "not confident" in response.display_text
     assert response.response_type == ResponseType.CLARIFICATION
+
+
+@pytest.mark.asyncio
+async def test_low_confidence_sensitive_target_prints_voice_debug(settings, capsys):
+    container = build_container(settings)
+    transcript = Transcript(
+        session_id=uuid4(),
+        raw_text="delete file c colon users report",
+        normalized_text="delete file c:/users/report.txt",
+        confidence=0.7,
+        words=(
+            WordTimestamp(
+                word="report",
+                start_seconds=1,
+                end_seconds=1.4,
+                confidence=0.42,
+            ),
+        ),
+    )
+
+    response, outcome = await container.orchestrator.handle_transcript(transcript)
+
+    captured = capsys.readouterr()
+    assert "[assistant voice debug]" in captured.err
+    assert "gate=sensitive_target_confidence" in captured.err
+    assert "transcript_confidence=0.7" in captured.err
+    assert "transcript_threshold=0.75" in captured.err
+    assert '"word": "report"' in captured.err
+    assert "intent=windows.file_operation" in captured.err
+    assert '"source"' in captured.err
+    assert "not confident" in response.display_text
     assert outcome.result is None
 
 
@@ -452,6 +585,36 @@ async def test_conversational_answer_does_not_execute_a_skill(settings):
 
 
 @pytest.mark.asyncio
+async def test_complex_planner_decision_executes_prepared_plan(settings):
+    container = build_container(settings)
+    container.orchestrator.planner = ComplexPlanner()
+
+    response, outcome = await container.orchestrator.handle_text(
+        "do a couple unmatched local things"
+    )
+
+    assert outcome.result.status == ResultStatus.COMPLETED
+    assert response.response_type == ResponseType.SKILL
+    assert "math: The result is 4." in response.display_text
+    assert "time:" in response.display_text
+    assert container.orchestrator._session_context[-1]["intent"] == "planner.plan"
+
+
+@pytest.mark.asyncio
+async def test_complex_planner_decision_can_ask_clarification(settings):
+    container = build_container(settings)
+    container.orchestrator.planner = ClarifyingDecisionPlanner()
+
+    response, outcome = await container.orchestrator.handle_text(
+        "do something unmatched with files"
+    )
+
+    assert response.response_type == ResponseType.CLARIFICATION
+    assert response.display_text == "Which folder should I search?"
+    assert outcome.result is None
+
+
+@pytest.mark.asyncio
 async def test_skill_preparation_error_is_returned_as_response(settings):
     container = build_container(settings)
     response, outcome = await container.orchestrator.handle_text(
@@ -499,6 +662,23 @@ async def test_unregistered_application_returns_registration_request(settings):
     assert outcome.registration_requests
     assert outcome.registration_requests[0].call.skill_id == "windows.launcher"
     assert outcome.registration_requests[0].application == "discord"
+
+
+@pytest.mark.asyncio
+async def test_unregistered_website_name_requests_default_browser_permission(settings):
+    container = build_container(settings)
+
+    response, outcome = await container.orchestrator.handle_text("open youtube")
+
+    assert response.response_type == ResponseType.PERMISSION
+    assert not outcome.registration_requests
+    assert outcome.permission_requests
+    assert outcome.permission_requests[0].call.arguments == {
+        "application": "youtube",
+        "fallback_url": "https://www.youtube.com",
+    }
+    assert outcome.permission_requests[0].scope.capability == "network"
+    assert outcome.permission_requests[0].scope.targets == ("https://www.youtube.com",)
 
 
 @pytest.mark.asyncio

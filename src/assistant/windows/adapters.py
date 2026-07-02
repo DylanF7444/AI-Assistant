@@ -20,6 +20,7 @@ class ApplicationAdapter(Protocol):
     async def launch_with_args(
         self, registered_path: str, arguments: tuple[str, ...]
     ) -> None: ...
+    async def open_url(self, url: str) -> None: ...
     async def focus(self, process_name: str) -> bool: ...
     async def minimize(self, process_name: str) -> bool: ...
     async def maximize(self, process_name: str) -> bool: ...
@@ -122,6 +123,9 @@ class WindowsApplicationAdapter:
             stderr=subprocess.DEVNULL,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
+
+    async def open_url(self, url: str) -> None:
+        os.startfile(url)  # type: ignore[attr-defined]
 
     async def focus(self, process_name: str) -> bool:
         return self._show(process_name, 9, foreground=True)
@@ -377,6 +381,16 @@ class WindowsMediaAdapter:
 
 
 class LocalWindowsDeviceAdapter:
+    _APP_EXECUTABLE_EXCLUDE = {
+        "crashpad_handler.exe",
+        "setup.exe",
+        "unins000.exe",
+        "uninstall.exe",
+        "uninstaller.exe",
+        "update.exe",
+        "updater.exe",
+    }
+
     async def search_installed_apps(
         self, query: str | None = None, limit: int = 20
     ) -> list[dict]:
@@ -409,12 +423,20 @@ class LocalWindowsDeviceAdapter:
                             if identity in seen:
                                 continue
                             seen.add(identity)
+                            install_location = self._registry_value(
+                                subkey, "InstallLocation"
+                            )
+                            display_icon = self._registry_value(subkey, "DisplayIcon")
                             apps.append(
                                 {
                                     "name": name,
                                     "publisher": self._registry_value(subkey, "Publisher"),
                                     "version": self._registry_value(subkey, "DisplayVersion"),
-                                    "install_location": self._registry_value(subkey, "InstallLocation"),
+                                    "install_location": install_location,
+                                    "display_icon": display_icon,
+                                    "executable_path": self._application_executable_path(
+                                        name, display_icon, install_location
+                                    ),
                                 }
                             )
                     except OSError:
@@ -422,6 +444,60 @@ class LocalWindowsDeviceAdapter:
                     if len(apps) >= limit:
                         return apps
         return sorted(apps, key=lambda item: item["name"].casefold())[:limit]
+
+    @classmethod
+    def _application_executable_path(
+        cls,
+        name: str,
+        display_icon: str | None,
+        install_location: str | None,
+    ) -> str | None:
+        display_icon_path = cls._display_icon_executable(display_icon)
+        if display_icon_path:
+            return str(display_icon_path)
+        if not install_location:
+            return None
+        root = Path(install_location).expanduser()
+        if not root.is_dir():
+            return None
+        candidates = [
+            path
+            for path in root.glob("*.exe")
+            if path.name.casefold() not in cls._APP_EXECUTABLE_EXCLUDE
+        ]
+        if not candidates:
+            return None
+        words = {
+            word
+            for word in re.findall(r"[a-z0-9]+", name.casefold())
+            if len(word) > 2
+        }
+        scored = sorted(
+            candidates,
+            key=lambda path: (
+                -sum(1 for word in words if word in path.stem.casefold()),
+                len(path.name),
+                path.name.casefold(),
+            ),
+        )
+        return str(scored[0].resolve())
+
+    @staticmethod
+    def _display_icon_executable(display_icon: str | None) -> Path | None:
+        if not display_icon:
+            return None
+        value = display_icon.strip()
+        if value.startswith('"'):
+            match = re.match(r'^"([^"]+)"', value)
+            candidate = match.group(1) if match else value.strip('"')
+        else:
+            candidate = value.split(",", 1)[0].strip()
+            if ".exe" in candidate.casefold():
+                candidate = candidate[: candidate.casefold().find(".exe") + 4]
+        path = Path(candidate).expanduser()
+        if path.suffix.casefold() != ".exe" or not path.is_file():
+            return None
+        return path.resolve()
 
     async def set_volume(self, level: int) -> None:
         self._audio_endpoint().set_volume(max(0, min(100, level)) / 100)
