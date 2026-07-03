@@ -89,6 +89,38 @@ class FlakySkill(CountingSkill):
         )
 
 
+class UndoableSkill(CountingSkill):
+    def __init__(self):
+        super().__init__(risk=RiskLevel.LOW)
+        self.undone = 0
+        self.manifest = self.manifest.model_copy(
+            update={
+                "skill_id": "test.undoable",
+                "risk": RiskLevel.LOW,
+                "permissions": (),
+                "supports_rollback": True,
+            }
+        )
+
+    async def execute(self, call, cancel_event):
+        self.count += 1
+        return SkillResult(
+            status=ResultStatus.COMPLETED,
+            summary="Changed.",
+            data={"count": self.count},
+            rollback_token="undo-count",
+        )
+
+    async def rollback(self, token: str) -> SkillResult:
+        assert token == "undo-count"
+        self.undone += 1
+        return SkillResult(
+            status=ResultStatus.COMPLETED,
+            summary="Change undone.",
+            data={"count": self.count},
+        )
+
+
 class SlowSkill(CountingSkill):
     def __init__(self):
         super().__init__(risk=RiskLevel.LOW)
@@ -191,6 +223,42 @@ async def test_permission_confirmation_and_idempotency(tmp_path):
     assert duplicate == result
     assert skill.count == 1
     assert audit.query(event_type="skill_execution")
+
+
+@pytest.mark.asyncio
+async def test_undo_last_completed_command_uses_rollback_token(tmp_path):
+    skill = UndoableSkill()
+    engine, _, audit = engine_for(tmp_path, skill)
+
+    result = await engine.execute(
+        make_call("test.undoable", {"target": "item"}, key="change")
+    )
+    undo = await engine.undo_last()
+    second_undo = await engine.undo_last()
+
+    assert result.status == ResultStatus.COMPLETED
+    assert undo.status == ResultStatus.COMPLETED
+    assert undo.summary == "Change undone."
+    assert second_undo.status == ResultStatus.DENIED
+    assert second_undo.error.code == "undo_unavailable"
+    assert skill.undone == 1
+    assert audit.query(event_type="skill_rollback")
+
+
+@pytest.mark.asyncio
+async def test_undo_reports_when_last_command_cannot_be_undone(tmp_path):
+    engine, _, _ = engine_for(tmp_path, CalculatorSkill())
+
+    result = await engine.execute(
+        make_call("core.calculator", {"expression": "2 + 2"}, key="math")
+    )
+    undo = await engine.undo_last()
+
+    assert result.status == ResultStatus.COMPLETED
+    assert undo.status == ResultStatus.DENIED
+    assert undo.summary == "The last command cannot be undone."
+    assert undo.error.code == "undo_not_supported"
+    assert "Calculator" in undo.error.message
 
 
 @pytest.mark.asyncio

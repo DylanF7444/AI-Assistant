@@ -35,6 +35,9 @@ class DeterministicRouter:
         "cancel": "control.cancel",
         "stop": "control.cancel",
         "never mind": "control.cancel",
+        "undo": "control.undo",
+        "undo last command": "control.undo",
+        "undo that": "control.undo",
         "mute": "control.mute",
         "yes": "control.confirm",
         "confirm": "control.confirm",
@@ -793,8 +796,32 @@ class DeterministicRouter:
                     source="rule",
                 )
             )
+        if re.fullmatch(
+            r"(?:open|launch|start) (?:a |an |the )?(?:new |blank )?(?:browser )?tab",
+            routed,
+        ):
+            return RouteResult(
+                Intent(
+                    name="windows.launcher",
+                    arguments={"application": "browser"},
+                    confidence=0.94,
+                    source="rule",
+                )
+            )
         if context_navigation := self._route_context_navigation(routed):
             return RouteResult(context_navigation)
+        if match := re.fullmatch(
+            r"(minimize|maximize)(?: (?:the |this |current |active |focused |foreground )*window)?",
+            routed,
+        ):
+            return RouteResult(
+                Intent(
+                    name="windows.application_window",
+                    arguments={"operation": f"{match.group(1)}_focused"},
+                    confidence=0.96,
+                    source="rule",
+                )
+            )
         if match := re.fullmatch(
             r"(focus|minimize|maximize|close) (?:application )?([^ ]+\.exe)",
             routed,
@@ -1098,6 +1125,13 @@ class DeterministicRouter:
                 DeterministicRouter.BROWSER_APPLICATIONS, key=len, reverse=True
             )
         )
+        website_first_intent = (
+            DeterministicRouter._route_website_first_private_browser_launch(
+                routed, browser_names
+            )
+        )
+        if website_first_intent:
+            return website_first_intent
         website_match = re.fullmatch(
             rf"(?:open|launch|start)\s+"
             rf"(?:a |an |the )?"
@@ -1137,10 +1171,35 @@ class DeterministicRouter:
                 rf"(?P<website>.+)",
                 routed,
             )
+        if not website_match:
+            website_match = re.fullmatch(
+                r"(?:open|launch|start)\s+"
+                r"(?:a |an |the )?"
+                r"(?:new\s+)?"
+                r"(?P<private_before>private|incognito|inprivate)\s+"
+                r"(?:(?:browser)\s+)?"
+                r"(?:tab|window)\s+"
+                r"(?:with|to|for|at)\s+"
+                r"(?P<website>.+)",
+                routed,
+            )
+        if not website_match:
+            website_match = re.fullmatch(
+                r"(?:open|launch|start)\s+"
+                r"(?:a |an |the )?"
+                r"(?:new\s+)?"
+                r"(?:(?:browser)\s+)?"
+                r"(?:tab|window)\s+"
+                r"(?:with|to|for|at)\s+"
+                r"(?P<website>.+)",
+                routed,
+            )
         if website_match and (
             url := DeterministicRouter._website_url(website_match.group("website"))
         ):
-            application = website_match.group("application").strip()
+            application = (
+                website_match.groupdict().get("application") or "browser"
+            ).strip()
             private = bool(website_match.groupdict().get("private_before")) or bool(
                 (website_match.groupdict().get("private_after") or "").strip()
             )
@@ -1232,6 +1291,54 @@ class DeterministicRouter:
             confidence=0.94,
             source="rule",
         )
+
+    @staticmethod
+    def _route_website_first_private_browser_launch(
+        routed: str, browser_names: str
+    ) -> Intent | None:
+        patterns = (
+            rf"(?:open|launch|start)\s+"
+            rf"(?P<website>.+?)\s+"
+            rf"(?:with|in|on|using|for)\s+"
+            rf"(?:a |an |the )?"
+            rf"(?P<private>private|incognito|inprivate)\s+"
+            rf"(?:(?:browser)\s+)?"
+            rf"(?:tab|window)\s+"
+            rf"(?:(?:open|opened)\s+)?"
+            rf"(?:for|in|on|with|using)\s+"
+            rf"(?P<application>{browser_names})",
+            rf"(?:open|launch|start)\s+"
+            rf"(?P<website>.+?)\s+"
+            rf"(?:with|in|on|using|for)\s+"
+            rf"(?:a |an |the )?"
+            rf"(?P<private>private|incognito|inprivate)\s+"
+            rf"(?P<application>{browser_names})\s+"
+            rf"(?:(?:browser)\s+)?"
+            rf"(?:tab|window)",
+            rf"(?:open|launch|start)\s+"
+            rf"(?P<website>.+?)\s+"
+            rf"(?:with|in|on|using|for)\s+"
+            rf"(?P<application>{browser_names})\s+"
+            rf"(?P<private>private|incognito|inprivate)\s+"
+            rf"(?:(?:browser)\s+)?"
+            rf"(?:tab|window)",
+        )
+        for pattern in patterns:
+            if not (match := re.fullmatch(pattern, routed)):
+                continue
+            if not (url := DeterministicRouter._website_url(match.group("website"))):
+                continue
+            return Intent(
+                name="windows.launcher",
+                arguments={
+                    "application": match.group("application").strip(),
+                    "private": True,
+                    "url": url,
+                },
+                confidence=0.95,
+                source="rule",
+            )
+        return None
 
     def _split_launch_target(self, target: str) -> tuple[str, str | None]:
         target = target.strip()

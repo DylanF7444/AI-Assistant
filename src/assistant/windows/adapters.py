@@ -26,9 +26,12 @@ class ApplicationAdapter(Protocol):
         self, registered_path: str, arguments: tuple[str, ...]
     ) -> None: ...
     async def open_url(self, url: str) -> None: ...
+    def default_browser_path(self) -> str | None: ...
     async def focus(self, process_name: str) -> bool: ...
     async def minimize(self, process_name: str) -> bool: ...
     async def maximize(self, process_name: str) -> bool: ...
+    async def minimize_focused(self) -> bool: ...
+    async def maximize_focused(self) -> bool: ...
     async def close(self, process_name: str) -> bool: ...
     async def move_to_monitor(self, process_name: str, monitor: int) -> bool: ...
     async def move(self, process_name: str, x: int, y: int) -> bool: ...
@@ -162,6 +165,9 @@ class WindowsApplicationAdapter:
     async def open_url(self, url: str) -> None:
         os.startfile(url)  # type: ignore[attr-defined]
 
+    def default_browser_path(self) -> str | None:
+        return self._default_browser_path()
+
     async def focus(self, process_name: str) -> bool:
         return self._show(process_name, 9, foreground=True)
 
@@ -170,6 +176,12 @@ class WindowsApplicationAdapter:
 
     async def maximize(self, process_name: str) -> bool:
         return self._show(process_name, 3, foreground=True)
+
+    async def minimize_focused(self) -> bool:
+        return self._show_focused(6)
+
+    async def maximize_focused(self) -> bool:
+        return self._show_focused(3, foreground=True)
 
     async def close(self, process_name: str) -> bool:
         return self._post_close(process_name)
@@ -395,6 +407,51 @@ class WindowsApplicationAdapter:
         )
 
     @classmethod
+    def _default_browser_path(cls) -> str | None:
+        try:
+            import winreg
+        except ImportError:
+            return None
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice",
+            ) as key:
+                prog_id = str(winreg.QueryValueEx(key, "ProgId")[0]).strip()
+        except OSError:
+            prog_id = ""
+        if not prog_id:
+            return None
+        command_subkey = rf"{prog_id}\shell\open\command"
+        roots = (
+            (winreg.HKEY_CURRENT_USER, r"Software\Classes"),
+            (winreg.HKEY_LOCAL_MACHINE, r"Software\Classes"),
+            (winreg.HKEY_CLASSES_ROOT, ""),
+        )
+        for root, prefix in roots:
+            key_path = rf"{prefix}\{command_subkey}" if prefix else command_subkey
+            try:
+                with winreg.OpenKey(root, key_path) as key:
+                    command = str(winreg.QueryValueEx(key, "")[0]).strip()
+            except OSError:
+                continue
+            path = cls._command_executable_path(command)
+            if path:
+                return path
+        return None
+
+    @staticmethod
+    def _command_executable_path(command: str) -> str | None:
+        command = command.strip()
+        match = re.match(r'^"([^"]+\.exe)"', command, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+        match = re.match(r"^(.+?\.exe)(?:\s|$)", command, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        return None
+
+    @classmethod
     def _show(cls, process_name: str, command: int, foreground: bool = False) -> bool:
         handles = cls._windows(process_name)
         for hwnd in handles:
@@ -402,6 +459,16 @@ class WindowsApplicationAdapter:
             if foreground:
                 ctypes.windll.user32.SetForegroundWindow(hwnd)
         return bool(handles)
+
+    @classmethod
+    def _show_focused(cls, command: int, foreground: bool = False) -> bool:
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        if not hwnd or not ctypes.windll.user32.IsWindowVisible(hwnd):
+            return False
+        ctypes.windll.user32.ShowWindow(hwnd, command)
+        if foreground:
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
+        return True
 
     @classmethod
     def _post_close(cls, process_name: str) -> bool:

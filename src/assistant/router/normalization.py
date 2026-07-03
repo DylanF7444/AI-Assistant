@@ -65,7 +65,7 @@ def normalize_text(text: str, aliases: dict[str, str] | None = None) -> str:
         " exclamation mark": "!",
     }
     for spoken, symbol in punctuation.items():
-        normalized = normalized.replace(spoken, symbol)
+        normalized = re.sub(rf"{re.escape(spoken)}\b", symbol, normalized)
     for spoken, canonical in sorted((aliases or {}).items(), key=lambda item: -len(item[0])):
         normalized = re.sub(rf"\b{re.escape(spoken.casefold())}\b", canonical, normalized)
     return normalized

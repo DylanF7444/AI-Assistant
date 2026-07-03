@@ -70,6 +70,14 @@ class FakeApps:
         self.calls.append(("maximize", process_name))
         return True
 
+    async def minimize_focused(self):
+        self.calls.append(("minimize_focused",))
+        return True
+
+    async def maximize_focused(self):
+        self.calls.append(("maximize_focused",))
+        return True
+
     async def close(self, process_name):
         self.calls.append(("close", process_name))
         return True
@@ -581,9 +589,36 @@ async def test_window_movement_and_resize_are_typed():
     assert skill.required_permissions(move_call)[0].capability == "process.window"
 
 
+@pytest.mark.asyncio
+async def test_focused_window_minimize_and_maximize_do_not_require_process_name():
+    apps = FakeApps()
+    skill = ApplicationWindowSkill(apps)
+    minimize_call = call(
+        "windows.application_window",
+        {"operation": "minimize_focused"},
+    )
+    maximize_call = call(
+        "windows.application_window",
+        {"operation": "maximize_focused"},
+    )
+
+    assert await skill.preview(minimize_call) == "Minimize focused window"
+    result = await skill.execute(minimize_call, __import__("asyncio").Event())
+    await skill.execute(maximize_call, __import__("asyncio").Event())
+
+    assert result.data["process_name"] is None
+    assert apps.calls == [("minimize_focused",), ("maximize_focused",)]
+    scope = skill.required_permissions(maximize_call)[0]
+    assert scope.capability == "process.window"
+    assert scope.targets == ("focused-window",)
+
+
 def test_window_movement_requires_operation_specific_arguments():
     with pytest.raises(ValueError, match="monitor"):
         WindowInput(operation="move_to_monitor", process_name="brave.exe")
+
+    with pytest.raises(ValueError, match="process_name"):
+        WindowInput(operation="maximize")
 
 
 def test_assistant_window_lookup_includes_developer_python_hosts(monkeypatch):
@@ -757,6 +792,15 @@ def test_installed_application_executable_resolution(tmp_path):
     assert LocalWindowsDeviceAdapter._application_executable_path(
         "Example App", None, str(install)
     ) == str(app.resolve())
+
+
+def test_default_browser_command_executable_path_is_parsed():
+    assert WindowsApplicationAdapter._command_executable_path(
+        r'"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe" --single-argument %1'
+    ) == r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"
+    assert WindowsApplicationAdapter._command_executable_path(
+        r"C:\Browsers\Firefox\firefox.exe -osint -url %1"
+    ) == r"C:\Browsers\Firefox\firefox.exe"
 
 
 def test_window_input_trims_trailing_planner_punctuation():

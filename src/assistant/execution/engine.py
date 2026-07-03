@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import ValidationError
 
@@ -65,6 +65,14 @@ class ActiveJob:
     elapsed_seconds: float
 
 
+@dataclass(frozen=True)
+class UndoRecord:
+    skill_id: str
+    display_name: str
+    rollback_token: str | None
+    result_summary: str
+
+
 class ExecutionEngine:
     def __init__(
         self,
@@ -90,6 +98,7 @@ class ExecutionEngine:
         self._job_loops: dict[UUID, asyncio.AbstractEventLoop] = {}
         self._cancel_events: dict[UUID, asyncio.Event] = {}
         self._completed_keys: OrderedDict[str, SkillResult] = OrderedDict()
+        self._last_command: UndoRecord | None = None
 
     def active_jobs(self) -> tuple[ActiveJob, ...]:
         current = time.monotonic()
@@ -497,10 +506,90 @@ class ExecutionEngine:
             },
         )
         if result.status == ResultStatus.COMPLETED:
+            self._last_command = UndoRecord(
+                skill_id=call.skill_id,
+                display_name=skill.manifest.display_name,
+                rollback_token=(
+                    result.rollback_token
+                    if skill.manifest.supports_rollback
+                    else None
+                ),
+                result_summary=result.summary,
+            )
             self._completed_keys[call.idempotency_key] = result
             self._completed_keys.move_to_end(call.idempotency_key)
             while len(self._completed_keys) > self.completed_key_limit:
                 self._completed_keys.popitem(last=False)
+        return result
+
+    async def undo_last(self, correlation_id: UUID | None = None) -> SkillResult:
+        undo_correlation_id = correlation_id or uuid4()
+        record = self._last_command
+        if record is None:
+            return self._failure(
+                "undo_unavailable",
+                "There is no completed command available to undo.",
+                ResultStatus.DENIED,
+            ).model_copy(
+                update={"summary": "There is no command available to undo."}
+            )
+        if not record.rollback_token:
+            return self._failure(
+                "undo_not_supported",
+                f"{record.display_name} cannot be undone.",
+                ResultStatus.DENIED,
+            ).model_copy(
+                update={
+                    "summary": "The last command cannot be undone.",
+                    "data": {
+                        "skill_id": record.skill_id,
+                        "display_name": record.display_name,
+                        "result_summary": record.result_summary,
+                    },
+                }
+            )
+        try:
+            skill = self.registry.get(record.skill_id)
+        except KeyError as exc:
+            return self._failure(
+                "undo_unavailable",
+                f"The skill that performed the last command is no longer available: {exc}",
+                ResultStatus.DENIED,
+            )
+        await self.events.publish(
+            PipelineEvent(
+                correlation_id=undo_correlation_id,
+                state=PipelineState.EXECUTING,
+                message=f"Undoing {record.display_name}",
+            )
+        )
+        try:
+            result = await skill.rollback(record.rollback_token)
+        except NotImplementedError:
+            return self._failure(
+                "undo_not_supported",
+                f"{record.display_name} cannot be undone.",
+                ResultStatus.DENIED,
+            )
+        except Exception as exc:
+            return self._failure("undo_failed", str(exc), ResultStatus.FAILED)
+        self.audit.record(
+            correlation_id=str(undo_correlation_id),
+            event_type="skill_rollback",
+            skill_id=record.skill_id,
+            decision=result.status.value,
+            permissions=[],
+            details={
+                "result": result.model_dump(mode="json"),
+                "undid": {
+                    "skill_id": record.skill_id,
+                    "display_name": record.display_name,
+                    "result_summary": record.result_summary,
+                },
+            },
+        )
+        if result.status == ResultStatus.COMPLETED:
+            self._last_command = None
         return result
 
     def _requires_confirmation(self, call: SkillCall, risk: RiskLevel) -> bool:

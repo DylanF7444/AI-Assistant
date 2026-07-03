@@ -577,6 +577,29 @@ class AssistantOrchestrator:
                 outcome_label="cancelled",
                 invoked_by_voice=invoked_by_voice,
             )
+        if intent.name == "control.undo":
+            outcome = ExecutionOutcome(
+                result=await self.engine.undo_last(correlation_id)
+            )
+            response = self._response_from_outcome(outcome).model_copy(
+                update={"response_type": ResponseType.CONTROL}
+            )
+            outcome_label = self._outcome_label(outcome)
+            response = self._with_reasoning_steps(
+                response,
+                request_text=text,
+                intent=intent,
+                outcome_label=outcome_label,
+            )
+            return await self._finish_interaction(
+                correlation_id,
+                text,
+                response,
+                outcome,
+                intent_name=intent.name,
+                outcome_label=outcome_label,
+                invoked_by_voice=invoked_by_voice,
+            )
         if intent.name == "control.forget":
             self._session_context.clear()
             response = Response(

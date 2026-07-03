@@ -120,16 +120,33 @@ def _register_windows_skills(
 ) -> None:
     filesystem = LocalFileSystemAdapter()
     applications = WindowsApplicationAdapter()
+
+    def resolve_application(name: str) -> str | None:
+        registered = aliases.get("application", name)
+        if registered:
+            return registered
+        if name.casefold().strip() in {"browser", "default browser"}:
+            return applications.default_browser_path()
+        return None
+
+    def registered_applications() -> dict[str, str]:
+        values = aliases.all("application")
+        default_browser = applications.default_browser_path()
+        if default_browser:
+            values.setdefault("browser", default_browser)
+            values.setdefault("default browser", default_browser)
+        return values
+
     registry.register(FileSearchSkill(filesystem))
     registry.register(FileOperationSkill(filesystem))
     registry.register(
         LauncherSkill(
             applications,
-            resolver=lambda name: aliases.get("application", name),
+            resolver=resolve_application,
         )
     )
     registry.register(
-        RegisteredApplicationsSkill(lambda: aliases.all("application"))
+        RegisteredApplicationsSkill(registered_applications)
     )
     registry.register(ApplicationWindowSkill(applications))
     registry.register(ContextNavigationSkill(applications))

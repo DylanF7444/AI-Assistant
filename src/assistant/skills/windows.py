@@ -177,12 +177,14 @@ class WindowInput(BaseModel):
         "focus",
         "minimize",
         "maximize",
+        "minimize_focused",
+        "maximize_focused",
         "close",
         "move_to_monitor",
         "move",
         "resize",
     ]
-    process_name: str = Field(pattern=r"^[^\\/:*?\"<>|]+\.exe$")
+    process_name: str | None = Field(default=None, pattern=r"^[^\\/:*?\"<>|]+\.exe$")
     monitor: int | None = Field(default=None, ge=1)
     x: int | None = None
     y: int | None = None
@@ -198,6 +200,16 @@ class WindowInput(BaseModel):
 
     @model_validator(mode="after")
     def operation_arguments(self):
+        if self.operation in {
+            "focus",
+            "minimize",
+            "maximize",
+            "close",
+            "move_to_monitor",
+            "move",
+            "resize",
+        } and not self.process_name:
+            raise ValueError(f"{self.operation} requires process_name")
         if self.operation == "move_to_monitor" and self.monitor is None:
             raise ValueError("move_to_monitor requires monitor")
         if self.operation == "move" and (self.x is None or self.y is None):
@@ -211,7 +223,7 @@ class WindowInput(BaseModel):
 
 class WindowOutput(BaseModel):
     operation: str
-    process_name: str
+    process_name: str | None = None
     monitor: int | None = None
     x: int | None = None
     y: int | None = None
@@ -237,10 +249,15 @@ class ApplicationWindowSkill(Skill):
 
     def required_permissions(self, call: SkillCall):
         args = self.validate(call.arguments)
+        target = (
+            "focused-window"
+            if args.operation in {"minimize_focused", "maximize_focused"}
+            else (args.process_name or "").casefold()
+        )
         return (
             PermissionScope(
                 capability="process.window",
-                targets=(args.process_name.casefold(),),
+                targets=(target,),
                 reason=f"{args.operation.replace('_', ' ').title()} this exact application window.",
             ),
         )
@@ -254,6 +271,8 @@ class ApplicationWindowSkill(Skill):
 
     async def preview(self, call: SkillCall) -> str:
         args = self.validate(call.arguments)
+        if args.operation in {"minimize_focused", "maximize_focused"}:
+            return f"{args.operation.removesuffix('_focused').title()} focused window"
         if args.operation == "move_to_monitor":
             return f"Move application {args.process_name} to monitor {args.monitor}"
         if args.operation == "move":
@@ -267,7 +286,10 @@ class ApplicationWindowSkill(Skill):
 
     async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult:
         args = self.validate(call.arguments)
-        if args.operation == "move_to_monitor":
+        if args.operation in {"minimize_focused", "maximize_focused"}:
+            operation = getattr(self.adapter, args.operation)
+            changed = await operation()
+        elif args.operation == "move_to_monitor":
             changed = await self.adapter.move_to_monitor(
                 args.process_name, args.monitor or 1
             )
@@ -281,12 +303,15 @@ class ApplicationWindowSkill(Skill):
             operation = getattr(self.adapter, args.operation)
             changed = await operation(args.process_name)
         if not changed:
+            if args.operation in {"minimize_focused", "maximize_focused"}:
+                raise RuntimeError("No focused window found")
             raise RuntimeError(f"No visible window found for {args.process_name}")
+        target = args.process_name or "focused window"
         return SkillResult(
             status=ResultStatus.COMPLETED,
             summary=(
                 f"{args.operation.replace('_', ' ').title()} completed "
-                f"for {args.process_name}."
+                f"for {target}."
             ),
             data=WindowOutput(
                 operation=args.operation,

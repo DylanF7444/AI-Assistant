@@ -20,6 +20,7 @@ from assistant.language.planner import (
     PlannerDecision,
 )
 from assistant.storage.database import HistoryRow
+from assistant.windows.adapters import WindowsApplicationAdapter
 
 
 class FakeTTS:
@@ -207,6 +208,20 @@ async def test_text_to_command_to_response(settings):
     assert response.response_type == ResponseType.SKILL
     assert "20" in response.display_text
     assert "Request breakdown:" not in response.display_text
+
+
+@pytest.mark.asyncio
+async def test_undo_command_reports_when_last_command_cannot_be_undone(settings):
+    container = build_container(settings)
+    await container.orchestrator.handle_text("calculate 4 times 5")
+
+    response, outcome = await container.orchestrator.handle_text("undo")
+
+    assert outcome.result.status == ResultStatus.DENIED
+    assert outcome.result.error.code == "undo_not_supported"
+    assert response.response_type == ResponseType.CONTROL
+    assert response.severity == "warning"
+    assert "cannot be undone" in response.display_text
 
 
 @pytest.mark.asyncio
@@ -783,6 +798,50 @@ async def test_private_browser_launch_with_website_keeps_url_and_private(setting
         "url": "https://vlr.gg",
     }
     assert outcome.permission_requests[0].call.arguments == outcome.call.arguments
+
+
+@pytest.mark.asyncio
+async def test_default_browser_registration_handles_generic_private_tab(
+    settings, tmp_path, monkeypatch
+):
+    target = tmp_path / "default-browser.exe"
+    target.write_bytes(b"")
+    monkeypatch.setattr(
+        WindowsApplicationAdapter,
+        "_default_browser_path",
+        classmethod(lambda cls: str(target)),
+    )
+    container = build_container(settings)
+
+    response, outcome = await container.orchestrator.handle_text("open private tab")
+
+    assert response.response_type == ResponseType.PERMISSION
+    assert not outcome.registration_requests
+    assert len(outcome.permission_requests) == 1
+    assert outcome.call.arguments == {"application": "browser", "private": True}
+    assert outcome.permission_requests[0].scope.targets == (str(target.resolve()),)
+
+
+@pytest.mark.asyncio
+async def test_default_browser_registration_handles_generic_tab(
+    settings, tmp_path, monkeypatch
+):
+    target = tmp_path / "default-browser.exe"
+    target.write_bytes(b"")
+    monkeypatch.setattr(
+        WindowsApplicationAdapter,
+        "_default_browser_path",
+        classmethod(lambda cls: str(target)),
+    )
+    container = build_container(settings)
+
+    response, outcome = await container.orchestrator.handle_text("open a tab")
+
+    assert response.response_type == ResponseType.PERMISSION
+    assert not outcome.registration_requests
+    assert len(outcome.permission_requests) == 1
+    assert outcome.call.arguments == {"application": "browser"}
+    assert outcome.permission_requests[0].scope.targets == (str(target.resolve()),)
 
 
 @pytest.mark.asyncio

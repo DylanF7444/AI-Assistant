@@ -8,6 +8,8 @@ from assistant.router.normalization import normalize_text, spoken_number
     ("text", "name"),
     [
         ("cancel", "control.cancel"),
+        ("undo", "control.undo"),
+        ("undo last command", "control.undo"),
         ("help", "core.help"),
         ("what time", "core.datetime"),
         ("what is the date", "core.datetime"),
@@ -76,6 +78,24 @@ def test_application_window_command_appends_exe_without_local_planner():
         "operation": "close",
         "process_name": "RobloxPlayerBeta.exe",
     }
+
+
+@pytest.mark.parametrize(
+    ("text", "operation"),
+    [
+        ("minimize", "minimize_focused"),
+        ("maximize", "maximize_focused"),
+        ("minimize this window", "minimize_focused"),
+        ("maximize the current window", "maximize_focused"),
+        ("minimize focused window", "minimize_focused"),
+        ("maximize foreground window", "maximize_focused"),
+    ],
+)
+def test_focused_window_commands_route_without_process_name(text, operation):
+    result = DeterministicRouter().route(text)
+    assert not result.needs_llm
+    assert result.intent.name == "windows.application_window"
+    assert result.intent.arguments == {"operation": operation}
 
 
 def test_launch_command_splits_follow_up_action_from_application_name():
@@ -155,6 +175,9 @@ def test_open_https_url_routes_to_existing_browser_navigation():
         ("open a brave tab", {"application": "brave"}),
         ("open a chrome browser tab", {"application": "chrome"}),
         ("open a firefox window", {"application": "firefox"}),
+        ("open a tab", {"application": "browser"}),
+        ("open a new tab", {"application": "browser"}),
+        ("open a browser tab", {"application": "browser"}),
         ("open a private brave tab", {"application": "brave", "private": True}),
         ("open an incognito chrome tab", {"application": "chrome", "private": True}),
         ("open an inprivate edge window", {"application": "edge", "private": True}),
@@ -197,8 +220,40 @@ def test_browser_tab_wording_routes_to_launcher_application(text, arguments):
             },
         ),
         (
+            "open youtube with a private window open for brave",
+            {
+                "application": "brave",
+                "private": True,
+                "url": "https://www.youtube.com",
+            },
+        ),
+        (
+            "open youtube in a private window for brave",
+            {
+                "application": "brave",
+                "private": True,
+                "url": "https://www.youtube.com",
+            },
+        ),
+        (
+            "open youtube in private brave window",
+            {
+                "application": "brave",
+                "private": True,
+                "url": "https://www.youtube.com",
+            },
+        ),
+        (
             "open vivaldi tab with docs.python.org",
             {"application": "vivaldi", "url": "https://docs.python.org"},
+        ),
+        (
+            "open private tab with vlr.gg",
+            {"application": "browser", "private": True, "url": "https://vlr.gg"},
+        ),
+        (
+            "open tab with youtube",
+            {"application": "browser", "url": "https://www.youtube.com"},
         ),
     ],
 )
@@ -212,9 +267,7 @@ def test_browser_tab_wording_with_website_routes_to_launcher(text, arguments):
 @pytest.mark.parametrize(
     ("text", "operation"),
     [
-        ("open a new tab", "new_tab"),
         ("new tab", "new_tab"),
-        ("open a browser tab", "new_tab"),
         ("open a new browser window", "new_window"),
         ("close this tab", "close_tab"),
         ("reopen closed tab", "reopen_closed_tab"),
