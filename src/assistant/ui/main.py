@@ -290,15 +290,18 @@ def run_desktop(container: Container) -> int:
                 self.failed.emit(str(error))
 
         async def _run(self) -> None:
-            transcript = await container.orchestrator.transcribe_once(
-                container.stt,
-                container.audio_capture.chunks(),
-                publish_events=False,
-                on_transcript=self._show_transcript,
-            )
-            if self._stop_requested or transcript is None:
-                return
-            self.complete.emit(transcript.normalized_text or transcript.raw_text)
+            while not self._stop_requested:
+                transcript = await container.orchestrator.transcribe_once(
+                    container.stt,
+                    container.audio_capture.chunks(),
+                    publish_events=False,
+                    on_transcript=self._show_transcript,
+                )
+                if self._stop_requested:
+                    return
+                if transcript is None:
+                    continue
+                self.complete.emit(transcript.normalized_text or transcript.raw_text)
 
         def _show_transcript(self, transcript: Any) -> None:
             if transcript.raw_text.strip():
@@ -974,10 +977,7 @@ def run_desktop(container: Container) -> int:
             default_choice: str,
             expected_token: str | None = None,
         ) -> str:
-            restart_passive = (
-                container.settings.voice_activation_mode != "hotkey"
-                and self._passive_voice_restart_enabled
-            )
+            restart_passive = container.settings.voice_activation_mode != "hotkey"
             self._voice_prompt_active = True
             self._stop_passive_voice()
             choice = {"value": default_choice}

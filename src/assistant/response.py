@@ -39,10 +39,15 @@ def response_from_result(
         speech = "The requested action has been processed. See the screen for details."
     if detail == "short" and result.status == ResultStatus.COMPLETED:
         speech = result.speech_text or "Done."
+    response_type = (
+        ResponseType.CLARIFICATION
+        if result.error and result.error.code == "clarification_required"
+        else ResponseType.SKILL
+    )
     return Response(
         display_text=display,
         speech_text=speech,
-        response_type=ResponseType.SKILL,
+        response_type=response_type,
         severity=severity,
         speak=True,
         sensitive=result.sensitive,

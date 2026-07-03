@@ -41,6 +41,13 @@ Use the cancel hotkey or tray Cancel command to stop capture, transcription,
 planning, speech, plans, and active jobs. File deletion uses the Recycle Bin
 where Windows supports it. Dry-run previews are available for file operations.
 
+Some navigation commands use the current desktop context. If a browser is
+focused, or if a browser window is visible on any display, commands like these
+apply to that browser: `open a new tab`, `close this tab`, `reopen closed tab`,
+`next tab`, `previous tab`, `go back`, `go forward`, `refresh the page`, and
+`focus the address bar`. Named browser commands such as `open a brave tab`
+still launch the registered browser directly.
+
 ## Microphone and privacy
 
 Use the microphone test and level meter before voice commands. Raw audio is not

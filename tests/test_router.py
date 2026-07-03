@@ -19,6 +19,7 @@ from assistant.router.normalization import normalize_text, spoken_number
         ("show storage status", "windows.device_control"),
         ("show memory and cpu usage", "windows.device_control"),
         ("show connected devices", "windows.device_control"),
+        ("list my registered apps", "windows.registered_applications"),
         ("lock the device", "windows.device_control"),
         ("terminate process 123", "windows.process"),
         ("run macro morning", "core.macro"),
@@ -57,6 +58,14 @@ def test_application_registration_help_does_not_need_local_planner():
     assert not result.needs_llm
     assert "Applications tab" in result.intent.arguments["text"]
     assert "open <name>" in result.intent.arguments["text"]
+
+
+def test_registered_applications_route_lists_launcher_registrations():
+    result = DeterministicRouter().route("What are my registered applications?")
+
+    assert not result.needs_llm
+    assert result.intent.name == "windows.registered_applications"
+    assert result.intent.arguments == {}
 
 
 def test_application_window_command_appends_exe_without_local_planner():
@@ -121,18 +130,23 @@ def test_website_names_route_to_launcher_with_default_browser_fallback(
 ):
     result = DeterministicRouter().route(text)
     assert not result.needs_llm
-    assert result.intent.name == "windows.launcher"
-    assert result.intent.arguments == arguments
+    assert result.intent.name == "windows.browser_navigate"
+    assert result.intent.arguments == {"url": arguments["fallback_url"]}
 
 
-def test_registered_website_name_still_routes_with_fallback_for_launcher_precedence():
+def test_registered_website_name_routes_to_existing_browser_navigation():
     router = DeterministicRouter(application_names=lambda: {"youtube": "path"})
     result = router.route("open youtube")
-    assert result.intent.name == "windows.launcher"
-    assert result.intent.arguments == {
-        "application": "youtube",
-        "fallback_url": "https://www.youtube.com",
-    }
+    assert result.intent.name == "windows.browser_navigate"
+    assert result.intent.arguments == {"url": "https://www.youtube.com"}
+
+
+def test_open_https_url_routes_to_existing_browser_navigation():
+    result = DeterministicRouter().route("open https://example.com/docs")
+
+    assert not result.needs_llm
+    assert result.intent.name == "windows.browser_navigate"
+    assert result.intent.arguments == {"url": "https://example.com/docs"}
 
 
 @pytest.mark.parametrize(
@@ -144,7 +158,12 @@ def test_registered_website_name_still_routes_with_fallback_for_launcher_precede
         ("open a private brave tab", {"application": "brave", "private": True}),
         ("open an incognito chrome tab", {"application": "chrome", "private": True}),
         ("open an inprivate edge window", {"application": "edge", "private": True}),
-        ("open a browser tab", {"application": "browser"}),
+        ("open a private tab in firefox", {"application": "firefox", "private": True}),
+        ("open opera private", {"application": "opera", "private": True}),
+        ("open an opera gx private window", {"application": "opera gx", "private": True}),
+        ("open private tab in vivaldi", {"application": "vivaldi", "private": True}),
+        ("open chromium incognito", {"application": "chromium", "private": True}),
+        ("open private tab", {"application": "browser", "private": True}),
     ],
 )
 def test_browser_tab_wording_routes_to_launcher_application(text, arguments):
@@ -152,6 +171,66 @@ def test_browser_tab_wording_routes_to_launcher_application(text, arguments):
     assert not result.needs_llm
     assert result.intent.name == "windows.launcher"
     assert result.intent.arguments == arguments
+
+
+@pytest.mark.parametrize(
+    ("text", "arguments"),
+    [
+        (
+            "open a private brave tab with vlr.gg",
+            {"application": "brave", "private": True, "url": "https://vlr.gg"},
+        ),
+        (
+            "open private tab in brave with https://example.com/docs",
+            {
+                "application": "brave",
+                "private": True,
+                "url": "https://example.com/docs",
+            },
+        ),
+        (
+            "open an incognito chrome tab to youtube",
+            {
+                "application": "chrome",
+                "private": True,
+                "url": "https://www.youtube.com",
+            },
+        ),
+        (
+            "open vivaldi tab with docs.python.org",
+            {"application": "vivaldi", "url": "https://docs.python.org"},
+        ),
+    ],
+)
+def test_browser_tab_wording_with_website_routes_to_launcher(text, arguments):
+    result = DeterministicRouter().route(text)
+    assert not result.needs_llm
+    assert result.intent.name == "windows.launcher"
+    assert result.intent.arguments == arguments
+
+
+@pytest.mark.parametrize(
+    ("text", "operation"),
+    [
+        ("open a new tab", "new_tab"),
+        ("new tab", "new_tab"),
+        ("open a browser tab", "new_tab"),
+        ("open a new browser window", "new_window"),
+        ("close this tab", "close_tab"),
+        ("reopen closed tab", "reopen_closed_tab"),
+        ("next tab", "next_tab"),
+        ("previous browser tab", "previous_tab"),
+        ("go back", "back"),
+        ("go forward", "forward"),
+        ("refresh the page", "reload"),
+        ("focus the address bar", "focus_address_bar"),
+    ],
+)
+def test_context_navigation_routes_to_browser_context(text, operation):
+    result = DeterministicRouter().route(text)
+    assert not result.needs_llm
+    assert result.intent.name == "windows.context_navigation"
+    assert result.intent.arguments == {"target": "browser", "operation": operation}
 
 
 @pytest.mark.parametrize(
@@ -212,6 +291,17 @@ def test_window_monitor_movement_routes_before_file_move():
         "operation": "move_to_monitor",
         "process_name": "brave.exe",
         "monitor": 2,
+    }
+
+
+def test_assistant_window_routes_to_packaged_process_name():
+    result = DeterministicRouter().route("Switch assistant to my first monitor")
+    assert not result.needs_llm
+    assert result.intent.name == "windows.application_window"
+    assert result.intent.arguments == {
+        "operation": "move_to_monitor",
+        "process_name": "LocalAssistant.exe",
+        "monitor": 1,
     }
 
 

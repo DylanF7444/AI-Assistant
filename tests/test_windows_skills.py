@@ -8,6 +8,8 @@ import pytest
 from assistant.contracts import PermissionContext, ResultStatus, RiskLevel, SkillCall
 from assistant.skills.windows import (
     ApplicationWindowSkill,
+    BrowserNavigateSkill,
+    ContextNavigationSkill,
     FileOperationSkill,
     WindowInput,
     NotificationSkill,
@@ -16,7 +18,12 @@ from assistant.skills.windows import (
     WindowsDeviceControlSkill,
     WindowsSettingSkill,
 )
-from assistant.windows.adapters import LocalWindowsDeviceAdapter, ProcessInfo
+from assistant.windows.adapters import (
+    BrowserWindowInfo,
+    LocalWindowsDeviceAdapter,
+    ProcessInfo,
+    WindowsApplicationAdapter,
+)
 
 
 class FakeFiles:
@@ -118,6 +125,43 @@ class FakeInput:
 
     async def click(self, x, y):
         self.clicked = (x, y)
+
+
+class FakeContextNavigation:
+    def __init__(self, active=None, visible=None, visible_windows=()):
+        self.active = active
+        self.visible = visible
+        self.visible_windows = tuple(visible_windows)
+        self.focused = []
+        self.hotkeys = []
+        self.typed = []
+
+    async def active_process_name(self):
+        return self.active
+
+    async def first_visible_process(self, process_names):
+        return self.visible if self.visible in process_names else None
+
+    async def visible_browser_windows(self, process_names):
+        if self.visible_windows:
+            return tuple(
+                window
+                for window in self.visible_windows
+                if window.process_name in process_names
+            )
+        if self.visible in process_names:
+            return (BrowserWindowInfo(self.visible, private=False),)
+        return ()
+
+    async def focus(self, process_name):
+        self.focused.append(process_name)
+        return True
+
+    async def hotkey(self, keys):
+        self.hotkeys.append(keys)
+
+    async def type_text(self, text):
+        self.typed.append(text)
 
 
 class FakeSettings:
@@ -540,6 +584,163 @@ async def test_window_movement_and_resize_are_typed():
 def test_window_movement_requires_operation_specific_arguments():
     with pytest.raises(ValueError, match="monitor"):
         WindowInput(operation="move_to_monitor", process_name="brave.exe")
+
+
+def test_assistant_window_lookup_includes_developer_python_hosts(monkeypatch):
+    def fake_pids(process_name):
+        return {
+            "LocalAssistant.exe": {10},
+            "python.exe": {20},
+            "pythonw.exe": {30},
+        }.get(process_name, set())
+
+    monkeypatch.setattr(WindowsApplicationAdapter, "_pids", staticmethod(fake_pids))
+
+    pids, title_filtered_pids = WindowsApplicationAdapter._target_pid_sets(
+        "LocalAssistant.exe"
+    )
+
+    assert pids == {10}
+    assert title_filtered_pids == {20, 30}
+
+
+def test_assistant_developer_window_requires_local_assistant_title(monkeypatch):
+    def fake_title(hwnd):
+        return "Local Assistant" if hwnd == 100 else "Other Window"
+
+    monkeypatch.setattr(
+        WindowsApplicationAdapter, "_window_title", staticmethod(fake_title)
+    )
+
+    assert WindowsApplicationAdapter._window_matches_target(
+        200, 10, {10}, {20}
+    )
+    assert WindowsApplicationAdapter._window_matches_target(
+        100, 20, {10}, {20}
+    )
+    assert not WindowsApplicationAdapter._window_matches_target(
+        101, 20, {10}, {20}
+    )
+
+
+@pytest.mark.asyncio
+async def test_context_navigation_prefers_active_browser_then_visible_fallback():
+    adapter = FakeContextNavigation(active="chrome.exe", visible="brave.exe")
+    skill = ContextNavigationSkill(adapter)
+    skill_call = call(
+        "windows.context_navigation",
+        {"target": "browser", "operation": "new_tab"},
+    )
+
+    result = await skill.execute(skill_call, __import__("asyncio").Event())
+
+    assert result.data == {
+        "target": "browser",
+        "operation": "new_tab",
+        "process_name": "chrome.exe",
+    }
+    assert adapter.focused == []
+    assert adapter.hotkeys == [("ctrl", "t")]
+    assert [scope.capability for scope in skill.required_permissions(skill_call)] == [
+        "process.window",
+        "input.control",
+    ]
+    assert skill.risk_for(skill_call) == RiskLevel.LOW
+
+    adapter = FakeContextNavigation(active="notepad.exe", visible="brave.exe")
+    skill = ContextNavigationSkill(adapter)
+    await skill.execute(
+        call(
+            "windows.context_navigation",
+            {"target": "browser", "operation": "back"},
+        ),
+        __import__("asyncio").Event(),
+    )
+    assert adapter.focused == ["brave.exe"]
+    assert adapter.hotkeys == [("alt", "left")]
+
+
+@pytest.mark.asyncio
+async def test_context_navigation_requires_focused_or_visible_browser():
+    skill = ContextNavigationSkill(FakeContextNavigation(active="notepad.exe"))
+
+    with pytest.raises(RuntimeError, match="No focused or visible browser"):
+        await skill.execute(
+            call(
+                "windows.context_navigation",
+                {"target": "browser", "operation": "new_tab"},
+            ),
+            __import__("asyncio").Event(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_browser_navigate_opens_url_in_active_browser_address_bar():
+    adapter = FakeContextNavigation(active="chrome.exe", visible="brave.exe")
+    skill = BrowserNavigateSkill(adapter)
+    skill_call = call(
+        "windows.browser_navigate",
+        {"target": "browser", "url": "https://example.com/docs"},
+    )
+
+    result = await skill.execute(skill_call, __import__("asyncio").Event())
+
+    assert result.data == {
+        "url": "https://example.com/docs",
+        "process_name": "chrome.exe",
+    }
+    assert adapter.focused == []
+    assert adapter.hotkeys == [("ctrl", "l"), ("enter",)]
+    assert adapter.typed == ["https://example.com/docs"]
+    assert [scope.capability for scope in skill.required_permissions(skill_call)] == [
+        "process.window",
+        "input.control",
+        "network",
+    ]
+    assert skill.risk_for(skill_call) == RiskLevel.LOW
+
+
+@pytest.mark.asyncio
+async def test_browser_navigate_focuses_visible_browser_when_active_is_not_browser():
+    adapter = FakeContextNavigation(active="notepad.exe", visible="brave.exe")
+    skill = BrowserNavigateSkill(adapter)
+
+    await skill.execute(
+        call(
+            "windows.browser_navigate",
+            {"target": "browser", "url": "https://example.com/"},
+        ),
+        __import__("asyncio").Event(),
+    )
+
+    assert adapter.focused == ["brave.exe"]
+    assert adapter.hotkeys == [("ctrl", "l"), ("enter",)]
+    assert adapter.typed == ["https://example.com/"]
+
+
+@pytest.mark.asyncio
+async def test_browser_navigate_asks_when_private_and_regular_windows_exist():
+    adapter = FakeContextNavigation(
+        active="notepad.exe",
+        visible_windows=(
+            BrowserWindowInfo("brave.exe", private=False),
+            BrowserWindowInfo("brave.exe", private=True),
+        ),
+    )
+    skill = BrowserNavigateSkill(adapter)
+
+    result = await skill.execute(
+        call(
+            "windows.browser_navigate",
+            {"target": "browser", "url": "https://example.com/"},
+        ),
+        __import__("asyncio").Event(),
+    )
+
+    assert result.status == ResultStatus.DENIED
+    assert result.error.code == "clarification_required"
+    assert "Which browser window" in result.summary
+    assert adapter.hotkeys == []
 
 
 def test_installed_application_executable_resolution(tmp_path):

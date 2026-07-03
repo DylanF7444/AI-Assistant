@@ -40,6 +40,23 @@ def test_failure_includes_error_details_in_normal_mode():
     )
 
 
+def test_clarification_error_uses_clarification_response_type():
+    response = response_from_result(
+        SkillResult(
+            status=ResultStatus.DENIED,
+            summary="Which browser window should I use?",
+            error=SkillError(
+                code="clarification_required",
+                message="Both private and regular windows are open.",
+                recoverable=True,
+            ),
+        )
+    )
+
+    assert response.response_type == ResponseType.CLARIFICATION
+    assert response.severity == "warning"
+
+
 def test_detailed_mode_and_sensitive_display_privacy():
     result = SkillResult(
         status=ResultStatus.COMPLETED,

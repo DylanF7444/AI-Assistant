@@ -12,7 +12,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from assistant.windows.process_names import normalize_process_name
+from assistant.windows.process_names import (
+    ASSISTANT_DEVELOPMENT_PROCESS_NAMES,
+    ASSISTANT_WINDOW_TITLE,
+    is_assistant_process_name,
+    normalize_process_name,
+)
 
 
 class ApplicationAdapter(Protocol):
@@ -46,6 +51,13 @@ class ProcessInfo:
     memory: str
 
 
+@dataclass(frozen=True)
+class BrowserWindowInfo:
+    process_name: str
+    private: bool
+    title: str = ""
+
+
 class ProcessAdapter(Protocol):
     async def list(self, name_filter: str | None = None) -> list[ProcessInfo]: ...
     async def terminate(self, pid: int) -> bool: ...
@@ -56,6 +68,17 @@ class InputAutomationAdapter(Protocol):
     async def focused_control_is_sensitive(self) -> bool: ...
     async def type_text(self, text: str) -> None: ...
     async def click(self, x: int, y: int) -> None: ...
+
+
+class ContextNavigationAdapter(Protocol):
+    async def active_process_name(self) -> str | None: ...
+    async def first_visible_process(self, process_names: tuple[str, ...]) -> str | None: ...
+    async def visible_browser_windows(
+        self, process_names: tuple[str, ...]
+    ) -> tuple[BrowserWindowInfo, ...]: ...
+    async def focus(self, process_name: str) -> bool: ...
+    async def hotkey(self, keys: tuple[str, ...]) -> None: ...
+    async def type_text(self, text: str) -> None: ...
 
 
 class WindowsSettingsAdapter(Protocol):
@@ -104,6 +127,18 @@ class FileSystemAdapter(Protocol):
 
 
 class WindowsApplicationAdapter:
+    _KEY_CODES = {
+        **{chr(code + 96): 0x40 + code for code in range(1, 27)},
+        "alt": 0x12,
+        "ctrl": 0x11,
+        "control": 0x11,
+        "enter": 0x0D,
+        "left": 0x25,
+        "right": 0x27,
+        "shift": 0x10,
+        "tab": 0x09,
+    }
+
     async def launch(self, registered_path: str) -> None:
         path = Path(registered_path)
         if not path.exists():
@@ -154,6 +189,51 @@ class WindowsApplicationAdapter:
     async def resize(self, process_name: str, width: int, height: int) -> bool:
         return self._move(process_name, width=width, height=height)
 
+    async def active_process_name(self) -> str | None:
+        return await self._active_process_name()
+
+    async def first_visible_process(self, process_names: tuple[str, ...]) -> str | None:
+        return self._first_visible_process(process_names)
+
+    async def visible_browser_windows(
+        self, process_names: tuple[str, ...]
+    ) -> tuple[BrowserWindowInfo, ...]:
+        return self._visible_browser_windows(process_names)
+
+    async def hotkey(self, keys: tuple[str, ...]) -> None:
+        self._send_hotkey(keys)
+
+    async def type_text(self, text: str) -> None:
+        self._type_text(text)
+
+    @classmethod
+    async def _active_process_name(cls) -> str | None:
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        if not hwnd:
+            return None
+        from ctypes import wintypes
+
+        pid = wintypes.DWORD()
+        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return await cls._process_name_for_pid(pid.value)
+
+    @staticmethod
+    async def _process_name_for_pid(pid: int) -> str | None:
+        completed = await __import__("asyncio").create_subprocess_exec(
+            "tasklist",
+            "/FI",
+            f"PID eq {pid}",
+            "/FO",
+            "CSV",
+            "/NH",
+            stdout=__import__("asyncio").subprocess.PIPE,
+            stderr=__import__("asyncio").subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        stdout, _ = await completed.communicate()
+        rows = list(csv.reader(stdout.decode(errors="replace").splitlines()))
+        return rows[0][0] if rows and len(rows[0]) >= 2 else None
+
     @staticmethod
     def _pids(process_name: str) -> set[int]:
         process_name = normalize_process_name(process_name)
@@ -172,14 +252,18 @@ class WindowsApplicationAdapter:
 
     @classmethod
     def _windows(cls, process_name: str) -> list[int]:
-        pids = cls._pids(process_name)
+        pids, title_filtered_pids = cls._target_pid_sets(process_name)
         handles: list[int] = []
         callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
 
         def callback(hwnd, _):
             pid = wintypes.DWORD()
             ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            if pid.value in pids and ctypes.windll.user32.IsWindowVisible(hwnd):
+            if not ctypes.windll.user32.IsWindowVisible(hwnd):
+                return True
+            if cls._window_matches_target(
+                hwnd, pid.value, pids, title_filtered_pids
+            ):
                 handles.append(hwnd)
             return True
 
@@ -187,6 +271,128 @@ class WindowsApplicationAdapter:
 
         ctypes.windll.user32.EnumWindows(callback_type(callback), 0)
         return handles
+
+    @classmethod
+    def _target_pid_sets(cls, process_name: str) -> tuple[set[int], set[int]]:
+        normalized = normalize_process_name(process_name)
+        pids = cls._pids(normalized)
+        title_filtered_pids: set[int] = set()
+        if is_assistant_process_name(normalized):
+            for dev_process_name in ASSISTANT_DEVELOPMENT_PROCESS_NAMES:
+                title_filtered_pids.update(cls._pids(dev_process_name))
+        return pids, title_filtered_pids
+
+    @classmethod
+    def _window_matches_target(
+        cls,
+        hwnd: int,
+        pid: int,
+        pids: set[int],
+        title_filtered_pids: set[int],
+    ) -> bool:
+        if pid in pids:
+            return True
+        return (
+            pid in title_filtered_pids
+            and cls._window_title(hwnd) == ASSISTANT_WINDOW_TITLE
+        )
+
+    @staticmethod
+    def _window_title(hwnd: int) -> str:
+        length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return ""
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buffer, length + 1)
+        return buffer.value
+
+    @classmethod
+    def _first_visible_process(cls, process_names: tuple[str, ...]) -> str | None:
+        normalized = tuple(
+            dict.fromkeys(
+                normalize_process_name(name)
+                for name in process_names
+                if name.strip()
+            )
+        )
+        pids_by_name = {
+            pid: process_name
+            for process_name in normalized
+            for pid in cls._pids(process_name)
+        }
+        if not pids_by_name:
+            return None
+        result: str | None = None
+        callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+        def callback(hwnd, _):
+            nonlocal result
+            if not ctypes.windll.user32.IsWindowVisible(hwnd):
+                return True
+            pid = wintypes.DWORD()
+            ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value in pids_by_name:
+                result = pids_by_name[pid.value]
+                return False
+            return True
+
+        from ctypes import wintypes
+
+        ctypes.windll.user32.EnumWindows(callback_type(callback), 0)
+        return result
+
+    @classmethod
+    def _visible_browser_windows(
+        cls, process_names: tuple[str, ...]
+    ) -> tuple[BrowserWindowInfo, ...]:
+        normalized = tuple(
+            dict.fromkeys(
+                normalize_process_name(name)
+                for name in process_names
+                if name.strip()
+            )
+        )
+        pids_by_name = {
+            pid: process_name
+            for process_name in normalized
+            for pid in cls._pids(process_name)
+        }
+        if not pids_by_name:
+            return ()
+        windows: list[BrowserWindowInfo] = []
+        callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+        def callback(hwnd, _):
+            if not ctypes.windll.user32.IsWindowVisible(hwnd):
+                return True
+            pid = wintypes.DWORD()
+            ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            process_name = pids_by_name.get(pid.value)
+            if process_name:
+                title = cls._window_title(hwnd)
+                windows.append(
+                    BrowserWindowInfo(
+                        process_name=process_name,
+                        private=cls._browser_title_is_private(title),
+                        title=title,
+                    )
+                )
+            return True
+
+        from ctypes import wintypes
+
+        ctypes.windll.user32.EnumWindows(callback_type(callback), 0)
+        return tuple(windows)
+
+    @staticmethod
+    def _browser_title_is_private(title: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:incognito|inprivate|private browsing|private window|private tab)\b",
+                title,
+                flags=re.IGNORECASE,
+            )
+        )
 
     @classmethod
     def _show(cls, process_name: str, command: int, foreground: bool = False) -> bool:
@@ -263,6 +469,95 @@ class WindowsApplicationAdapter:
         width = right - left
         height = bottom - top
         return cls._move(process_name, x=left, y=top, width=width, height=height)
+
+    @classmethod
+    def _send_hotkey(cls, keys: tuple[str, ...]) -> None:
+        if not keys:
+            raise ValueError("hotkey requires at least one key")
+        from ctypes import wintypes
+
+        class KEYBDINPUT(ctypes.Structure):
+            _fields_ = [
+                ("wVk", wintypes.WORD),
+                ("wScan", wintypes.WORD),
+                ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+            ]
+
+        class INPUT_UNION(ctypes.Union):
+            _fields_ = [("ki", KEYBDINPUT)]
+
+        class INPUT(ctypes.Structure):
+            _fields_ = [("type", wintypes.DWORD), ("union", INPUT_UNION)]
+
+        key_codes: list[int] = []
+        for key in keys:
+            code = cls._KEY_CODES.get(key.casefold())
+            if code is None:
+                raise ValueError(f"Unsupported hotkey key: {key}")
+            key_codes.append(code)
+        inputs = [
+            INPUT(1, INPUT_UNION(ki=KEYBDINPUT(code, 0, 0, 0, None)))
+            for code in key_codes
+        ]
+        inputs.extend(
+            INPUT(1, INPUT_UNION(ki=KEYBDINPUT(code, 0, 0x0002, 0, None)))
+            for code in reversed(key_codes)
+        )
+        values = (INPUT * len(inputs))(*inputs)
+        sent = ctypes.windll.user32.SendInput(
+            len(values), values, ctypes.sizeof(INPUT)
+        )
+        if sent != len(values):
+            raise ctypes.WinError()
+
+    @staticmethod
+    def _type_text(text: str) -> None:
+        from ctypes import wintypes
+
+        class KEYBDINPUT(ctypes.Structure):
+            _fields_ = [
+                ("wVk", wintypes.WORD),
+                ("wScan", wintypes.WORD),
+                ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+            ]
+
+        class INPUT_UNION(ctypes.Union):
+            _fields_ = [("ki", KEYBDINPUT)]
+
+        class INPUT(ctypes.Structure):
+            _fields_ = [("type", wintypes.DWORD), ("union", INPUT_UNION)]
+
+        inputs = []
+        for char in text:
+            code = ord(char)
+            inputs.extend(
+                [
+                    INPUT(
+                        1,
+                        INPUT_UNION(
+                            ki=KEYBDINPUT(0, code, 0x0004, 0, None)
+                        ),
+                    ),
+                    INPUT(
+                        1,
+                        INPUT_UNION(
+                            ki=KEYBDINPUT(0, code, 0x0004 | 0x0002, 0, None)
+                        ),
+                    ),
+                ]
+            )
+        if inputs:
+            array_type = INPUT * len(inputs)
+            values = array_type(*inputs)
+            sent = ctypes.windll.user32.SendInput(
+                len(values), values, ctypes.sizeof(INPUT)
+            )
+            if sent != len(values):
+                raise ctypes.WinError()
 
     @classmethod
     def _move(
@@ -1169,27 +1464,7 @@ class WindowsProcessAdapter:
 
 class WindowsInputAutomationAdapter:
     async def active_process_name(self) -> str | None:
-        hwnd = ctypes.windll.user32.GetForegroundWindow()
-        if not hwnd:
-            return None
-        from ctypes import wintypes
-
-        pid = wintypes.DWORD()
-        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        completed = await __import__("asyncio").create_subprocess_exec(
-            "tasklist",
-            "/FI",
-            f"PID eq {pid.value}",
-            "/FO",
-            "CSV",
-            "/NH",
-            stdout=__import__("asyncio").subprocess.PIPE,
-            stderr=__import__("asyncio").subprocess.DEVNULL,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        stdout, _ = await completed.communicate()
-        rows = list(csv.reader(stdout.decode(errors="replace").splitlines()))
-        return rows[0][0] if rows and len(rows[0]) >= 2 else None
+        return await WindowsApplicationAdapter._active_process_name()
 
     async def focused_control_is_sensitive(self) -> bool:
         from ctypes import wintypes

@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from assistant.contracts import PermissionContext, SkillCall
-from assistant.skills.builtin import LauncherSkill
+from assistant.skills.builtin import LauncherSkill, RegisteredApplicationsSkill
 
 
 class FakeApplications:
@@ -43,6 +43,14 @@ def call(arguments):
     )
 
 
+def registered_call(arguments=None):
+    return SkillCall(
+        skill_id="windows.registered_applications",
+        arguments=arguments or {},
+        permission_context=PermissionContext(session_id="test"),
+    )
+
+
 @pytest.mark.asyncio
 async def test_launcher_uses_registered_path_only(tmp_path: Path):
     approved = tmp_path / "approved.exe"
@@ -67,6 +75,38 @@ async def test_launcher_uses_registered_path_only(tmp_path: Path):
         )
     with pytest.raises(ValueError, match="not registered"):
         skill.required_permissions(call({"application": "unknown"}))
+
+
+@pytest.mark.asyncio
+async def test_registered_applications_skill_lists_assistant_registrations(tmp_path: Path):
+    brave = tmp_path / "brave.exe"
+    notepad = tmp_path / "notepad.exe"
+    skill = RegisteredApplicationsSkill(
+        lambda: {"brave": str(brave), "notepad": str(notepad)}
+    )
+
+    result = await skill.execute(registered_call(), asyncio.Event())
+
+    assert result.summary == "2 applications are registered."
+    assert "brave" in result.display_text
+    assert str(brave) in result.display_text
+    assert result.data == {
+        "applications": [
+            {"name": "brave", "path": str(brave)},
+            {"name": "notepad", "path": str(notepad)},
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_registered_applications_skill_handles_empty_list():
+    skill = RegisteredApplicationsSkill(lambda: {})
+
+    result = await skill.execute(registered_call(), asyncio.Event())
+
+    assert result.summary == "No applications are registered yet."
+    assert "Applications tab" in result.display_text
+    assert result.data == {"applications": []}
 
 
 @pytest.mark.asyncio
@@ -140,8 +180,15 @@ async def test_launcher_prefers_registered_application_over_website_fallback(
     [
         ("brave", "brave.exe", "--incognito"),
         ("chrome", "chrome.exe", "--incognito"),
+        ("chromium", "chromium.exe", "--incognito"),
         ("edge", "msedge.exe", "--inprivate"),
         ("firefox", "firefox.exe", "-private-window"),
+        ("firefox nightly", "firefox.exe", "-private-window"),
+        ("librewolf", "librewolf.exe", "-private-window"),
+        ("opera", "opera.exe", "--private"),
+        ("opera gx", "launcher.exe", "--private"),
+        ("vivaldi", "vivaldi.exe", "--incognito"),
+        ("waterfox", "waterfox.exe", "-private-window"),
     ],
 )
 async def test_launcher_opens_private_browser_window(

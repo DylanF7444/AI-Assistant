@@ -50,11 +50,21 @@ class DeterministicRouter:
         "brave",
         "brave browser",
         "chrome",
+        "chromium",
         "google chrome",
         "edge",
         "microsoft edge",
         "firefox",
+        "firefox developer edition",
+        "firefox nightly",
         "mozilla firefox",
+        "librewolf",
+        "opera",
+        "opera browser",
+        "opera gx",
+        "vivaldi",
+        "vivaldi browser",
+        "waterfox",
     }
     WEBSITE_APPLICATIONS = {
         "amazon": "https://www.amazon.com",
@@ -132,6 +142,19 @@ class DeterministicRouter:
                 Intent(
                     name="conversation.answer",
                     arguments={"text": self.APP_REGISTRATION_HELP},
+                    confidence=0.99,
+                    source="rule",
+                )
+            )
+        if re.fullmatch(
+            r"(?:list|show|what are|what're) (?:my |the )?"
+            r"registered (?:apps|applications|programs)",
+            routed,
+        ):
+            return RouteResult(
+                Intent(
+                    name="windows.registered_applications",
+                    arguments={},
                     confidence=0.99,
                     source="rule",
                 )
@@ -274,11 +297,20 @@ class DeterministicRouter:
                     source="rule",
                 )
             )
-        if match := re.fullmatch(r"(?:read|fetch|open) (https://\S+)", text.strip(), re.I):
+        if match := re.fullmatch(r"(?:read|fetch) (https://\S+)", text.strip(), re.I):
             return RouteResult(
                 Intent(
                     name="web.fetch",
                     arguments={"url": match.group(1), "max_characters": 12000},
+                    confidence=0.99,
+                    source="rule",
+                )
+            )
+        if match := re.fullmatch(r"open (https://\S+)", text.strip(), re.I):
+            return RouteResult(
+                Intent(
+                    name="windows.browser_navigate",
+                    arguments={"url": match.group(1)},
                     confidence=0.99,
                     source="rule",
                 )
@@ -761,6 +793,8 @@ class DeterministicRouter:
                     source="rule",
                 )
             )
+        if context_navigation := self._route_context_navigation(routed):
+            return RouteResult(context_navigation)
         if match := re.fullmatch(
             r"(focus|minimize|maximize|close) (?:application )?([^ ]+\.exe)",
             routed,
@@ -816,11 +850,18 @@ class DeterministicRouter:
         if match := re.fullmatch(r"(?:open|launch|start) (.+)", routed):
             raw_target = match.group(1)
             application, follow_up = self._split_launch_target(raw_target)
-            arguments: dict[str, object] = {"application": application}
             if not follow_up and (
                 fallback_url := self._website_fallback_url(application)
             ):
-                arguments["fallback_url"] = fallback_url
+                return RouteResult(
+                    Intent(
+                        name="windows.browser_navigate",
+                        arguments={"url": fallback_url},
+                        confidence=0.94,
+                        source="rule",
+                    )
+                )
+            arguments: dict[str, object] = {"application": application}
             intent = Intent(
                 name="windows.launcher",
                 arguments=arguments,
@@ -969,6 +1010,87 @@ class DeterministicRouter:
         return value if 0 <= value <= 100 else None
 
     @staticmethod
+    def _route_context_navigation(routed: str) -> Intent | None:
+        patterns = (
+            (
+                "new_tab",
+                (
+                    r"(?:open|launch|start|create) (?:a |an |the )?(?:new |blank )?(?:browser )?tab",
+                    r"(?:new|blank) (?:browser )?tab",
+                ),
+            ),
+            (
+                "new_window",
+                (
+                    r"(?:open|launch|start|create) (?:a |an |the )?(?:new |blank )?(?:browser )?window",
+                    r"(?:new|blank) (?:browser )?window",
+                ),
+            ),
+            (
+                "close_tab",
+                (
+                    r"(?:close|shut) (?:this |current |active |the )?(?:browser )?tab",
+                    r"close tab",
+                ),
+            ),
+            (
+                "reopen_closed_tab",
+                (
+                    r"(?:reopen|restore) (?:the |my |that )?(?:last |recently )?closed (?:browser )?tab",
+                ),
+            ),
+            (
+                "next_tab",
+                (
+                    r"(?:go to |switch to )?next (?:browser )?tab",
+                    r"(?:go|switch) (?:to )?the next (?:browser )?tab",
+                ),
+            ),
+            (
+                "previous_tab",
+                (
+                    r"(?:go to |switch to )?(?:previous|prev|last) (?:browser )?tab",
+                    r"(?:go|switch) (?:to )?the (?:previous|prev|last) (?:browser )?tab",
+                ),
+            ),
+            (
+                "focus_address_bar",
+                (
+                    r"(?:focus|select|highlight|open|go to) (?:the )?(?:address bar|url bar|omnibox)",
+                ),
+            ),
+            (
+                "back",
+                (
+                    r"(?:go|navigate) back(?: (?:a|one) page)?",
+                    r"back(?: (?:a|one) page)?",
+                ),
+            ),
+            (
+                "forward",
+                (
+                    r"(?:go|navigate) forward(?: (?:a|one) page)?",
+                    r"forward(?: (?:a|one) page)?",
+                ),
+            ),
+            (
+                "reload",
+                (
+                    r"(?:reload|refresh)(?: (?:this |the |current )?(?:page|tab|browser))?",
+                ),
+            ),
+        )
+        for operation, operation_patterns in patterns:
+            if any(re.fullmatch(pattern, routed) for pattern in operation_patterns):
+                return Intent(
+                    name="windows.context_navigation",
+                    arguments={"target": "browser", "operation": operation},
+                    confidence=0.93,
+                    source="rule",
+                )
+        return None
+
+    @staticmethod
     def _route_browser_tab_launch(routed: str) -> Intent | None:
         browser_names = "|".join(
             re.escape(name)
@@ -976,6 +1098,64 @@ class DeterministicRouter:
                 DeterministicRouter.BROWSER_APPLICATIONS, key=len, reverse=True
             )
         )
+        website_match = re.fullmatch(
+            rf"(?:open|launch|start)\s+"
+            rf"(?:a |an |the )?"
+            rf"(?:new\s+)?"
+            rf"(?P<private_before>private|incognito|inprivate)\s+"
+            rf"(?P<application>{browser_names})\s+"
+            rf"(?:(?:browser)\s+)?"
+            rf"(?:tab|window)\s+"
+            rf"(?:with|to|for|at)\s+"
+            rf"(?P<website>.+)",
+            routed,
+        )
+        if not website_match:
+            website_match = re.fullmatch(
+                rf"(?:open|launch|start)\s+"
+                rf"(?:a |an |the )?"
+                rf"(?:new\s+)?"
+                rf"(?P<application>{browser_names})\s+"
+                rf"(?:(?P<private_after>private|incognito|inprivate)\s+)?"
+                rf"(?:(?:browser)\s+)?"
+                rf"(?:tab|window)\s+"
+                rf"(?:with|to|for|at)\s+"
+                rf"(?P<website>.+)",
+                routed,
+            )
+        if not website_match:
+            website_match = re.fullmatch(
+                rf"(?:open|launch|start)\s+"
+                rf"(?:a |an |the )?"
+                rf"(?:new\s+)?"
+                rf"(?P<private_before>private|incognito|inprivate)\s+"
+                rf"(?:(?:browser)\s+)?"
+                rf"(?:tab|window)\s+"
+                rf"(?:in|on|with|using)\s+"
+                rf"(?P<application>{browser_names})\s+"
+                rf"(?:with|to|for|at)\s+"
+                rf"(?P<website>.+)",
+                routed,
+            )
+        if website_match and (
+            url := DeterministicRouter._website_url(website_match.group("website"))
+        ):
+            application = website_match.group("application").strip()
+            private = bool(website_match.groupdict().get("private_before")) or bool(
+                (website_match.groupdict().get("private_after") or "").strip()
+            )
+            arguments: dict[str, object] = {
+                "application": application,
+                "url": url,
+            }
+            if private:
+                arguments["private"] = True
+            return Intent(
+                name="windows.launcher",
+                arguments=arguments,
+                confidence=0.95,
+                source="rule",
+            )
         match = re.fullmatch(
             rf"(?:open|launch|start)\s+"
             rf"(?:a |an |the )?"
@@ -997,13 +1177,54 @@ class DeterministicRouter:
                 routed,
             )
         if not match:
+            match = re.fullmatch(
+                rf"(?:open|launch|start)\s+"
+                rf"(?:a |an |the )?"
+                rf"(?:new\s+)?"
+                rf"(?P<application>{browser_names})\s+"
+                rf"(?P<private_after>private|incognito|inprivate)",
+                routed,
+            )
+        if not match:
+            match = re.fullmatch(
+                rf"(?:open|launch|start)\s+"
+                rf"(?:a |an |the )?"
+                rf"(?:new\s+)?"
+                rf"(?P<private_before>private|incognito|inprivate)\s+"
+                rf"(?:(?:browser)\s+)?"
+                rf"(?:tab|window)\s+"
+                rf"(?:in|on|with|using)\s+"
+                rf"(?P<application>{browser_names})",
+                routed,
+            )
+        if not match:
+            match = re.fullmatch(
+                r"(?:open|launch|start)\s+"
+                r"(?:a |an |the )?"
+                r"(?:new\s+)?"
+                r"(?P<private_before>private|incognito|inprivate)\s+"
+                r"(?:(?:browser)\s+)?"
+                r"(?:tab|window)",
+                routed,
+            )
+        if not match:
             return None
+        application = (match.groupdict().get("application") or "browser").strip()
+        private = bool(match.groupdict().get("private_before")) or bool(
+            (match.groupdict().get("private_after") or "").strip()
+        )
+        if application == "browser" and not private:
+            operation = "new_window" if routed.endswith("window") else "new_tab"
+            return Intent(
+                name="windows.context_navigation",
+                arguments={"target": "browser", "operation": operation},
+                confidence=0.94,
+                source="rule",
+            )
         arguments: dict[str, object] = {
-            "application": match.group("application").strip(),
+            "application": application,
         }
-        if match.groupdict().get("private_before") or (
-            match.groupdict().get("private_after") or ""
-        ).strip():
+        if private:
             arguments["private"] = True
         return Intent(
             name="windows.launcher",

@@ -665,7 +665,7 @@ async def test_unregistered_application_returns_registration_request(settings):
 
 
 @pytest.mark.asyncio
-async def test_unregistered_website_name_requests_default_browser_permission(settings):
+async def test_unregistered_website_name_requests_existing_browser_permission(settings):
     container = build_container(settings)
 
     response, outcome = await container.orchestrator.handle_text("open youtube")
@@ -673,12 +673,19 @@ async def test_unregistered_website_name_requests_default_browser_permission(set
     assert response.response_type == ResponseType.PERMISSION
     assert not outcome.registration_requests
     assert outcome.permission_requests
+    assert outcome.permission_requests[0].call.skill_id == "windows.browser_navigate"
     assert outcome.permission_requests[0].call.arguments == {
-        "application": "youtube",
-        "fallback_url": "https://www.youtube.com",
+        "url": "https://www.youtube.com",
     }
-    assert outcome.permission_requests[0].scope.capability == "network"
-    assert outcome.permission_requests[0].scope.targets == ("https://www.youtube.com",)
+    assert {request.scope.capability for request in outcome.permission_requests} == {
+        "process.window",
+        "input.control",
+        "network",
+    }
+    assert any(
+        request.scope.targets == ("https://www.youtube.com",)
+        for request in outcome.permission_requests
+    )
 
 
 @pytest.mark.asyncio
@@ -688,7 +695,7 @@ async def test_open_registered_application_requests_permission(settings, tmp_pat
     target.write_bytes(b"")
     container.aliases.set("application", "youtube", str(target))
 
-    response, outcome = await container.orchestrator.handle_text("open youtube")
+    response, outcome = await container.orchestrator.handle_text("open application youtube")
 
     assert response.response_type == ResponseType.PERMISSION
     assert outcome.permission_requests
@@ -735,6 +742,44 @@ async def test_browser_website_launch_keeps_url_in_permission_call(settings, tmp
     assert len(outcome.permission_requests) == 1
     assert outcome.call.arguments == {
         "application": "brave",
+        "url": "https://vlr.gg",
+    }
+    assert outcome.permission_requests[0].call.arguments == outcome.call.arguments
+
+
+@pytest.mark.asyncio
+async def test_private_browser_launch_keeps_private_in_permission_call(settings, tmp_path):
+    container = build_container(settings)
+    target = tmp_path / "brave.exe"
+    target.write_bytes(b"")
+    container.aliases.set("application", "brave", str(target))
+
+    response, outcome = await container.orchestrator.handle_text(
+        "open private tab in brave"
+    )
+
+    assert response.response_type == ResponseType.PERMISSION
+    assert len(outcome.permission_requests) == 1
+    assert outcome.call.arguments == {"application": "brave", "private": True}
+    assert outcome.permission_requests[0].call.arguments == outcome.call.arguments
+
+
+@pytest.mark.asyncio
+async def test_private_browser_launch_with_website_keeps_url_and_private(settings, tmp_path):
+    container = build_container(settings)
+    target = tmp_path / "brave.exe"
+    target.write_bytes(b"")
+    container.aliases.set("application", "brave", str(target))
+
+    response, outcome = await container.orchestrator.handle_text(
+        "open a private brave tab with vlr.gg"
+    )
+
+    assert response.response_type == ResponseType.PERMISSION
+    assert len(outcome.permission_requests) == 1
+    assert outcome.call.arguments == {
+        "application": "brave",
+        "private": True,
         "url": "https://vlr.gg",
     }
     assert outcome.permission_requests[0].call.arguments == outcome.call.arguments

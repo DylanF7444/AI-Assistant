@@ -20,6 +20,7 @@ from assistant.skills.builtin import (
     HelpSkill,
     LauncherSkill,
     MediaSkill,
+    RegisteredApplicationsSkill,
     TimerSkill,
 )
 from assistant.skills.registry import SkillRegistry
@@ -31,6 +32,8 @@ from assistant.skills.productivity import (
 )
 from assistant.skills.windows import (
     ApplicationWindowSkill,
+    BrowserNavigateSkill,
+    ContextNavigationSkill,
     FileOperationSkill,
     NotificationSkill,
     ProcessSkill,
@@ -125,7 +128,12 @@ def _register_windows_skills(
             resolver=lambda name: aliases.get("application", name),
         )
     )
+    registry.register(
+        RegisteredApplicationsSkill(lambda: aliases.all("application"))
+    )
     registry.register(ApplicationWindowSkill(applications))
+    registry.register(ContextNavigationSkill(applications))
+    registry.register(BrowserNavigateSkill(applications))
     registry.register(MediaSkill(WindowsMediaAdapter()))
     registry.register(ClipboardSkill(WindowsClipboardAdapter()))
     registry.register(NotificationSkill(WindowsNotificationAdapter()))

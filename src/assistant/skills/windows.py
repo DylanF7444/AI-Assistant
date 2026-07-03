@@ -12,12 +12,14 @@ from assistant.contracts import (
     ResultStatus,
     RiskLevel,
     SkillCall,
+    SkillError,
     SkillResult,
 )
 from assistant.skills.base import Skill
 from assistant.skills.builtin import manifest
 from assistant.windows.adapters import (
     ApplicationAdapter,
+    ContextNavigationAdapter,
     FileSystemAdapter,
     NotificationAdapter,
     ProcessAdapter,
@@ -296,6 +298,261 @@ class ApplicationWindowSkill(Skill):
                 height=args.height,
             ).model_dump(),
         )
+
+
+class ContextNavigationInput(BaseModel):
+    target: Literal["browser"] = "browser"
+    operation: Literal[
+        "new_tab",
+        "new_window",
+        "close_tab",
+        "reopen_closed_tab",
+        "next_tab",
+        "previous_tab",
+        "focus_address_bar",
+        "back",
+        "forward",
+        "reload",
+    ]
+
+
+class ContextNavigationOutput(BaseModel):
+    target: str
+    operation: str
+    process_name: str
+
+
+class ContextNavigationSkill(Skill):
+    input_model = ContextNavigationInput
+    output_model = ContextNavigationOutput
+    BROWSER_PROCESSES = (
+        "brave.exe",
+        "chrome.exe",
+        "chromium.exe",
+        "msedge.exe",
+        "firefox.exe",
+        "opera.exe",
+        "opera_gx.exe",
+        "vivaldi.exe",
+        "librewolf.exe",
+        "waterfox.exe",
+    )
+    HOTKEYS = {
+        "new_tab": ("ctrl", "t"),
+        "new_window": ("ctrl", "n"),
+        "close_tab": ("ctrl", "w"),
+        "reopen_closed_tab": ("ctrl", "shift", "t"),
+        "next_tab": ("ctrl", "tab"),
+        "previous_tab": ("ctrl", "shift", "tab"),
+        "focus_address_bar": ("ctrl", "l"),
+        "back": ("alt", "left"),
+        "forward": ("alt", "right"),
+        "reload": ("ctrl", "r"),
+    }
+    LABELS = {
+        "new_tab": "Open a new browser tab",
+        "new_window": "Open a new browser window",
+        "close_tab": "Close the current browser tab",
+        "reopen_closed_tab": "Reopen the last closed browser tab",
+        "next_tab": "Switch to the next browser tab",
+        "previous_tab": "Switch to the previous browser tab",
+        "focus_address_bar": "Focus the browser address bar",
+        "back": "Go back in the browser",
+        "forward": "Go forward in the browser",
+        "reload": "Reload the current browser page",
+    }
+
+    def __init__(self, adapter: ContextNavigationAdapter) -> None:
+        self.adapter = adapter
+        self.manifest = manifest(
+            skill_id="windows.context_navigation",
+            display_name="Context Navigation",
+            description=(
+                "Use the focused or visible browser window for tab, page, and "
+                "address-bar navigation shortcuts."
+            ),
+            input_model=self.input_model,
+            output_model=self.output_model,
+            permissions=(),
+            risk=RiskLevel.MEDIUM,
+        )
+
+    def required_permissions(self, call: SkillCall):
+        args = self.validate(call.arguments)
+        return (
+            PermissionScope(
+                capability="process.window",
+                targets=(args.target,),
+                reason="Focus the focused or visible browser window.",
+            ),
+            PermissionScope(
+                capability="input.control",
+                targets=(args.target,),
+                reason="Send the requested browser navigation shortcut.",
+            ),
+        )
+
+    def risk_for(self, call: SkillCall) -> RiskLevel:
+        operation = self.validate(call.arguments).operation
+        return (
+            RiskLevel.MEDIUM
+            if operation in {"close_tab", "reopen_closed_tab"}
+            else RiskLevel.LOW
+        )
+
+    async def preview(self, call: SkillCall) -> str:
+        args = self.validate(call.arguments)
+        return self.LABELS[args.operation]
+
+    async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult:
+        args = self.validate(call.arguments)
+        target_process = await self._target_process(args.target)
+        if target_process is None:
+            raise RuntimeError("No focused or visible browser window was found")
+        process_name, needs_focus = target_process
+        if needs_focus:
+            if not await self.adapter.focus(process_name):
+                raise RuntimeError(f"No visible browser window found for {process_name}")
+            await asyncio.sleep(0.05)
+        await self.adapter.hotkey(self.HOTKEYS[args.operation])
+        return SkillResult(
+            status=ResultStatus.COMPLETED,
+            summary=f"{self.LABELS[args.operation]} completed.",
+            data=ContextNavigationOutput(
+                target=args.target,
+                operation=args.operation,
+                process_name=process_name,
+            ).model_dump(),
+        )
+
+    async def _target_process(self, target: str) -> tuple[str, bool] | None:
+        if target != "browser":
+            return None
+        browser_names = {
+            normalize_process_name(process).casefold()
+            for process in self.BROWSER_PROCESSES
+        }
+        active = await self.adapter.active_process_name()
+        if active and normalize_process_name(active).casefold() in browser_names:
+            return normalize_process_name(active), False
+        visible = await self.adapter.first_visible_process(self.BROWSER_PROCESSES)
+        return (visible, True) if visible else None
+
+
+class BrowserNavigateInput(BaseModel):
+    url: str = Field(min_length=8, max_length=2000)
+    target: Literal["browser"] = "browser"
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value):
+        if not isinstance(value, str) or not value.startswith("https://"):
+            raise ValueError("browser URL must be public HTTPS")
+        return value
+
+
+class BrowserNavigateOutput(BaseModel):
+    url: str
+    process_name: str | None = None
+
+
+class BrowserNavigateSkill(Skill):
+    input_model = BrowserNavigateInput
+    output_model = BrowserNavigateOutput
+    BROWSER_PROCESSES = ContextNavigationSkill.BROWSER_PROCESSES
+
+    def __init__(self, adapter: ContextNavigationAdapter) -> None:
+        self.adapter = adapter
+        self.manifest = manifest(
+            skill_id="windows.browser_navigate",
+            display_name="Browser Navigate",
+            description="Open a public HTTPS website in an existing browser window.",
+            input_model=self.input_model,
+            output_model=self.output_model,
+            permissions=(),
+            risk=RiskLevel.LOW,
+        )
+
+    def required_permissions(self, call: SkillCall):
+        args = self.validate(call.arguments)
+        return (
+            PermissionScope(
+                capability="process.window",
+                targets=(args.target,),
+                reason="Focus an existing browser window.",
+            ),
+            PermissionScope(
+                capability="input.control",
+                targets=(args.target,),
+                reason="Type the website into the browser address bar.",
+            ),
+            PermissionScope(
+                capability="network",
+                targets=(args.url,),
+                reason="Open this public HTTPS website in the browser.",
+            ),
+        )
+
+    async def preview(self, call: SkillCall) -> str:
+        args = self.validate(call.arguments)
+        return f"Open {args.url} in an existing browser window"
+
+    async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult:
+        args = self.validate(call.arguments)
+        target = await self._target_process(args.target)
+        if target == "ambiguous":
+            return SkillResult(
+                status=ResultStatus.DENIED,
+                summary=(
+                    "Which browser window should I use? Focus the private or "
+                    "regular browser window you want, then ask again."
+                ),
+                data=BrowserNavigateOutput(url=args.url).model_dump(),
+                error=SkillError(
+                    code="clarification_required",
+                    message="Both private and regular browser windows are open.",
+                    recoverable=True,
+                ),
+            )
+        if target is None:
+            raise RuntimeError("No visible browser window was found")
+        process_name, needs_focus = target
+        if needs_focus:
+            if not await self.adapter.focus(process_name):
+                raise RuntimeError(f"No visible browser window found for {process_name}")
+            await asyncio.sleep(0.05)
+        await self.adapter.hotkey(("ctrl", "l"))
+        await asyncio.sleep(0.05)
+        await self.adapter.type_text(args.url)
+        await self.adapter.hotkey(("enter",))
+        return SkillResult(
+            status=ResultStatus.COMPLETED,
+            summary=f"Opened {args.url} in the current browser window.",
+            data=BrowserNavigateOutput(
+                url=args.url,
+                process_name=process_name,
+            ).model_dump(),
+        )
+
+    async def _target_process(
+        self, target: str
+    ) -> tuple[str, bool] | Literal["ambiguous"] | None:
+        if target != "browser":
+            return None
+        browser_names = {
+            normalize_process_name(process).casefold()
+            for process in self.BROWSER_PROCESSES
+        }
+        active = await self.adapter.active_process_name()
+        if active and normalize_process_name(active).casefold() in browser_names:
+            return normalize_process_name(active), False
+        windows = await self.adapter.visible_browser_windows(self.BROWSER_PROCESSES)
+        if {window.private for window in windows} == {False, True}:
+            return "ambiguous"
+        if windows:
+            return windows[0].process_name, True
+        visible = await self.adapter.first_visible_process(self.BROWSER_PROCESSES)
+        return (visible, True) if visible else None
 
 
 class NotificationInput(BaseModel):

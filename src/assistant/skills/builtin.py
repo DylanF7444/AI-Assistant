@@ -5,7 +5,9 @@ import asyncio
 import math
 import operator
 import platform
+import re
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -268,9 +270,80 @@ class LaunchOutput(BaseModel):
     private: bool = False
 
 
+class RegisteredApplicationsInput(BaseModel):
+    include_paths: bool = True
+
+
+class RegisteredApplicationsOutput(BaseModel):
+    applications: list[dict[str, str]]
+
+
+class RegisteredApplicationsSkill(Skill):
+    input_model = RegisteredApplicationsInput
+    output_model = RegisteredApplicationsOutput
+
+    def __init__(self, registrations: Callable[[], dict[str, str]]) -> None:
+        self._registrations = registrations
+        self.manifest = manifest(
+            skill_id="windows.registered_applications",
+            display_name="Registered Applications",
+            description="List application paths registered in assistant settings for the launcher.",
+            input_model=self.input_model,
+            output_model=self.output_model,
+            safe_to_retry=True,
+        )
+
+    async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult:
+        args = self.validate(call.arguments)
+        registrations = self._registrations()
+        applications = [
+            {"name": name, "path": path}
+            for name, path in sorted(registrations.items())
+        ]
+        if not applications:
+            return SkillResult(
+                status=ResultStatus.COMPLETED,
+                summary="No applications are registered yet.",
+                display_text=(
+                    "No applications are registered yet.\n\n"
+                    "Open the Applications tab and choose Register Application "
+                    "to add one."
+                ),
+                data=RegisteredApplicationsOutput(applications=[]).model_dump(),
+            )
+        if args.include_paths:
+            lines = [f"- {item['name']}: {item['path']}" for item in applications]
+        else:
+            lines = [f"- {item['name']}" for item in applications]
+        count = len(applications)
+        return SkillResult(
+            status=ResultStatus.COMPLETED,
+            summary=(
+                f"{count} application{'s are' if count != 1 else ' is'} registered."
+            ),
+            display_text="Registered applications:\n" + "\n".join(lines),
+            data=RegisteredApplicationsOutput(applications=applications).model_dump(),
+            sensitive=args.include_paths,
+        )
+
+
 class LauncherSkill(Skill):
     input_model = LaunchInput
     output_model = LaunchOutput
+    PRIVATE_BROWSER_FLAGS = {
+        "edge": "--inprivate",
+        "microsoft edge": "--inprivate",
+        "msedge": "--inprivate",
+        "firefox": "-private-window",
+        "mozilla firefox": "-private-window",
+        "firefox developer edition": "-private-window",
+        "firefox nightly": "-private-window",
+        "librewolf": "-private-window",
+        "waterfox": "-private-window",
+        "opera": "--private",
+        "opera browser": "--private",
+        "opera gx": "--private",
+    }
 
     def __init__(self, adapter: ApplicationAdapter, resolver=None) -> None:
         self.adapter = adapter
@@ -350,14 +423,18 @@ class LauncherSkill(Skill):
             launch_args.append(args.url)
         return tuple(launch_args)
 
-    @staticmethod
-    def _private_browser_flag(application: str, path: str) -> str:
-        identity = f"{application} {Path(path).stem}".casefold()
-        if "firefox" in identity:
-            return "-private-window"
-        if "edge" in identity or "msedge" in identity:
-            return "--inprivate"
+    @classmethod
+    def _private_browser_flag(cls, application: str, path: str) -> str:
+        identity = cls._browser_identity(application, path)
+        for browser, flag in cls.PRIVATE_BROWSER_FLAGS.items():
+            if re.search(rf"\b{re.escape(browser)}\b", identity):
+                return flag
         return "--incognito"
+
+    @staticmethod
+    def _browser_identity(application: str, path: str) -> str:
+        identity = f"{application} {Path(path).stem}".casefold()
+        return re.sub(r"[^a-z0-9]+", " ", identity)
 
     def _registered_path(self, args: LaunchInput) -> str:
         registered = self._resolved_path(args)

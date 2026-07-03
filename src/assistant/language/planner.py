@@ -41,7 +41,10 @@ class SkillRetriever:
         "open": {"launch", "launcher", "application"},
         "find": {"search", "file"},
         "copy": {"clipboard", "file"},
+        "navigate": {"navigation", "browser"},
         "play": {"media", "music"},
+        "refresh": {"reload", "navigation", "browser"},
+        "tab": {"navigation", "browser"},
     }
 
     def __init__(
