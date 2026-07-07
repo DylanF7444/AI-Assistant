@@ -24,6 +24,12 @@ The UI depends on the orchestrator and event bus, not model or OS
 implementations. STT, LLM, TTS, wake-word, embedding, Windows, storage, clock,
 and device implementations are injected behind typed interfaces.
 
+Planned work to make routing and planning more context-aware is tracked in
+`docs/SMART_ASSISTANT_IMPLEMENTATION_PLAN.md`. That plan covers semantic
+retrieval, context snapshots, richer intent interpretation, preference memory,
+and adaptive replanning while preserving the permission-gated execution model
+described above.
+
 ## Compatibility
 
 Core contracts and skill manifests use API version `1.0`. Minor core releases

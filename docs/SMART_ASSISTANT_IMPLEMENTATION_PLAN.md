@@ -102,6 +102,35 @@ The main new artifacts are:
 - Do not include raw sensitive values in logs unless existing redaction policy
   explicitly permits them.
 
+## Pre-Implementation Guardrails
+
+Before large architecture work begins, stabilize the current worktree and land
+the first implementation in a deliberately small milestone:
+
+1. Commit or intentionally set aside unrelated local changes.
+2. Start with broad request routing, a context snapshot shell,
+   `UserIntentInterpretation`, and clarification behavior.
+3. Add scenario tests before broad wiring so "smartness" is measured through
+   concrete user situations rather than architecture alone.
+
+The first milestone should prove this flow:
+
+```text
+broad request
+-> context snapshot
+-> intent interpretation
+-> clarification or safe plan
+```
+
+Example:
+
+```text
+User: Clean up my downloads.
+Assistant: Should I organize Downloads by file type, date, or project/name?
+```
+
+No files are moved in the first milestone.
+
 ## Phase 1: Understanding Contract
 
 Add a new module:
@@ -358,11 +387,32 @@ previously granted scoped permission:
 - credentials, tokens, secrets
 - private document bodies
 
+Context collection must also honor the application settings. The initial
+settings flags are:
+
+- `context_include_open_applications`: allow non-sensitive open/focused
+  application context.
+- `context_include_connected_devices`: allow non-sensitive connected-device
+  and device-state context.
+- `context_allow_clipboard`: allow clipboard context when the relevant
+  clipboard permission and user intent are present.
+- `context_allow_browser`: allow browser URL/title/page context when the
+  relevant permission and user intent are present.
+- `context_allow_screen`: allow screen capture/OCR context when the relevant
+  permission and user intent are present.
+- `context_allow_file_contents`: allow file-content context when filesystem
+  permission and explicit user intent are present.
+
+These flags are not a replacement for permissions. They are an additional
+privacy boundary: if a flag is disabled, the corresponding context provider
+must not collect or expose that context even if a lower-level capability exists.
+
 Acceptance criteria:
 
 - `ContextSnapshot` is available before planner calls.
 - Context collection is modular and testable.
 - Sensitive context is excluded by default.
+- Context providers obey the settings flags above.
 - Debug output can show which context keys were used without leaking sensitive
   values.
 
@@ -983,21 +1033,25 @@ Replanning tests:
 
 Recommended order:
 
-1. Add `UserIntentInterpretation` contract and tests.
-2. Add `ContextSnapshot`, `ContextItem`, and context budget contracts.
-3. Implement session, skill, and permission context providers.
-4. Add `LocalPlanner.interpret()` using structured output.
-5. Route broad requests to `planner.goal`.
-6. Wire context snapshot into LLM-routed requests.
-7. Add semantic retrieval for skills and skill examples.
-8. Add initial skill examples.
-9. Add preference memory store and commands.
-10. Add desktop, process, device, and file context providers.
-11. Add knowledge/memory/history retrieval indexing.
-12. Add `plan_from_interpretation()`.
-13. Add bounded dynamic replanning.
-14. Expand debug/request breakdown display.
-15. Add full scenario, privacy, and replanning tests.
+1. Add scenario tests for the first milestone before broad wiring.
+2. Add settings-configurable context privacy flags and tests.
+3. Add `UserIntentInterpretation` contract and tests.
+4. Add `ContextSnapshot`, `ContextItem`, and context budget contracts.
+5. Implement session, skill, and permission context providers.
+6. Add `LocalPlanner.interpret()` using structured output.
+7. Route broad requests to `planner.goal`.
+8. Wire context snapshot into LLM-routed requests.
+9. Verify the small first milestone end to end: broad request -> context
+   snapshot -> interpretation -> clarification or safe plan.
+10. Add semantic retrieval for skills and skill examples.
+11. Add initial skill examples.
+12. Add preference memory store and commands.
+13. Add desktop, process, device, and file context providers.
+14. Add knowledge/memory/history retrieval indexing.
+15. Add `plan_from_interpretation()`.
+16. Add bounded dynamic replanning.
+17. Expand debug/request breakdown display.
+18. Add full scenario, privacy, and replanning tests.
 
 ## Milestones
 

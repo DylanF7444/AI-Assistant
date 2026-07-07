@@ -27,6 +27,12 @@ class Settings(BaseModel):
     terminal_debug: bool = True
     allow_sensitive_speech: bool = False
     hide_sensitive_display: bool = False
+    context_include_open_applications: bool = True
+    context_include_connected_devices: bool = True
+    context_allow_clipboard: bool = False
+    context_allow_browser: bool = False
+    context_allow_screen: bool = False
+    context_allow_file_contents: bool = False
     stt_provider: str = "faster-whisper"
     stt_model: str = "small.en"
     stt_device: Literal["auto", "cuda", "cpu"] = "auto"
