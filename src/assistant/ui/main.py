@@ -370,6 +370,7 @@ def run_desktop(container: Container) -> int:
             tabs.addTab(self._active_scripts_tab(), "Active Scripts")
             tabs.addTab(self._skills_tab(), "Skills")
             tabs.addTab(self._permissions_tab(), "Permissions")
+            tabs.addTab(self._file_access_tab(), "File Access")
             tabs.addTab(self._audit_tab(), "Audit Log")
             tabs.addTab(self._settings_tab(), "Settings")
             tabs.addTab(self._diagnostics_tab(), "Diagnostics")
@@ -1240,6 +1241,8 @@ def run_desktop(container: Container) -> int:
                     elif column == 1:
                         item.setData(Qt.ItemDataRole.UserRole, value["capability"])
                     self.permission_table.setItem(row, column, item)
+            if hasattr(self, "file_access_grants_table"):
+                self._reload_file_access()
 
         def _grant_permission(self) -> None:
             skill_choices = {
@@ -1335,6 +1338,191 @@ def run_desktop(container: Container) -> int:
                 "desktop-permission-manager",
             )
             self._reload_permissions()
+
+        def _file_access_tab(self) -> QWidget:
+            page = QWidget()
+            layout = QVBoxLayout(page)
+            layout.addWidget(
+                QLabel(
+                    "File access is controlled by skill grants plus global path "
+                    "allow/block rules. Block rules take precedence over grants."
+                )
+            )
+
+            grant_title = QLabel("Filesystem grants")
+            grant_title.setObjectName("sectionTitle")
+            layout.addWidget(grant_title)
+            self.file_access_grants_table = QTableWidget(0, 5)
+            self.file_access_grants_table.setHorizontalHeaderLabels(
+                ["Skill", "Access", "Mode", "Targets", "Effect"]
+            )
+            self.file_access_grants_table.horizontalHeader().setStretchLastSection(
+                True
+            )
+            layout.addWidget(self.file_access_grants_table)
+
+            grant_controls = QHBoxLayout()
+            revoke_grant = QPushButton("Revoke Selected Grant")
+            revoke_grant.clicked.connect(self._revoke_file_access_grant)
+            refresh = QPushButton("Refresh")
+            refresh.clicked.connect(self._reload_file_access)
+            grant_controls.addWidget(revoke_grant)
+            grant_controls.addWidget(refresh)
+            layout.addLayout(grant_controls)
+
+            policy_title = QLabel("Global path policy")
+            policy_title.setObjectName("sectionTitle")
+            layout.addWidget(policy_title)
+            self.file_access_policy_table = QTableWidget(0, 3)
+            self.file_access_policy_table.setHorizontalHeaderLabels(
+                ["Access", "Rule", "Path"]
+            )
+            self.file_access_policy_table.horizontalHeader().setStretchLastSection(
+                True
+            )
+            layout.addWidget(self.file_access_policy_table)
+
+            policy_controls = QHBoxLayout()
+            add_allow = QPushButton("Add Allow Rule")
+            add_allow.clicked.connect(lambda: self._add_file_access_policy_rule("allow"))
+            add_block = QPushButton("Add Block Rule")
+            add_block.clicked.connect(lambda: self._add_file_access_policy_rule("block"))
+            remove_rule = QPushButton("Remove Selected Rule")
+            remove_rule.clicked.connect(self._remove_file_access_policy_rule)
+            policy_controls.addWidget(add_allow)
+            policy_controls.addWidget(add_block)
+            policy_controls.addWidget(remove_rule)
+            layout.addLayout(policy_controls)
+
+            self._reload_file_access()
+            return page
+
+        def _reload_file_access(self) -> None:
+            self.file_access_grants_table.setRowCount(0)
+            for value in container.permissions.list_grants():
+                if value["capability"] not in {
+                    "filesystem.read",
+                    "filesystem.write",
+                }:
+                    continue
+                row = self.file_access_grants_table.rowCount()
+                self.file_access_grants_table.insertRow(row)
+                manifest = container.registry.get(value["skill_id"]).manifest
+                fields = [
+                    f"{manifest.display_name} ({friendly_identifier(value['skill_id'])})",
+                    capability_table_label(value["capability"]),
+                    grant_type_label(value["grant_type"]),
+                    target_summary(value["targets"]),
+                    value["effect"],
+                ]
+                for column, field in enumerate(fields):
+                    item = QTableWidgetItem(str(field))
+                    if column == 0:
+                        item.setData(Qt.ItemDataRole.UserRole, value["skill_id"])
+                    elif column == 1:
+                        item.setData(Qt.ItemDataRole.UserRole, value["capability"])
+                    self.file_access_grants_table.setItem(row, column, item)
+
+            self.file_access_policy_table.setRowCount(0)
+            policy = container.file_access_policy.get()
+            rows = (
+                ("Read", "Allow", "read_whitelist", policy.read_whitelist),
+                ("Read", "Block", "read_blacklist", policy.read_blacklist),
+                ("Write/delete", "Allow", "write_whitelist", policy.write_whitelist),
+                ("Write/delete", "Block", "write_blacklist", policy.write_blacklist),
+            )
+            for access, rule, field, paths in rows:
+                for path in paths:
+                    row = self.file_access_policy_table.rowCount()
+                    self.file_access_policy_table.insertRow(row)
+                    fields = [access, rule, path]
+                    for column, value in enumerate(fields):
+                        item = QTableWidgetItem(str(value))
+                        if column == 0:
+                            item.setData(Qt.ItemDataRole.UserRole, field)
+                        elif column == 2:
+                            item.setData(Qt.ItemDataRole.UserRole, path)
+                        self.file_access_policy_table.setItem(row, column, item)
+
+        def _revoke_file_access_grant(self) -> None:
+            row = self.file_access_grants_table.currentRow()
+            if row < 0:
+                return
+            container.permissions.revoke(
+                "local-user",
+                self.file_access_grants_table.item(row, 0).data(
+                    Qt.ItemDataRole.UserRole
+                ),
+                self.file_access_grants_table.item(row, 1).data(
+                    Qt.ItemDataRole.UserRole
+                ),
+                "desktop-file-access-manager",
+            )
+            self._reload_permissions()
+
+        def _add_file_access_policy_rule(self, rule: str) -> None:
+            access_label, ok = QInputDialog.getItem(
+                self,
+                "Add File Access Rule",
+                "Access",
+                ["Read", "Write/delete"],
+                editable=False,
+            )
+            if not ok:
+                return
+            path, ok = QInputDialog.getText(
+                self,
+                "Add File Access Rule",
+                "Path or folder",
+            )
+            if not ok or not path.strip():
+                return
+            container.file_access_policy.update_entry(
+                list_name="whitelist" if rule == "allow" else "blacklist",
+                access="write" if access_label == "Write/delete" else "read",
+                path=path.strip(),
+                add=True,
+            )
+            self._sync_file_policy_settings_fields()
+            self._reload_file_access()
+
+        def _remove_file_access_policy_rule(self) -> None:
+            row = self.file_access_policy_table.currentRow()
+            if row < 0:
+                return
+            field = self.file_access_policy_table.item(row, 0).data(
+                Qt.ItemDataRole.UserRole
+            )
+            path = self.file_access_policy_table.item(row, 2).data(
+                Qt.ItemDataRole.UserRole
+            )
+            access = "write" if field.startswith("write_") else "read"
+            list_name = "whitelist" if field.endswith("_whitelist") else "blacklist"
+            container.file_access_policy.update_entry(
+                list_name=list_name,
+                access=access,
+                path=path,
+                add=False,
+            )
+            self._sync_file_policy_settings_fields()
+            self._reload_file_access()
+
+        def _sync_file_policy_settings_fields(self) -> None:
+            if not hasattr(self, "setting_read_whitelist"):
+                return
+            policy = container.file_access_policy.get()
+            self.setting_read_whitelist.setPlainText(
+                policy_lines(policy.read_whitelist)
+            )
+            self.setting_read_blacklist.setPlainText(
+                policy_lines(policy.read_blacklist)
+            )
+            self.setting_write_whitelist.setPlainText(
+                policy_lines(policy.write_whitelist)
+            )
+            self.setting_write_blacklist.setPlainText(
+                policy_lines(policy.write_blacklist)
+            )
 
         def _audit_tab(self) -> QWidget:
             page = QWidget()
@@ -1712,6 +1900,8 @@ def run_desktop(container: Container) -> int:
                     }
                 )
             )
+            if hasattr(self, "file_access_policy_table"):
+                self._reload_file_access()
             vault = SecretVault(validated.data_dir / "secrets")
             for name, field in (
                 ("openai", self.setting_openai_key),

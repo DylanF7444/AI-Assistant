@@ -75,7 +75,7 @@ class FileAccessPolicyStore:
         policy = self.get()
         field = _field_name(list_name, access)
         current = list(getattr(policy, field))
-        normalized = str(resolve_user_path(path))
+        normalized = _normalize_policy_entry(path)
         if add and normalized not in current:
             current.append(normalized)
         if not add:
@@ -108,6 +108,13 @@ def _clean_paths(values) -> tuple[str, ...]:
         if text and text not in cleaned:
             cleaned.append(text)
     return tuple(cleaned)
+
+
+def _normalize_policy_entry(value: str) -> str:
+    text = str(value).strip()
+    if text == "*":
+        return text
+    return str(resolve_user_path(text))
 
 
 def _target_in_rule(target: str, rule: str) -> bool:

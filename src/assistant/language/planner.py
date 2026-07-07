@@ -621,7 +621,52 @@ class LocalPlanner:
                 normalized["process_name"]
             )
             return normalized
+        if manifest.skill_id == "windows.file_search":
+            normalized = {
+                key: arguments[key]
+                for key in ("root", "query", "limit")
+                if key in arguments
+            }
+            if isinstance(normalized.get("root"), str):
+                normalized["root"] = LocalPlanner._normalize_file_search_root(
+                    normalized["root"]
+                )
+            if "limit" in normalized:
+                try:
+                    normalized["limit"] = max(1, min(100, int(normalized["limit"])))
+                except (TypeError, ValueError):
+                    normalized.pop("limit")
+            return normalized
         return arguments
+
+    @staticmethod
+    def _normalize_file_search_root(root: str) -> str:
+        value = root.strip()
+        normalized = value.replace("\\", "/").strip("/")
+        if match := re.fullmatch(
+            r"(?:mnt/c/)?users/[^/]+/(?P<folder>desktop|documents|downloads|"
+            r"pictures|music|videos)(?P<suffix>/.*)?",
+            normalized,
+            flags=re.IGNORECASE,
+        ):
+            token = {
+                "desktop": "${user_desktop}",
+                "documents": "${user_documents}",
+                "downloads": "${user_downloads}",
+                "pictures": "${user_pictures}",
+                "music": "${user_music}",
+                "videos": "${user_videos}",
+            }[match.group("folder").casefold()]
+            suffix = match.group("suffix") or ""
+            return token + suffix
+        if match := re.fullmatch(
+            r"(?:the |my )?(desktop|documents|downloads|pictures|music|videos)"
+            r"(?: folder)?",
+            value,
+            flags=re.IGNORECASE,
+        ):
+            return match.group(1).casefold()
+        return value
 
     @staticmethod
     def _looks_like_gibberish(text: str) -> bool:

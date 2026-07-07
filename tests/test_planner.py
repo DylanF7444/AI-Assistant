@@ -2,7 +2,13 @@ import pytest
 from jsonschema import ValidationError
 
 from assistant.language.planner import InvalidPlannerResponse, LocalPlanner, SkillRetriever
-from assistant.skills.builtin import CalculatorSkill, DateTimeSkill, LauncherSkill, TimerSkill
+from assistant.skills.builtin import (
+    CalculatorSkill,
+    DateTimeSkill,
+    FileSearchSkill,
+    LauncherSkill,
+    TimerSkill,
+)
 from assistant.skills.windows import ApplicationWindowSkill, FileOperationSkill
 from assistant.storage.database import Database
 from assistant.storage.knowledge import KnowledgeBaseStore
@@ -48,6 +54,11 @@ class FakeApplications:
 
     async def close(self, name):
         return True
+
+
+class FakeFileSystem:
+    async def search(self, root, query, limit):
+        return []
 
 
 @pytest.mark.asyncio
@@ -127,6 +138,37 @@ async def test_planner_normalizes_launcher_source_argument():
 
     assert intent.name == "windows.launcher"
     assert intent.arguments == {"application": "youtube"}
+
+
+@pytest.mark.asyncio
+async def test_planner_normalizes_file_search_desktop_and_limit():
+    search = FileSearchSkill(FakeFileSystem())
+    provider = FakeProvider(
+        {
+            "disposition": "skill",
+            "skill_id": "windows.file_search",
+            "arguments": {
+                "root": "/mnt/c/Users/<username>/Desktop",
+                "query": "resume",
+                "limit": 10000,
+                "from_step": 1,
+                "previous_result": None,
+            },
+            "answer": "",
+            "confidence": 0.95,
+            "clarification": "",
+        }
+    )
+    planner = LocalPlanner(provider, SkillRetriever((search.manifest,)))
+
+    intent = await planner.plan_decision("Find my resume on my desktop")
+
+    assert intent.intent.name == "windows.file_search"
+    assert intent.intent.arguments == {
+        "root": "${user_desktop}",
+        "query": "resume",
+        "limit": 100,
+    }
 
 
 @pytest.mark.asyncio

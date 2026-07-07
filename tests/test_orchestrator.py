@@ -2,6 +2,7 @@ import asyncio
 
 import pytest
 from jsonschema import ValidationError
+from pathlib import Path
 from uuid import uuid4
 
 from assistant.bootstrap import build_container
@@ -201,6 +202,27 @@ class ClarifyingDecisionPlanner:
         pass
 
 
+class ClarifyThenAnswerPlanner:
+    def __init__(self):
+        self.calls = []
+
+    async def plan_decision(self, text, recent_context=()):
+        self.calls.append((text, recent_context))
+        if len(self.calls) == 1:
+            return PlannerDecision(clarification="Which folder should I search?")
+        return PlannerDecision(
+            intent=Intent(
+                name="conversation.answer",
+                arguments={"text": "Resolved follow-up."},
+                confidence=0.9,
+                source="llm",
+            )
+        )
+
+    async def cancel(self):
+        pass
+
+
 @pytest.mark.asyncio
 async def test_text_to_command_to_response(settings):
     container = build_container(settings)
@@ -334,6 +356,72 @@ async def test_file_search_select_and_contextual_copy_preview(settings, tmp_path
 
 
 @pytest.mark.asyncio
+async def test_file_search_result_ordinal_copy_uses_named_documents_folder(
+    settings, tmp_path
+):
+    container = build_container(settings)
+    search_root = tmp_path / "search"
+    search_root.mkdir()
+    source = search_root / "resume.txt"
+    source.write_text("resume")
+    expected_destination = Path.home() / "Documents" / source.name
+    container.permissions.grant(
+        user_id="local-user",
+        skill_id="windows.file_search",
+        capability="filesystem.read",
+        grant_type=GrantType.ALWAYS,
+        targets=(str(search_root.resolve()),),
+    )
+
+    response, outcome = await container.orchestrator.handle_text(
+        f"find resume in {search_root}"
+    )
+    assert outcome.result.status == ResultStatus.COMPLETED
+    assert str(source.resolve()) in response.display_text
+
+    response, outcome = await container.orchestrator.handle_text(
+        "Copy and paste the first result into my documents folder"
+    )
+
+    assert response.response_type == ResponseType.PERMISSION
+    assert outcome.call.skill_id == "windows.file_operation"
+    assert outcome.call.arguments["source"] == str(source.resolve())
+    assert outcome.call.arguments["destination"] == str(
+        expected_destination.resolve()
+    )
+    assert outcome.permission_requests[0].scope.targets == (str(source.resolve()),)
+    assert outcome.permission_requests[1].scope.targets == (
+        str(expected_destination.resolve()),
+    )
+
+
+@pytest.mark.asyncio
+async def test_file_search_result_ordinal_open_uses_matching_candidate(
+    settings, tmp_path
+):
+    container = build_container(settings)
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("one")
+    second.write_text("two")
+    container.orchestrator.remember_file_candidates(
+        [str(first.resolve()), str(second.resolve())]
+    )
+
+    response, outcome = await container.orchestrator.handle_text(
+        "Open the second one"
+    )
+
+    assert response.response_type == ResponseType.PERMISSION
+    assert outcome.call.skill_id == "windows.file_operation"
+    assert outcome.call.arguments == {
+        "operation": "open",
+        "source": str(second.resolve()),
+    }
+    assert outcome.permission_requests[0].scope.targets == (str(second.resolve()),)
+
+
+@pytest.mark.asyncio
 async def test_create_text_file_in_assistant_folder_requests_exact_write_permission(settings):
     container = build_container(settings)
     desktop = settings.data_dir.parent / "Desktop"
@@ -371,6 +459,99 @@ async def test_create_text_file_in_assistant_folder_asks_where_to_search(setting
 
     assert response.response_type == ResponseType.CLARIFICATION
     assert "allowed to search" in response.display_text
+    assert "Reply with the folder" in response.display_text
+    assert "next message as the follow-up" in response.display_text
+    assert outcome.result is None
+
+
+@pytest.mark.asyncio
+async def test_folder_search_clarification_follow_up_resumes_original_request(settings):
+    container = build_container(settings)
+    search_root = settings.data_dir / "FollowUpSearchRoot"
+    target_folder = search_root / "PROJECTS" / "Assistant"
+    target_folder.mkdir(parents=True)
+    target = target_folder / "my_text_file.txt"
+
+    first, first_outcome = await container.orchestrator.handle_text(
+        "Add a text file to the assistant folder in my desktop"
+    )
+    assert first.response_type == ResponseType.CLARIFICATION
+    assert first_outcome.result is None
+
+    response, outcome = await container.orchestrator.handle_text(str(search_root))
+
+    assert response.response_type == ResponseType.PERMISSION
+    assert outcome.call.skill_id == "windows.file_operation"
+    assert outcome.call.arguments["operation"] == "create_text"
+    assert outcome.call.arguments["source"] == str(target.resolve())
+    assert len(outcome.permission_requests) == 1
+    request = outcome.permission_requests[0]
+    assert request.scope.capability == "filesystem.write"
+    assert request.scope.targets == (str(target.resolve()),)
+    grants = container.permissions.list_grants()
+    assert any(
+        grant["skill_id"] == "windows.file_search"
+        and grant["capability"] == "filesystem.read"
+        and grant["grant_type"] == GrantType.SESSION.value
+        and grant["targets"] == [str(search_root.resolve())]
+        for grant in grants
+    )
+
+
+@pytest.mark.asyncio
+async def test_router_clarification_follow_up_completes_previous_conversion_request(settings):
+    container = build_container(settings)
+
+    first, first_outcome = await container.orchestrator.handle_text(
+        "convert a few miles to kilometers"
+    )
+    assert first.response_type == ResponseType.CLARIFICATION
+    assert first_outcome.result is None
+
+    response, outcome = await container.orchestrator.handle_text("5")
+
+    assert response.response_type == ResponseType.SKILL
+    assert outcome.call.skill_id == "core.unit_conversion"
+    assert outcome.call.arguments == {
+        "value": 5,
+        "from_unit": "miles",
+        "to_unit": "kilometers",
+    }
+    assert outcome.result.status == ResultStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_new_request_clears_pending_clarification(settings):
+    container = build_container(settings)
+
+    first, _ = await container.orchestrator.handle_text(
+        "convert a few miles to kilometers"
+    )
+    assert first.response_type == ResponseType.CLARIFICATION
+
+    response, outcome = await container.orchestrator.handle_text(
+        "new request calculate 2 plus 3"
+    )
+
+    assert response.response_type == ResponseType.SKILL
+    assert outcome.call.skill_id == "core.calculator"
+    assert outcome.result.status == ResultStatus.COMPLETED
+    assert "5" in response.display_text
+
+
+@pytest.mark.asyncio
+async def test_cancel_clears_pending_clarification(settings):
+    container = build_container(settings)
+
+    first, _ = await container.orchestrator.handle_text(
+        "convert a few miles to kilometers"
+    )
+    assert first.response_type == ResponseType.CLARIFICATION
+
+    response, outcome = await container.orchestrator.handle_text("cancel")
+
+    assert response.response_type == ResponseType.CONTROL
+    assert "Cancelled" in response.display_text
     assert outcome.result is None
 
 
@@ -755,6 +936,50 @@ async def test_complex_planner_decision_can_ask_clarification(settings):
     assert response.response_type == ResponseType.CLARIFICATION
     assert response.display_text == "Which folder should I search?"
     assert outcome.result is None
+
+
+@pytest.mark.asyncio
+async def test_planner_clarification_follow_up_includes_previous_request(settings):
+    container = build_container(settings)
+    planner = ClarifyThenAnswerPlanner()
+    container.orchestrator.planner = planner
+
+    first, first_outcome = await container.orchestrator.handle_text(
+        "do something unmatched with files"
+    )
+    assert first.response_type == ResponseType.CLARIFICATION
+    assert first_outcome.result is None
+
+    response, outcome = await container.orchestrator.handle_text("Desktop")
+
+    assert response.response_type == ResponseType.ANSWER
+    assert response.display_text == "Resolved follow-up."
+    assert outcome.result is None
+    assert len(planner.calls) == 2
+    follow_up_text = planner.calls[1][0]
+    assert "do something unmatched with files" in follow_up_text
+    assert "Which folder should I search?" in follow_up_text
+    assert "Desktop" in follow_up_text
+
+
+@pytest.mark.asyncio
+async def test_file_search_limit_follow_up_completes_original_desktop_search(settings):
+    container = build_container(settings)
+    container.orchestrator._set_pending_clarification(
+        original_text="Find my resume on my desktop",
+        clarification="Please specify the limit for search results, which should be between 1 and 100.",
+        session_id="desktop",
+    )
+
+    response, outcome = await container.orchestrator.handle_text("100")
+
+    assert response.response_type == ResponseType.PERMISSION
+    assert outcome.call.skill_id == "windows.file_search"
+    assert outcome.call.arguments == {
+        "query": "resume",
+        "root": "desktop",
+        "limit": 100,
+    }
 
 
 @pytest.mark.asyncio

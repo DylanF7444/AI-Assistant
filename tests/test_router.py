@@ -53,6 +53,18 @@ def test_unknown_request_needs_local_planner():
     assert result.intent.ambiguous
 
 
+def test_file_search_on_desktop_routes_without_local_planner():
+    result = DeterministicRouter().route("Find my resume on my desktop")
+
+    assert not result.needs_llm
+    assert result.intent.name == "windows.file_search"
+    assert result.intent.arguments == {
+        "query": "resume",
+        "root": "desktop",
+        "limit": 20,
+    }
+
+
 def test_application_registration_help_does_not_need_local_planner():
     result = DeterministicRouter().route(
         "How do I register an application so you can open it for me"
@@ -311,6 +323,36 @@ def test_create_text_file_in_assistant_folder_routes_without_planner():
     assert result.intent.arguments == {
         "operation": "create_text",
         "source": "${assistant_folder}/my_text_file.txt",
+    }
+
+
+def test_contextual_ordinal_file_actions_route_without_planner():
+    copy = DeterministicRouter().route("Copy the first one to my documents")
+    assert not copy.needs_llm
+    assert copy.intent.name == "windows.file_operation"
+    assert copy.intent.arguments == {
+        "operation": "copy",
+        "source": "the first one",
+        "destination": "my documents",
+    }
+
+    copy_and_paste = DeterministicRouter().route(
+        "Copy and paste the first result into my documents folder"
+    )
+    assert not copy_and_paste.needs_llm
+    assert copy_and_paste.intent.name == "windows.file_operation"
+    assert copy_and_paste.intent.arguments == {
+        "operation": "copy",
+        "source": "the first result",
+        "destination": "my documents folder",
+    }
+
+    opened = DeterministicRouter().route("Open the second one")
+    assert not opened.needs_llm
+    assert opened.intent.name == "windows.file_operation"
+    assert opened.intent.arguments == {
+        "operation": "open",
+        "source": "the second one",
     }
 
 

@@ -500,7 +500,8 @@ class DeterministicRouter:
                 )
             )
         if match := re.fullmatch(
-            r"copy (?:it|that|the selected file|this file)(?: to| onto| into) (.+)",
+            r"copy(?: and paste)? "
+            r"(?:it|that|the selected file|this file)(?: to| onto| into| in) (.+)",
             routed,
         ):
             return RouteResult(
@@ -828,15 +829,20 @@ class DeterministicRouter:
                 )
             )
         if match := re.fullmatch(
-            r"(copy|move|rename) (.+?) (?:to|as) (.+)", routed
+            r"(?P<operation>copy(?: and paste)?|move|rename) "
+            r"(?P<source>.+?) "
+            r"(?P<preposition>to|onto|into|in|as) "
+            r"(?P<destination>.+)",
+            routed,
         ):
+            operation = match.group("operation")
             return RouteResult(
                 Intent(
                     name="windows.file_operation",
                     arguments={
-                        "operation": match.group(1),
-                        "source": match.group(2),
-                        "destination": match.group(3),
+                        "operation": "copy" if operation.startswith("copy") else operation,
+                        "source": match.group("source"),
+                        "destination": match.group("destination"),
                     },
                     confidence=0.92,
                     source="rule",
@@ -848,6 +854,23 @@ class DeterministicRouter:
                     name="windows.file_operation",
                     arguments={"operation": "delete", "source": match.group(1)},
                     confidence=0.9,
+                    source="rule",
+                )
+            )
+        if match := re.fullmatch(
+            r"open (?P<source>(?:the |this |that )?"
+            r"(?:(?:\d+)(?:st|nd|rd|th)?|first|second|third|fourth|fifth|last)"
+            r"(?: file| item| result| match| one)?)",
+            routed,
+        ):
+            return RouteResult(
+                Intent(
+                    name="windows.file_operation",
+                    arguments={
+                        "operation": "open",
+                        "source": match.group("source").strip(),
+                    },
+                    confidence=0.94,
                     source="rule",
                 )
             )
@@ -1056,7 +1079,10 @@ class DeterministicRouter:
                     source="rule",
                 )
             )
-        if match := re.fullmatch(r"(?:find|search for) (.+) in (.+)", routed):
+        if match := re.fullmatch(
+            r"(?:find|search for) (?:my |the )?(.+?) (?:in|on) (?:my |the )?(.+)",
+            routed,
+        ):
             return RouteResult(
                 Intent(
                     name="windows.file_search",

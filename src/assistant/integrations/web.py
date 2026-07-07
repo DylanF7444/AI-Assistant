@@ -293,8 +293,8 @@ class CodexExecClient:
         cwd: str | Path | None = None,
         timeout_seconds: float = 120,
         extra_args: tuple[str, ...] = (
-            "--ask-for-approval",
-            "never",
+            "-c",
+            'approval_policy="never"',
             "--sandbox",
             "read-only",
         ),

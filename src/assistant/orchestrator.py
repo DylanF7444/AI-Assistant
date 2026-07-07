@@ -9,6 +9,7 @@ import time
 import urllib.error
 from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -36,13 +37,27 @@ from assistant.language.planner import (
     PlannedIntentStep,
     PlannerDecision,
 )
+from assistant.policy.permissions import GrantType
 from assistant.response import response_from_result
 from assistant.router.deterministic import DeterministicRouter
 from assistant.storage.history import HistoryStore
 from assistant.storage.database import MetricsStore
-from assistant.windows.paths import ASSISTANT_FOLDER_TOKEN, resolve_user_path
+from assistant.windows.paths import (
+    ASSISTANT_FOLDER_TOKEN,
+    KNOWN_USER_FOLDERS,
+    resolve_user_path,
+)
 
 logger = logging.getLogger("assistant.orchestrator")
+
+
+@dataclass(frozen=True)
+class PendingClarificationFollowUp:
+    original_text: str
+    clarification: str
+    folder_name: str | None
+    session_id: str
+    kind: str = "generic"
 
 
 class AssistantOrchestrator:
@@ -80,6 +95,7 @@ class AssistantOrchestrator:
         self._session_context: deque[dict[str, str]] = deque(maxlen=6)
         self._file_candidates: tuple[str, ...] = ()
         self._selected_file: str | None = None
+        self._pending_clarification_follow_up: PendingClarificationFollowUp | None = None
 
     def remember_file_candidates(self, paths: tuple[str, ...] | list[str]) -> None:
         self._file_candidates = tuple(str(path) for path in paths)
@@ -490,6 +506,13 @@ class AssistantOrchestrator:
     @staticmethod
     def _selection_index(selector: str) -> int | None:
         value = selector.strip().casefold()
+        value = re.sub(r"^(?:the|that|this)\s+", "", value)
+        value = re.sub(
+            r"\s+(?:one|file|item|result|match)$", "", value
+        ).strip()
+        value = re.sub(
+            r"^(?:file|item|result|match|number)\s+", "", value
+        ).strip()
         words = {
             "first": 1,
             "one": 1,
@@ -510,8 +533,78 @@ class AssistantOrchestrator:
             return int(match.group(1)) - 1
         return None
 
+    def _candidate_reference(self, value: str) -> str | Response | None:
+        if not self._file_candidates:
+            return None
+        cleaned = value.strip().strip("\"'").casefold()
+        if not cleaned:
+            return None
+        index = self._selection_index(cleaned)
+        if index == -1:
+            index = len(self._file_candidates) - 1
+        if index is not None:
+            if 0 <= index < len(self._file_candidates):
+                return self._file_candidates[index]
+            return Response(
+                display_text=(
+                    "I do not have that many file search results. Choose one of "
+                    "the numbered results, for example \"the first one\"."
+                ),
+                speech_text="I do not have that many file results.",
+                response_type=ResponseType.CLARIFICATION,
+                severity="warning",
+                speak=True,
+            )
+
+        named_reference = re.sub(r"^(?:the|that|this)\s+", "", cleaned)
+        named_reference = re.sub(
+            r"\s+(?:one|file|item|result|match)$", "", named_reference
+        ).strip()
+        if not named_reference or named_reference == cleaned:
+            return None
+        words = [word for word in re.split(r"\s+", named_reference) if word]
+        matches = [
+            path
+            for path in self._file_candidates
+            if all(word in Path(path).name.casefold() for word in words)
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            return Response(
+                display_text=(
+                    "That file reference matches more than one result. Use the "
+                    "numbered result instead, for example \"the first one\"."
+                ),
+                speech_text="That matches more than one file result.",
+                response_type=ResponseType.CLARIFICATION,
+                severity="warning",
+                speak=True,
+            )
+        return None
+
+    @staticmethod
+    def _normalize_user_folder_reference(value: str) -> str:
+        candidate = value.strip()
+        trimmed = re.sub(r"^(?:my|the)\s+", "", candidate, flags=re.IGNORECASE)
+        trimmed = re.sub(r"\s+folder$", "", trimmed, flags=re.IGNORECASE)
+        first = trimmed.replace("\\", "/").partition("/")[0].casefold()
+        if first in KNOWN_USER_FOLDERS:
+            return trimmed
+        return candidate
+
+    @staticmethod
+    def _destination_is_folder_reference(original: str, resolved: Path) -> bool:
+        normalized = AssistantOrchestrator._normalize_user_folder_reference(original)
+        first = normalized.replace("\\", "/").partition("/")[0].casefold()
+        if first in KNOWN_USER_FOLDERS and not Path(normalized).suffix:
+            return True
+        if re.search(r"\bfolder$", original.strip(), flags=re.IGNORECASE):
+            return True
+        return resolved.exists() and resolved.is_dir()
+
     def _resolve_file_placeholders(
-        self, intent: Intent, *, session_id: str
+        self, intent: Intent, *, session_id: str, request_text: str
     ) -> Intent | Response:
         if intent.name != "windows.file_operation":
             return intent
@@ -529,6 +622,13 @@ class AssistantOrchestrator:
                     speak=True,
                 )
             arguments["source"] = self._selected_file
+        elif isinstance(arguments.get("source"), str):
+            source_reference = self._candidate_reference(arguments["source"])
+            if isinstance(source_reference, Response):
+                return source_reference
+            if source_reference is not None:
+                arguments["source"] = source_reference
+                self._selected_file = source_reference
         destination = arguments.get("destination")
         if isinstance(destination, str):
             if "${selected_file_name}" in destination:
@@ -539,29 +639,45 @@ class AssistantOrchestrator:
             resolved_destination = self._resolve_named_folder_path(
                 destination,
                 session_id=session_id,
+                request_text=request_text,
             )
             if isinstance(resolved_destination, Response):
                 return resolved_destination
             destination = resolved_destination
+            destination = self._normalize_user_folder_reference(destination)
             try:
-                arguments["destination"] = str(resolve_user_path(destination))
+                destination_path = resolve_user_path(destination)
             except ValueError:
                 arguments["destination"] = destination
+            else:
+                operation = arguments.get("operation")
+                source = arguments.get("source")
+                if (
+                    operation in {"copy", "move"}
+                    and isinstance(source, str)
+                    and self._destination_is_folder_reference(
+                        destination, destination_path
+                    )
+                ):
+                    destination_path = destination_path / Path(source).name
+                arguments["destination"] = str(destination_path)
         if "source" in arguments:
             source = arguments["source"]
             if isinstance(source, str):
                 resolved_source = self._resolve_named_folder_path(
                     source,
                     session_id=session_id,
+                    request_text=request_text,
                 )
                 if isinstance(resolved_source, Response):
                     return resolved_source
                 source = resolved_source
+                source = self._normalize_user_folder_reference(source)
             arguments["source"] = str(resolve_user_path(source))
         return intent.model_copy(update={"arguments": arguments})
 
     def _resolve_named_folder_path(
-        self, value: str, *, session_id: str
+        self, value: str, *, session_id: str, request_text: str
     ) -> str | Response:
         folded = value.casefold()
         token = ASSISTANT_FOLDER_TOKEN.casefold()
@@ -571,15 +687,27 @@ class AssistantOrchestrator:
             return value
         folder = self._find_allowed_folder("assistant", session_id=session_id)
         if folder is None:
+            example_path = str(Path.home() / "Desktop")
+            self._pending_clarification_follow_up = PendingClarificationFollowUp(
+                original_text=request_text,
+                clarification=(
+                    "Which folder am I allowed to search for the Assistant folder?"
+                ),
+                folder_name="assistant",
+                session_id=session_id,
+                kind="folder_search",
+            )
             return Response(
                 display_text=(
                     "I could not find an Assistant folder inside the folders I "
-                    "am already allowed to search. Which folder am I allowed to "
-                    "search?"
+                    "am already allowed to search. Reply with the folder I may "
+                    "search for this request, for example Desktop or "
+                    f"{example_path}. I will use your next message as the "
+                    "follow-up."
                 ),
                 speech_text=(
                     "I could not find an Assistant folder in the folders I can "
-                    "search. Where am I allowed to search?"
+                    "search. Reply with a folder I may search for this request."
                 ),
                 response_type=ResponseType.CLARIFICATION,
                 severity="warning",
@@ -623,6 +751,359 @@ class AssistantOrchestrator:
             return matches
         return matches
 
+    def _set_pending_clarification(
+        self,
+        *,
+        original_text: str,
+        clarification: str,
+        session_id: str,
+        kind: str = "generic",
+        folder_name: str | None = None,
+    ) -> None:
+        self._pending_clarification_follow_up = PendingClarificationFollowUp(
+            original_text=original_text,
+            clarification=clarification,
+            folder_name=folder_name,
+            session_id=session_id,
+            kind=kind,
+        )
+
+    async def _handle_pending_clarification_follow_up(
+        self,
+        correlation_id: UUID,
+        text: str,
+        pending: PendingClarificationFollowUp,
+        *,
+        session_id: str,
+        invoked_by_voice: bool,
+    ) -> tuple[Response, ExecutionOutcome]:
+        reset_kind, replacement = self._pending_follow_up_reset(text)
+        if reset_kind == "cancel":
+            self._pending_clarification_follow_up = None
+            response = Response(
+                display_text="Cancelled the pending follow-up.",
+                speech_text="Cancelled.",
+                response_type=ResponseType.CONTROL,
+                severity="warning",
+            )
+            return await self._finish_interaction(
+                correlation_id,
+                text,
+                response,
+                intent_name="clarification.follow_up",
+                outcome_label="cancelled",
+                invoked_by_voice=invoked_by_voice,
+            )
+        if reset_kind == "new_request":
+            self._pending_clarification_follow_up = None
+            if replacement:
+                return await self.handle_text(
+                    replacement,
+                    session_id=session_id,
+                    invoked_by_voice=invoked_by_voice,
+                )
+            response = Response(
+                display_text="Okay, I forgot the pending follow-up.",
+                speech_text="Okay, I forgot the pending follow-up.",
+                response_type=ResponseType.CONTROL,
+            )
+            return await self._finish_interaction(
+                correlation_id,
+                text,
+                response,
+                intent_name="clarification.follow_up",
+                outcome_label="cancelled",
+                invoked_by_voice=invoked_by_voice,
+            )
+
+        if pending.kind == "folder_search":
+            return await self._handle_pending_folder_search_follow_up(
+                correlation_id,
+                text,
+                pending,
+                session_id=session_id,
+                invoked_by_voice=invoked_by_voice,
+            )
+
+        if resolved := self._file_search_limit_follow_up_intent(pending, text):
+            self._pending_clarification_follow_up = None
+            return await self._handle_planner_intent(
+                correlation_id,
+                pending.original_text,
+                resolved,
+                session_id=session_id,
+                invoked_by_voice=invoked_by_voice,
+            )
+
+        follow_up_text = self._clarification_follow_up_request_text(pending, text)
+        self._pending_clarification_follow_up = None
+        return await self.handle_text(
+            follow_up_text,
+            session_id=session_id,
+            invoked_by_voice=invoked_by_voice,
+        )
+
+    @staticmethod
+    def _pending_follow_up_reset(text: str) -> tuple[str | None, str | None]:
+        value = text.strip()
+        folded = value.casefold()
+        if folded in {
+            "cancel",
+            "stop",
+            "never mind",
+            "never mind that",
+            "nevermind",
+            "nevermind that",
+            "ignore that",
+            "forget that",
+            "forget it",
+            "skip it",
+            "no",
+        }:
+            return "cancel", None
+
+        prefixes = (
+            "new request",
+            "start a new request",
+            "new command",
+            "start a new command",
+            "different request",
+            "separate request",
+            "start over",
+            "instead",
+        )
+        for prefix in prefixes:
+            if folded == prefix:
+                return "new_request", None
+            if folded.startswith(prefix + ":"):
+                return "new_request", value[len(prefix) + 1 :].strip() or None
+            if folded.startswith(prefix + " "):
+                return "new_request", value[len(prefix) :].strip() or None
+
+        patterns = (
+            r"(?:cancel|ignore|forget)\s+(?:that|it)\s+and\s+(?P<request>.+)",
+            r"(?:actually|instead),?\s+(?P<request>.+)",
+        )
+        for pattern in patterns:
+            match = re.fullmatch(pattern, value, flags=re.IGNORECASE)
+            if match:
+                return "new_request", match.group("request").strip()
+        return None, None
+
+    def _clarification_follow_up_request_text(
+        self, pending: PendingClarificationFollowUp, answer: str
+    ) -> str:
+        timer_text = self._timer_follow_up_request_text(pending, answer)
+        if timer_text:
+            return timer_text
+        conversion_text = self._conversion_follow_up_request_text(pending, answer)
+        if conversion_text:
+            return conversion_text
+        return (
+            f"{pending.original_text}\n"
+            f"Clarifying question: {pending.clarification}\n"
+            f"Follow-up answer: {answer}\n"
+            "Use the follow-up answer to complete the previous request."
+        )
+
+    @staticmethod
+    def _file_search_limit_follow_up_intent(
+        pending: PendingClarificationFollowUp, answer: str
+    ) -> Intent | None:
+        if "limit" not in pending.clarification.casefold():
+            return None
+        value = answer.strip()
+        if not re.fullmatch(r"\d+", value):
+            return None
+        limit = int(value)
+        if not 1 <= limit <= 100:
+            return None
+        route = DeterministicRouter().route(pending.original_text)
+        if route.intent is None or route.intent.name != "windows.file_search":
+            return None
+        arguments = dict(route.intent.arguments)
+        arguments["limit"] = limit
+        return route.intent.model_copy(update={"arguments": arguments})
+
+    @staticmethod
+    def _timer_follow_up_request_text(
+        pending: PendingClarificationFollowUp, answer: str
+    ) -> str | None:
+        if "timer" not in pending.original_text.casefold():
+            return None
+        if "how long" not in pending.clarification.casefold():
+            return None
+        value = answer.strip()
+        if not re.search(r"\b(seconds?|minutes?|hours?)\b", value, re.IGNORECASE):
+            match = re.search(
+                r"\b(seconds?|minutes?|hours?)\b",
+                pending.original_text,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                value = f"{value} {match.group(1)}"
+        return f"set timer for {value}"
+
+    @staticmethod
+    def _conversion_follow_up_request_text(
+        pending: PendingClarificationFollowUp, answer: str
+    ) -> str | None:
+        if "what value" not in pending.clarification.casefold():
+            return None
+        match = re.fullmatch(
+            r"convert\s+.+?\s+"
+            r"(?P<from>kilometers?|miles?|meters?|feet|kilograms?|pounds?|"
+            r"liters?|gallons?|celsius|fahrenheit)\s+to\s+"
+            r"(?P<to>kilometers?|miles?|meters?|feet|kilograms?|pounds?|"
+            r"liters?|gallons?|celsius|fahrenheit)",
+            pending.original_text.strip(),
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return None
+        return f"convert {answer.strip()} {match.group('from')} to {match.group('to')}"
+
+    async def _handle_pending_folder_search_follow_up(
+        self,
+        correlation_id: UUID,
+        text: str,
+        pending: PendingClarificationFollowUp,
+        *,
+        session_id: str,
+        invoked_by_voice: bool,
+    ) -> tuple[Response, ExecutionOutcome]:
+        folded = text.strip().casefold()
+        if folded in {"cancel", "stop", "never mind", "never mind that"}:
+            self._pending_clarification_follow_up = None
+            response = Response(
+                display_text="Cancelled the pending follow-up.",
+                speech_text="Cancelled.",
+                response_type=ResponseType.CONTROL,
+                severity="warning",
+            )
+            return await self._finish_interaction(
+                correlation_id,
+                text,
+                response,
+                intent_name="clarification.follow_up",
+                outcome_label="cancelled",
+                invoked_by_voice=invoked_by_voice,
+            )
+
+        root = self._folder_search_root_from_follow_up(text)
+        if root is None:
+            example_path = str(Path.home() / "Desktop")
+            response = Response(
+                display_text=(
+                    "I am waiting for the folder to search for the previous "
+                    "request. Reply with a folder name or path, such as Desktop "
+                    f"or {example_path}, or say cancel."
+                ),
+                speech_text=(
+                    "Please reply with a folder name or path, or say cancel."
+                ),
+                response_type=ResponseType.CLARIFICATION,
+                severity="warning",
+                speak=True,
+            )
+            return await self._finish_interaction(
+                correlation_id,
+                text,
+                response,
+                intent_name="clarification.follow_up",
+                outcome_label="needs_clarification",
+                invoked_by_voice=invoked_by_voice,
+            )
+
+        if root.is_file():
+            root = root.parent
+        if not root.exists() or not root.is_dir():
+            response = Response(
+                display_text=(
+                    f"I could not find that folder: {root}. Reply with an "
+                    "existing folder I may search, or say cancel."
+                ),
+                speech_text=(
+                    "I could not find that folder. Reply with an existing folder, "
+                    "or say cancel."
+                ),
+                response_type=ResponseType.CLARIFICATION,
+                severity="warning",
+                speak=True,
+            )
+            return await self._finish_interaction(
+                correlation_id,
+                text,
+                response,
+                intent_name="clarification.follow_up",
+                outcome_label="needs_clarification",
+                invoked_by_voice=invoked_by_voice,
+            )
+
+        grant_session_id = (
+            pending.session_id if pending.session_id == session_id else session_id
+        )
+        self.engine.permissions.grant(
+            user_id="local-user",
+            skill_id="windows.file_search",
+            capability="filesystem.read",
+            grant_type=GrantType.SESSION,
+            targets=(str(root.resolve()),),
+            session_id=grant_session_id,
+            correlation_id=str(correlation_id),
+        )
+        self._pending_clarification_follow_up = None
+        return await self.handle_text(
+            pending.original_text,
+            session_id=grant_session_id,
+            invoked_by_voice=invoked_by_voice,
+        )
+
+    @staticmethod
+    def _folder_search_root_from_follow_up(text: str) -> Path | None:
+        candidate = text.strip().strip("\"'").rstrip(".").strip()
+        if not candidate:
+            return None
+        folded = candidate.casefold()
+        if folded in {
+            "yes",
+            "yeah",
+            "ok",
+            "okay",
+            "there",
+            "that folder",
+            "the folder",
+        }:
+            return None
+
+        patterns = (
+            r"(?:you\s+(?:can|may)\s+)?(?:search|look in|check|use|try)\s+(?P<path>.+)",
+            r"(?:it'?s|it is|the folder is|folder is)\s+(?P<path>.+)",
+            r"(?:in|on)\s+(?P<path>.+)",
+        )
+        for pattern in patterns:
+            match = re.fullmatch(pattern, candidate, flags=re.IGNORECASE)
+            if match:
+                candidate = match.group("path").strip()
+                break
+
+        candidate = re.sub(r"^(?:the|my)\s+", "", candidate, flags=re.IGNORECASE)
+        candidate = re.sub(r"\s+folder$", "", candidate, flags=re.IGNORECASE)
+        if candidate.casefold() in {
+            "desktop",
+            "documents",
+            "downloads",
+            "pictures",
+            "music",
+            "videos",
+        }:
+            return resolve_user_path(candidate)
+
+        try:
+            return resolve_user_path(candidate)
+        except ValueError:
+            return None
+
     async def handle_text(
         self,
         text: str,
@@ -639,12 +1120,28 @@ class AssistantOrchestrator:
                 message="Interpreting command",
             )
         )
+        if self._pending_clarification_follow_up is not None:
+            folded = text.strip().casefold()
+            if not folded.startswith("forget"):
+                return await self._handle_pending_clarification_follow_up(
+                    correlation_id,
+                    text,
+                    self._pending_clarification_follow_up,
+                    session_id=session_id,
+                    invoked_by_voice=invoked_by_voice,
+                )
+            self._pending_clarification_follow_up = None
         route_started = time.perf_counter()
         route = self.router.route(text)
         route_duration = (time.perf_counter() - route_started) * 1000
         intent = route.intent
         self._record_routing(correlation_id, intent, route_duration)
         if route.clarification:
+            self._set_pending_clarification(
+                original_text=text,
+                clarification=route.clarification,
+                session_id=session_id,
+            )
             response = Response(
                 display_text=route.clarification,
                 speech_text=route.clarification,
@@ -789,6 +1286,7 @@ class AssistantOrchestrator:
             self._session_context.clear()
             self._file_candidates = ()
             self._selected_file = None
+            self._pending_clarification_follow_up = None
             response = Response(
                 display_text="I forgot the current session context.",
                 speech_text="Session context cleared.",
@@ -836,6 +1334,7 @@ class AssistantOrchestrator:
         resolved_intent = self._resolve_file_placeholders(
             intent,
             session_id=session_id,
+            request_text=text,
         )
         if isinstance(resolved_intent, Response):
             response = self._with_reasoning_steps(
@@ -923,6 +1422,11 @@ class AssistantOrchestrator:
         invoked_by_voice: bool,
     ) -> tuple[Response, ExecutionOutcome]:
         if decision.clarification:
+            self._set_pending_clarification(
+                original_text=text,
+                clarification=decision.clarification,
+                session_id=session_id,
+            )
             response = Response(
                 display_text=decision.clarification,
                 speech_text=decision.clarification,

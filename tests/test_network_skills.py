@@ -218,6 +218,51 @@ def test_codex_exec_prefers_user_profile_binary(monkeypatch, tmp_path):
     assert CodexExecClient()._resolve_executable() == str(new)
 
 
+def test_codex_exec_uses_current_noninteractive_approval_config(monkeypatch):
+    commands = []
+
+    class FakeProcess:
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def communicate(self, timeout=None):
+            return "ok", ""
+
+    def fake_popen(command, **_kwargs):
+        commands.append(command)
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        "assistant.integrations.web.CodexExecClient._resolve_executable",
+        lambda _self: "codex",
+    )
+    monkeypatch.setattr("assistant.integrations.web.subprocess.Popen", fake_popen)
+
+    result = CodexExecClient()._ask_sync(
+        "Review this",
+        model="gpt-5.3-codex",
+        cancel_event=None,
+    )
+
+    assert result == "ok"
+    assert commands == [
+        [
+            "codex",
+            "exec",
+            "-c",
+            'approval_policy="never"',
+            "--sandbox",
+            "read-only",
+            "--model",
+            "gpt-5.3-codex",
+            "Review this",
+        ]
+    ]
+    assert "--ask-for-approval" not in commands[0]
+
+
 class ReversibleCipher:
     def encrypt(self, plaintext: str) -> bytes:
         return plaintext[::-1].encode()

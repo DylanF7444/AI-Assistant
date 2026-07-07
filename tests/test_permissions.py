@@ -158,3 +158,23 @@ def test_file_whitelist_limits_write_delete_permission_scope(tmp_path: Path):
 
     assert manager.authorize(call(str(allowed)), inside_required).allowed
     assert not manager.authorize(call(str(outside)), outside_required).allowed
+
+
+def test_file_access_policy_store_preserves_wildcard_rule(tmp_path: Path):
+    _, _, store = build_with_policy(tmp_path)
+
+    added = store.update_entry(
+        list_name="whitelist",
+        access="read",
+        path="*",
+        add=True,
+    )
+    removed = store.update_entry(
+        list_name="whitelist",
+        access="read",
+        path="*",
+        add=False,
+    )
+
+    assert added.read_whitelist == ("*",)
+    assert removed.read_whitelist == ()
