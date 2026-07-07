@@ -3,7 +3,7 @@ from jsonschema import ValidationError
 
 from assistant.language.planner import InvalidPlannerResponse, LocalPlanner, SkillRetriever
 from assistant.skills.builtin import CalculatorSkill, DateTimeSkill, LauncherSkill, TimerSkill
-from assistant.skills.windows import ApplicationWindowSkill
+from assistant.skills.windows import ApplicationWindowSkill, FileOperationSkill
 from assistant.storage.database import Database
 from assistant.storage.knowledge import KnowledgeBaseStore
 
@@ -484,6 +484,69 @@ async def test_complex_planner_returns_schema_valid_steps():
         "core.datetime",
     ]
     assert "You may return plan" in provider.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_complex_planner_treats_single_action_plan_arguments_as_skill():
+    provider = FakeProvider(
+        {
+            "disposition": "plan",
+            "skill_id": "",
+            "arguments": {
+                "operation": "copy",
+                "source": "${user_desktop}/AddTextFile.txt",
+                "destination": "${assistant_folder}",
+            },
+            "answer": None,
+            "confidence": 0.95,
+            "clarification": None,
+        }
+    )
+    planner = LocalPlanner(
+        provider,
+        SkillRetriever((FileOperationSkill(object()).manifest,)),
+    )
+
+    decision = await planner.plan_decision(
+        "Add a text file to the assistant folder on my desktop"
+    )
+
+    assert decision.intent.name == "windows.file_operation"
+    assert decision.intent.arguments == {
+        "operation": "copy",
+        "source": "${user_desktop}/AddTextFile.txt",
+        "destination": "${assistant_folder}",
+    }
+    assert decision.steps == ()
+
+
+@pytest.mark.asyncio
+async def test_complex_planner_treats_single_step_plan_as_skill():
+    provider = FakeProvider(
+        {
+            "disposition": "plan",
+            "skill_id": "",
+            "arguments": {},
+            "answer": None,
+            "confidence": 0.9,
+            "clarification": None,
+            "steps": [
+                {
+                    "step_id": "math",
+                    "skill_id": "core.calculator",
+                    "arguments": {"expression": "2 + 2"},
+                    "depends_on": [],
+                },
+            ],
+        }
+    )
+    planner = LocalPlanner(provider, SkillRetriever((CalculatorSkill.manifest,)))
+
+    decision = await planner.plan_decision("calculate 2 plus 2")
+
+    assert decision.intent.name == "core.calculator"
+    assert decision.intent.arguments == {"expression": "2 + 2"}
+    assert decision.steps == ()
 
 
 @pytest.mark.asyncio

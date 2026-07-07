@@ -301,6 +301,19 @@ def test_notepad_file_wording_routes_to_notepad_launcher(text):
     assert result.intent.arguments == {"application": "notepad"}
 
 
+def test_create_text_file_in_assistant_folder_routes_without_planner():
+    result = DeterministicRouter().route(
+        "Add a text file to the assistant folder in my desktop"
+    )
+
+    assert not result.needs_llm
+    assert result.intent.name == "windows.file_operation"
+    assert result.intent.arguments == {
+        "operation": "create_text",
+        "source": "${assistant_folder}/my_text_file.txt",
+    }
+
+
 @pytest.mark.parametrize(
     ("text", "url"),
     [

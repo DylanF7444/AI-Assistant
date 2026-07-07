@@ -40,6 +40,15 @@ arguments.
 Use the cancel hotkey or tray Cancel command to stop capture, transcription,
 planning, speech, plans, and active jobs. File deletion uses the Recycle Bin
 where Windows supports it. Dry-run previews are available for file operations.
+File search results are numbered; after searching, use commands such as
+`select 1`, `open it`, `copy it to Desktop`, or `delete it` to act on the
+selected result with exact-path permissions and confirmation.
+
+Settings also includes file access policy lists. Read and write/delete
+blacklists block matching paths even when a permission grant exists; whitelists
+limit filesystem access to the configured paths. You can review or change the
+same lists by command, for example `show file access policy`, after granting
+the settings permission.
 
 Some navigation commands use the current desktop context. If a browser is
 focused, or if a browser window is visible on any display, commands like these
@@ -77,6 +86,8 @@ Install only signed skill packages from trusted publishers. Updates that add a
 capability require renewed review. The Skills tab supports enable, disable,
 update, uninstall, and health checks. Macros can compose registered skills but
 do not bypass any step's validation, permission, confirmation, or audit.
+See `docs/FEATURES.md` for the current built-in feature catalog and project
+status.
 
 The Diagnostics tab reports model, microphone, GPU, audio, database, and skill
 health with recovery guidance. Exported diagnostic bundles redact secrets and

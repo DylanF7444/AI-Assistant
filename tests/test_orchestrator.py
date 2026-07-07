@@ -19,6 +19,7 @@ from assistant.language.planner import (
     PlannedIntentStep,
     PlannerDecision,
 )
+from assistant.policy.permissions import GrantType
 from assistant.storage.database import HistoryRow
 from assistant.windows.adapters import WindowsApplicationAdapter
 
@@ -272,6 +273,133 @@ async def test_sensitive_action_is_denied_without_permission(settings):
     assert outcome.permission_requests
     assert "media.control" in response.display_text
     assert "Grant Permission" in response.display_text
+
+
+@pytest.mark.asyncio
+async def test_file_search_select_and_contextual_copy_preview(settings, tmp_path):
+    container = build_container(settings)
+    documents = tmp_path / "documents"
+    destination_folder = tmp_path / "desktop"
+    documents.mkdir()
+    destination_folder.mkdir()
+    source = documents / "resume.txt"
+    source.write_text("resume")
+    destination = destination_folder / source.name
+    container.permissions.grant(
+        user_id="local-user",
+        skill_id="windows.file_search",
+        capability="filesystem.read",
+        grant_type=GrantType.ALWAYS,
+        targets=(str(documents.resolve()),),
+    )
+
+    response, outcome = await container.orchestrator.handle_text(
+        f"find resume in {documents}"
+    )
+    assert outcome.result.status == ResultStatus.COMPLETED
+    assert "1." in response.display_text
+    assert str(source.resolve()) in response.display_text
+
+    response, _ = await container.orchestrator.handle_text("select 1")
+    assert str(source.resolve()) in response.display_text
+
+    response, outcome = await container.orchestrator.handle_text(
+        f"copy it to {destination_folder}"
+    )
+    assert response.response_type == ResponseType.PERMISSION
+    assert len(outcome.permission_requests) == 2
+    assert [request.scope.capability for request in outcome.permission_requests] == [
+        "filesystem.read",
+        "filesystem.write",
+    ]
+    assert outcome.permission_requests[0].scope.targets == (str(source.resolve()),)
+    assert outcome.permission_requests[1].scope.targets == (
+        str(destination.resolve()),
+    )
+
+    for request in outcome.permission_requests:
+        container.permissions.grant(
+            user_id=request.call.permission_context.user_id,
+            skill_id=request.call.skill_id,
+            capability=request.scope.capability,
+            grant_type=GrantType.ALWAYS,
+            targets=request.scope.targets,
+            correlation_id=str(request.call.correlation_id),
+        )
+    continued = await container.engine.prepare(outcome.call)
+    assert continued.confirmation is not None
+    assert continued.confirmation.exact_action == (
+        f"Copy {source.resolve()} to {destination.resolve()}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_text_file_in_assistant_folder_requests_exact_write_permission(settings):
+    container = build_container(settings)
+    desktop = settings.data_dir.parent / "Desktop"
+    target_folder = desktop / "PROJECTS" / "Assistant"
+    target_folder.mkdir(parents=True)
+    target = target_folder / "my_text_file.txt"
+    container.permissions.grant(
+        user_id="local-user",
+        skill_id="windows.file_search",
+        capability="filesystem.read",
+        grant_type=GrantType.ALWAYS,
+        targets=(str(desktop.resolve()),),
+    )
+
+    response, outcome = await container.orchestrator.handle_text(
+        "Add a text file to the assistant folder in my desktop"
+    )
+
+    assert response.response_type == ResponseType.PERMISSION
+    assert outcome.call.skill_id == "windows.file_operation"
+    assert outcome.call.arguments["operation"] == "create_text"
+    assert len(outcome.permission_requests) == 1
+    request = outcome.permission_requests[0]
+    assert request.scope.capability == "filesystem.write"
+    assert request.scope.targets == (str(target.resolve()),)
+
+
+@pytest.mark.asyncio
+async def test_create_text_file_in_assistant_folder_asks_where_to_search(settings):
+    container = build_container(settings)
+
+    response, outcome = await container.orchestrator.handle_text(
+        "Add a text file to the assistant folder in my desktop"
+    )
+
+    assert response.response_type == ResponseType.CLARIFICATION
+    assert "allowed to search" in response.display_text
+    assert outcome.result is None
+
+
+@pytest.mark.asyncio
+async def test_selected_file_delete_requires_exact_write_confirmation(settings, tmp_path):
+    container = build_container(settings)
+    source = tmp_path / "resume.txt"
+    source.write_text("resume")
+    container.orchestrator.remember_file_candidates([str(source.resolve())])
+    await container.orchestrator.handle_text("select 1")
+
+    response, outcome = await container.orchestrator.handle_text("delete it")
+    assert response.response_type == ResponseType.PERMISSION
+    assert len(outcome.permission_requests) == 1
+    request = outcome.permission_requests[0]
+    assert request.scope.capability == "filesystem.write"
+    assert request.scope.targets == (str(source.resolve()),)
+    container.permissions.grant(
+        user_id=request.call.permission_context.user_id,
+        skill_id=request.call.skill_id,
+        capability=request.scope.capability,
+        grant_type=GrantType.ALWAYS,
+        targets=request.scope.targets,
+        correlation_id=str(request.call.correlation_id),
+    )
+
+    continued = await container.engine.prepare(outcome.call)
+    assert continued.confirmation is not None
+    assert continued.confirmation.exact_action == f"Delete {source.resolve()}"
     assert response.response_type == ResponseType.PERMISSION
     assert response.severity == "warning"
 

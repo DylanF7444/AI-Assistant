@@ -279,6 +279,8 @@ class LocalPlanner:
                         intent=self._skill_intent_from_output(output, skills)
                     )
                 if disposition == "plan":
+                    if intent := self._single_intent_from_plan_output(output, skills):
+                        return PlannerDecision(intent=intent)
                     return PlannerDecision(
                         steps=self._planned_steps_from_output(output, skills)
                     )
@@ -482,6 +484,29 @@ class LocalPlanner:
                 )
             )
         return tuple(planned)
+
+    def _single_intent_from_plan_output(
+        self, output: dict[str, Any], skills: tuple[SkillManifest, ...]
+    ) -> Intent | None:
+        raw_steps = output.get("steps")
+        if isinstance(raw_steps, list):
+            if len(raw_steps) != 1:
+                return None
+            raw_step = raw_steps[0]
+            step_output = {
+                "disposition": "skill",
+                "skill_id": raw_step["skill_id"],
+                "arguments": dict(raw_step["arguments"]),
+                "answer": output.get("answer"),
+                "confidence": output["confidence"],
+                "clarification": output.get("clarification"),
+            }
+            return self._skill_intent_from_output(step_output, skills)
+        if output.get("arguments"):
+            skill_output = dict(output)
+            skill_output["disposition"] = "skill"
+            return self._skill_intent_from_output(skill_output, skills)
+        return None
 
     @classmethod
     def _reject_placeholder_arguments(cls, value: Any) -> None:

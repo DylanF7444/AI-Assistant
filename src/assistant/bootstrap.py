@@ -10,6 +10,7 @@ from assistant.events import EventBus
 from assistant.execution.engine import ExecutionEngine
 from assistant.orchestrator import AssistantOrchestrator
 from assistant.policy.confirmations import ConfirmationManager
+from assistant.policy.file_access import FileAccessPolicyStore
 from assistant.policy.permissions import PermissionManager
 from assistant.router.deterministic import DeterministicRouter
 from assistant.skills.builtin import (
@@ -17,6 +18,7 @@ from assistant.skills.builtin import (
     ClipboardSkill,
     DateTimeSkill,
     FileSearchSkill,
+    FileAccessPolicySkill,
     HelpSkill,
     LauncherSkill,
     MediaSkill,
@@ -90,6 +92,7 @@ class Container:
     metrics: MetricsStore
     aliases: AliasStore
     knowledge_bases: KnowledgeBaseStore
+    file_access_policy: FileAccessPolicyStore
 
 
 def _decode_trusted_keys(encoded_keys: dict[str, str]) -> dict[str, bytes]:
@@ -108,10 +111,13 @@ def _settings_with_persisted_values(settings: Settings, database: Database) -> S
     )
 
 
-def _register_core_skills(registry: SkillRegistry) -> None:
+def _register_core_skills(
+    registry: SkillRegistry, file_access_policy: FileAccessPolicyStore
+) -> None:
     registry.register(TimerSkill())
     registry.register(DateTimeSkill())
     registry.register(CalculatorSkill())
+    registry.register(FileAccessPolicySkill(file_access_policy))
 
 
 def _register_windows_skills(
@@ -203,7 +209,8 @@ def build_container(settings: Settings | None = None) -> Container:
     )
     audit = AuditStore(database)
     metrics = MetricsStore(database)
-    permissions = PermissionManager(database, audit)
+    file_access_policy = FileAccessPolicyStore(SettingsStore(database))
+    permissions = PermissionManager(database, audit, file_access_policy)
     aliases = AliasStore(database)
     knowledge_bases = KnowledgeBaseStore(database)
     secret_vault = SecretVault(settings.data_dir / "secrets")
@@ -211,7 +218,7 @@ def build_container(settings: Settings | None = None) -> Container:
         settings.data_dir / "skills",
         trusted_signing_keys=_decode_trusted_keys(settings.trusted_skill_keys),
     )
-    _register_core_skills(registry)
+    _register_core_skills(registry, file_access_policy)
     _register_windows_skills(registry, aliases)
     _register_productivity_skills(registry, database)
     _register_network_skills(registry, settings, secret_vault)
@@ -324,4 +331,5 @@ def build_container(settings: Settings | None = None) -> Container:
         metrics=metrics,
         aliases=aliases,
         knowledge_bases=knowledge_bases,
+        file_access_policy=file_access_policy,
     )

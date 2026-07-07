@@ -180,6 +180,41 @@ class ExecutionEngine:
             self.permissions.authorize(check_call, scopes, consume_once=False)
             for check_call, scopes in checks
         ]
+        if any(decision.policy_denied for decision in decisions):
+            denied = tuple(
+                scope
+                for decision in decisions
+                for scope in decision.policy_denied
+            )
+            await self.events.publish(
+                PipelineEvent(
+                    correlation_id=call.correlation_id,
+                    state=PipelineState.ERROR,
+                    message=denied[0].reason,
+                    data={
+                        "policy_denied": [
+                            scope.model_dump() for scope in denied
+                        ]
+                    },
+                )
+            )
+            return ExecutionOutcome(
+                result=SkillResult(
+                    status=ResultStatus.DENIED,
+                    summary="The file access policy blocked this action.",
+                    error=SkillError(
+                        code="file_policy_denied",
+                        message=denied[0].reason,
+                        recoverable=False,
+                    ),
+                    data={
+                        "policy_denied": [
+                            scope.model_dump() for scope in denied
+                        ]
+                    },
+                ),
+                call=call,
+            )
         missing = tuple(
             PermissionGrantRequest(call=check_call, scope=scope)
             for (check_call, _), decision in zip(checks, decisions, strict=True)
@@ -280,6 +315,29 @@ class ExecutionEngine:
                 self.permissions.authorize(check_call, scopes, consume_once=False)
                 for check_call, scopes in checks
             ]
+            policy_denied = tuple(
+                scope
+                for decision in decisions
+                for scope in decision.policy_denied
+            )
+            if policy_denied:
+                return ExecutionOutcome(
+                    result=SkillResult(
+                        status=ResultStatus.DENIED,
+                        summary="The file access policy blocked this plan.",
+                        error=SkillError(
+                            code="file_policy_denied",
+                            message=policy_denied[0].reason,
+                            recoverable=False,
+                        ),
+                        data={
+                            "policy_denied": [
+                                scope.model_dump() for scope in policy_denied
+                            ]
+                        },
+                    ),
+                    call=call,
+                )
             for (check_call, _), decision in zip(checks, decisions, strict=True):
                 permission_requests.extend(
                     PermissionGrantRequest(call=check_call, scope=scope)
@@ -399,6 +457,15 @@ class ExecutionEngine:
             self.permissions.authorize(check_call, scopes)
             for check_call, scopes in skill.permission_checks(call)
         ]
+        policy_denied = tuple(
+            scope for decision in decisions for scope in decision.policy_denied
+        )
+        if policy_denied:
+            return self._failure(
+                "file_policy_denied",
+                policy_denied[0].reason,
+                ResultStatus.DENIED,
+            )
         if any(not decision.allowed for decision in decisions):
             return self._failure(
                 "permission_denied",

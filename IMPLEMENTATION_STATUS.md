@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated June 5, 2026. The product checklist is the specification; this file
+Updated July 5, 2026. The product checklist is the specification; this file
 records implementation evidence and release gates that cannot be honestly
 closed by source code or unit tests alone.
 
@@ -31,10 +31,12 @@ closed by source code or unit tests alone.
   idempotency, safe-only retries, dependency-aware plans, and emergency stop.
 - Windows skills for approved application launch/window control, media/volume,
   settings, notifications, file search/open/copy/move/rename/recycle,
-  clipboard, restricted input automation, sensitive-field detection, and
+  numbered file-result selection, contextual selected-file actions, clipboard,
+  restricted input automation, sensitive-field detection, device control, and
   process inspection/termination.
 - Timer, reminder/alarm, tasks, notes, conversion, calculator, help,
-  diagnostics, registered application aliases, and permission-composed macros.
+  diagnostics, file access allow/block policy, registered application aliases,
+  and permission-composed macros.
 - Local Piper TTS adapter with voice/model selection, speed, volume, output
   device, phrase caching, playback suppression, cancellation, and text fallback.
 - Signed/expiring device contracts, pairing, replay prevention, revocation,
@@ -46,10 +48,16 @@ closed by source code or unit tests alone.
   model components, per-user install, startup task, upgrade preservation, and
   data/model uninstall choices. Install, packaged launch, and file-removal
   uninstall behavior were exercised on the target non-administrator account.
-- 78 automated tests pass, including a 1,500-command sustained run, bounded
+- 324 automated tests pass, including a 1,500-command sustained run, bounded
   idempotency state, database integrity, isolated outbound-network denial,
   migration, update traversal, permission, confirmation, Windows adapter,
   device, model, audio, planner, and end-to-end text command coverage.
+
+## Current Feature Catalog
+
+The normalized built-in feature catalog is maintained in `docs/FEATURES.md`.
+That file records each implemented built-in skill by area, stable skill ID,
+status, risk level, permissions, and user-facing capability.
 
 ## Measured Target Evidence
 

@@ -1,62 +1,65 @@
 # Personal Device Assistant Feature Checklist
 
+Status updated July 5, 2026. Implemented built-in skills are listed in the
+normalized catalog at `docs/FEATURES.md`.
+
 ## Core Assistant Behavior
 
-- [ ] Accept natural language commands
+- [X] Accept natural language commands
 - [ ] Answer general questions
-- [ ] Maintain conversational context
-- [ ] Ask clarifying questions when needed
+- [X] Maintain conversational context
+- [X] Ask clarifying questions when needed
 - [ ] Summarize long text
 - [ ] Rewrite or improve text
 - [ ] Translate text
 - [ ] Explain concepts simply
 - [ ] Provide step-by-step instructions
 - [ ] Remember user preferences with permission
-- [ ] Forget saved information on request
-- [ ] Work offline for basic local tasks where possible
-- [ ] Clearly explain what it can and cannot do
+- [X] Forget saved information on request
+- [X] Work offline for basic local tasks where possible
+- [X] Clearly explain what it can and cannot do
 
 ## Voice Interaction
 
-- [ ] Wake word or push-to-talk activation
-- [ ] Speech-to-text input
-- [ ] Text-to-speech output
-- [ ] Interruptible speech playback
-- [ ] Adjustable voice speed
-- [ ] Adjustable voice volume
-- [ ] Multiple voice options
-- [ ] Hands-free mode
-- [ ] Confirmation before sensitive actions
+- [X] Wake word or push-to-talk activation
+- [X] Speech-to-text input
+- [X] Text-to-speech output
+- [X] Interruptible speech playback
+- [X] Adjustable voice speed
+- [X] Adjustable voice volume
+- [X] Multiple voice options
+- [X] Hands-free mode
+- [X] Confirmation before sensitive actions
 
 ## Device Control
 
 - [X] Open applications
 - [X] Close applications
 - [X] Switch between open apps (focus, minimize)
-- [ ] Search installed apps
+- [X] Search installed apps
 - [X] Adjust system volume
 - [X] Mute/unmute audio
-- [ ] Adjust screen brightness
+- [X] Adjust screen brightness
 - [X] Toggle Wi-Fi
 - [X] Toggle Bluetooth
-- [ ] Toggle dark/light mode
+- [X] Toggle dark/light mode
 - [X] Lock the device
-- [ ] Restart the device with confirmation
-- [ ] Shut down the device with confirmation
-- [ ] Show battery status
-- [ ] Show storage status
-- [ ] Show memory/CPU usage
-- [ ] Manage connected devices
+- [X] Restart the device with confirmation
+- [X] Shut down the device with confirmation
+- [X] Show battery status
+- [X] Show storage status
+- [X] Show memory/CPU usage
+- [X] Manage connected devices
 
 ## File Management
 
-- [ ] Search files by name
+- [X] Search files by name
 - [ ] Search files by content
-- [ ] Open files
-- [ ] Move files
-- [ ] Copy files
-- [ ] Rename files
-- [ ] Delete files with confirmation
+- [X] Open files
+- [X] Move files
+- [X] Copy files
+- [X] Rename files
+- [X] Delete files with confirmation
 - [ ] Restore files from trash/recycle bin
 - [ ] Create folders
 - [ ] Organize files by type/date/project
@@ -70,8 +73,8 @@
 
 ## Notes and Writing
 
-- [ ] Create notes
-- [ ] Search notes
+- [X] Create notes
+- [X] Search notes
 - [ ] Edit notes
 - [ ] Categorize notes
 - [ ] Tag notes
@@ -105,15 +108,15 @@
 
 ## Tasks and Reminders
 
-- [ ] Create tasks
+- [X] Create tasks
 - [ ] Edit tasks
-- [ ] Complete tasks
-- [ ] Delete tasks
+- [X] Complete tasks
+- [X] Delete tasks
 - [ ] Set due dates
 - [ ] Set priorities
 - [ ] Create recurring reminders
 - [ ] Create location-based reminders if supported
-- [ ] Create time-based reminders
+- [X] Create time-based reminders
 - [ ] Group tasks by project
 - [ ] Show overdue tasks
 - [ ] Show today’s tasks
@@ -150,8 +153,8 @@
 
 ## Web and Search
 
-- [ ] Search the web
-- [ ] Open websites
+- [X] Search the web
+- [X] Open websites
 - [ ] Summarize webpages
 - [ ] Extract key facts from webpages
 - [ ] Compare search results
@@ -165,19 +168,19 @@
 
 ## Local App Automation
 
-- [ ] Control browser
+- [X] Control browser
 - [ ] Control file explorer
 - [ ] Control terminal
 - [ ] Control code editor
-- [ ] Control media player
+- [X] Control media player
 - [ ] Control office apps
 - [ ] Control notes apps
 - [ ] Control calendar apps
-- [ ] Use keyboard shortcuts
-- [ ] Click UI elements
-- [ ] Type into focused fields
+- [X] Use keyboard shortcuts
+- [X] Click UI elements
+- [X] Type into focused fields
 - [ ] Read visible screen content
-- [ ] Perform multi-step workflows
+- [X] Perform multi-step workflows
 - [ ] Recover from failed UI actions
 
 ## Coding and Development
@@ -254,9 +257,9 @@
 ## Media
 
 - [ ] Play music
-- [ ] Pause/resume media
-- [ ] Skip tracks
-- [ ] Adjust media volume
+- [X] Pause/resume media
+- [X] Skip tracks
+- [X] Adjust media volume
 - [ ] Search local media files
 - [ ] Open photos
 - [ ] Organize photos
@@ -282,8 +285,8 @@
 
 ## Personal Knowledge Base
 
-- [ ] Save useful facts
-- [ ] Search saved knowledge
+- [X] Save useful facts
+- [X] Search saved knowledge
 - [ ] Link notes, files, and tasks
 - [ ] Summarize personal projects
 - [ ] Track project status
@@ -295,9 +298,9 @@
 
 ## Automation
 
-- [ ] Create one-time automations
+- [X] Create one-time automations
 - [ ] Create recurring automations
-- [ ] Run automations manually
+- [X] Run automations manually
 - [ ] Pause automations
 - [ ] Delete automations
 - [ ] Trigger automations by time
@@ -308,11 +311,11 @@
 - [ ] Monitor folders
 - [ ] Monitor websites
 - [ ] Notify user when conditions are met
-- [ ] Require confirmation for risky automation actions
+- [X] Require confirmation for risky automation actions
 
 ## Notifications
 
-- [ ] Show desktop notifications
+- [X] Show desktop notifications
 - [ ] Read notifications aloud
 - [ ] Summarize missed notifications
 - [ ] Prioritize important notifications
@@ -324,18 +327,18 @@
 
 ## Privacy and Security
 
-- [ ] Ask permission before accessing sensitive data
+- [X] Ask permission before accessing sensitive data
 - [ ] Ask confirmation before sending messages/emails
-- [ ] Ask confirmation before deleting files
+- [X] Ask confirmation before deleting files
 - [ ] Ask confirmation before purchases/payments
 - [ ] Ask confirmation before installing software
-- [ ] Redact sensitive data in logs
-- [ ] Store credentials securely
-- [ ] Support local-only mode
-- [ ] Show what data was accessed
-- [ ] Allow user to revoke permissions
-- [ ] Allow user to delete stored memory
-- [ ] Avoid reading private content unnecessarily
+- [X] Redact sensitive data in logs
+- [X] Store credentials securely
+- [X] Support local-only mode
+- [X] Show what data was accessed
+- [X] Allow user to revoke permissions
+- [X] Allow user to delete stored memory
+- [X] Avoid reading private content unnecessarily
 - [ ] Detect suspicious links/files
 - [ ] Warn before running unknown scripts
 
@@ -347,22 +350,22 @@
 - [ ] Connect notes apps
 - [ ] Connect task apps
 - [ ] Connect messaging apps
-- [ ] Connect smart home devices
+- [X] Connect smart home devices
 - [ ] Connect music services
 - [ ] Connect browser profiles
 - [ ] Connect developer tools
-- [ ] Manage integration permissions
+- [X] Manage integration permissions
 - [ ] Handle expired logins gracefully
 
 ## Smart Home and External Devices
 
-- [ ] Control lights
-- [ ] Control thermostat
-- [ ] Control plugs
-- [ ] Control speakers
-- [ ] Control displays
-- [ ] Check device status
-- [ ] Run smart home scenes
+- [X] Control lights
+- [X] Control thermostat
+- [X] Control plugs
+- [X] Control speakers
+- [X] Control displays
+- [X] Check device status
+- [X] Run smart home scenes
 - [ ] Schedule smart home actions
 - [ ] Confirm security-sensitive actions
 - [ ] Notify when devices go offline
@@ -373,8 +376,8 @@
 - [ ] Block distracting apps/sites
 - [ ] Track work sessions
 - [ ] Suggest breaks
-- [ ] Set timers
-- [ ] Set alarms
+- [X] Set timers
+- [X] Set alarms
 - [ ] Track habits
 - [ ] Generate daily plans
 - [ ] Generate weekly reviews
@@ -425,50 +428,50 @@
 
 ## Reliability
 
-- [ ] Handle failed commands gracefully
-- [ ] Retry temporary failures
-- [ ] Explain why an action failed
-- [ ] Keep logs of actions
-- [ ] Let user inspect recent actions
-- [ ] Undo reversible actions
-- [ ] Avoid duplicate actions
-- [ ] Detect missing permissions
-- [ ] Detect offline state
-- [ ] Continue long-running tasks in background
-- [ ] Notify when long-running tasks finish
+- [X] Handle failed commands gracefully
+- [X] Retry temporary failures
+- [X] Explain why an action failed
+- [X] Keep logs of actions
+- [X] Let user inspect recent actions
+- [X] Undo reversible actions
+- [X] Avoid duplicate actions
+- [X] Detect missing permissions
+- [X] Detect offline state
+- [X] Continue long-running tasks in background
+- [X] Notify when long-running tasks finish
 
 ## User Experience
 
 - [ ] Quick command palette
-- [ ] Chat interface
-- [ ] Voice interface
-- [ ] System tray/menu bar access
-- [ ] Keyboard shortcut activation
-- [ ] Clear action confirmations
-- [ ] Clear progress indicators
-- [ ] Clear error messages
+- [X] Chat interface
+- [X] Voice interface
+- [X] System tray/menu bar access
+- [X] Keyboard shortcut activation
+- [X] Clear action confirmations
+- [X] Clear progress indicators
+- [X] Clear error messages
 - [ ] Customizable assistant name
 - [ ] Customizable personality/tone
-- [ ] Customizable permissions
-- [ ] Customizable notification behavior
+- [X] Customizable permissions
+- [X] Customizable notification behavior
 - [ ] Onboarding flow
-- [ ] Settings screen
-- [ ] Activity history
-- [ ] Help screen
+- [X] Settings screen
+- [X] Activity history
+- [X] Help screen
 
 ## Advanced Reasoning
 
-- [ ] Break complex goals into steps
-- [ ] Track progress across steps
-- [ ] Use tools when needed
-- [ ] Decide when to ask for confirmation
+- [X] Break complex goals into steps
+- [X] Track progress across steps
+- [X] Use tools when needed
+- [X] Decide when to ask for confirmation
 - [ ] Compare multiple options
 - [ ] Explain tradeoffs
-- [ ] Create plans
+- [X] Create plans
 - [ ] Revise plans as conditions change
 - [ ] Detect contradictions in user requests
-- [ ] Identify missing information
-- [ ] Maintain long-running project context
+- [X] Identify missing information
+- [X] Maintain long-running project context
 
 ## Safety Boundaries
 
@@ -477,25 +480,25 @@
 - [ ] Refuse malware creation
 - [ ] Refuse unauthorized access
 - [ ] Refuse surveillance without consent
-- [ ] Warn about risky commands
-- [ ] Require explicit approval for irreversible actions
-- [ ] Separate user-approved actions from autonomous actions
-- [ ] Log sensitive actions
+- [X] Warn about risky commands
+- [X] Require explicit approval for irreversible actions
+- [X] Separate user-approved actions from autonomous actions
+- [X] Log sensitive actions
 - [ ] Provide safe alternatives when refusing
 
 ## Testing and Verification
 
-- [ ] Unit tests for core assistant logic
-- [ ] Integration tests for tools
+- [X] Unit tests for core assistant logic
+- [X] Integration tests for tools
 - [ ] UI tests for main workflows
 - [ ] Voice input tests
 - [ ] Voice output tests
-- [ ] Permission tests
-- [ ] File operation tests
-- [ ] Automation tests
-- [ ] Failure recovery tests
-- [ ] Offline mode tests
-- [ ] Privacy/security tests
-- [ ] Performance tests
+- [X] Permission tests
+- [X] File operation tests
+- [X] Automation tests
+- [X] Failure recovery tests
+- [X] Offline mode tests
+- [X] Privacy/security tests
+- [X] Performance tests
 - [ ] Cross-platform tests if supported
 - [ ] Manual end-to-end test checklist

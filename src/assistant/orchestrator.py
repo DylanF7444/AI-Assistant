@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import sys
 import time
 import urllib.error
 from collections import deque
 from collections.abc import Callable
+from pathlib import Path
 from uuid import UUID, uuid4
 
 from assistant.contracts import (
@@ -38,6 +40,7 @@ from assistant.response import response_from_result
 from assistant.router.deterministic import DeterministicRouter
 from assistant.storage.history import HistoryStore
 from assistant.storage.database import MetricsStore
+from assistant.windows.paths import ASSISTANT_FOLDER_TOKEN, resolve_user_path
 
 logger = logging.getLogger("assistant.orchestrator")
 
@@ -75,6 +78,13 @@ class AssistantOrchestrator:
         self._active_correlation: UUID | None = None
         self._active_stt: STTProvider | None = None
         self._session_context: deque[dict[str, str]] = deque(maxlen=6)
+        self._file_candidates: tuple[str, ...] = ()
+        self._selected_file: str | None = None
+
+    def remember_file_candidates(self, paths: tuple[str, ...] | list[str]) -> None:
+        self._file_candidates = tuple(str(path) for path in paths)
+        if len(self._file_candidates) == 1:
+            self._selected_file = self._file_candidates[0]
 
     def _remember_interaction(
         self,
@@ -119,6 +129,8 @@ class AssistantOrchestrator:
         add_session_context: bool = True,
     ) -> tuple[Response, ExecutionOutcome]:
         final_outcome = outcome or ExecutionOutcome()
+        if final_outcome.result:
+            self._remember_file_result(final_outcome.result)
         self._print_terminal_debug(
             correlation_id,
             request_text,
@@ -438,6 +450,179 @@ class AssistantOrchestrator:
             return outcome.result.status.value
         return "none"
 
+    def _remember_file_result(self, result: Any) -> None:
+        paths = result.data.get("paths") if isinstance(result.data, dict) else None
+        if isinstance(paths, list) and all(isinstance(path, str) for path in paths):
+            self.remember_file_candidates(tuple(paths))
+
+    def _select_file_candidate(self, selector: str) -> Response:
+        if not self._file_candidates:
+            return Response(
+                display_text="There are no file search results to select from.",
+                speech_text="There are no file results to select from.",
+                response_type=ResponseType.CLARIFICATION,
+                severity="warning",
+                speak=True,
+            )
+        index = self._selection_index(selector)
+        if index == -1:
+            index = len(self._file_candidates) - 1
+        if index is None or index < 0 or index >= len(self._file_candidates):
+            return Response(
+                display_text=(
+                    "Select one of the numbered file results, for example "
+                    "\"select 1\"."
+                ),
+                speech_text="Please select one of the numbered file results.",
+                response_type=ResponseType.CLARIFICATION,
+                severity="warning",
+                speak=True,
+            )
+        self._selected_file = self._file_candidates[index]
+        return Response(
+            display_text=f"Selected file:\n{self._selected_file}",
+            speech_text="Selected.",
+            response_type=ResponseType.STATUS,
+            severity="success",
+            speak=True,
+        )
+
+    @staticmethod
+    def _selection_index(selector: str) -> int | None:
+        value = selector.strip().casefold()
+        words = {
+            "first": 1,
+            "one": 1,
+            "second": 2,
+            "two": 2,
+            "third": 3,
+            "three": 3,
+            "fourth": 4,
+            "four": 4,
+            "fifth": 5,
+            "five": 5,
+            "last": -1,
+        }
+        if value in words:
+            number = words[value]
+            return number - 1 if number > 0 else -1
+        if match := re.fullmatch(r"(\d+)(?:st|nd|rd|th)?", value):
+            return int(match.group(1)) - 1
+        return None
+
+    def _resolve_file_placeholders(
+        self, intent: Intent, *, session_id: str
+    ) -> Intent | Response:
+        if intent.name != "windows.file_operation":
+            return intent
+        arguments = dict(intent.arguments)
+        if arguments.get("source") == "${selected_file}":
+            if not self._selected_file:
+                return Response(
+                    display_text=(
+                        "Select one of the file search results before using "
+                        "that file."
+                    ),
+                    speech_text="Select a file first.",
+                    response_type=ResponseType.CLARIFICATION,
+                    severity="warning",
+                    speak=True,
+                )
+            arguments["source"] = self._selected_file
+        destination = arguments.get("destination")
+        if isinstance(destination, str):
+            if "${selected_file_name}" in destination:
+                selected_name = Path(arguments["source"]).name
+                destination = destination.replace(
+                    "${selected_file_name}", selected_name
+                )
+            resolved_destination = self._resolve_named_folder_path(
+                destination,
+                session_id=session_id,
+            )
+            if isinstance(resolved_destination, Response):
+                return resolved_destination
+            destination = resolved_destination
+            try:
+                arguments["destination"] = str(resolve_user_path(destination))
+            except ValueError:
+                arguments["destination"] = destination
+        if "source" in arguments:
+            source = arguments["source"]
+            if isinstance(source, str):
+                resolved_source = self._resolve_named_folder_path(
+                    source,
+                    session_id=session_id,
+                )
+                if isinstance(resolved_source, Response):
+                    return resolved_source
+                source = resolved_source
+            arguments["source"] = str(resolve_user_path(source))
+        return intent.model_copy(update={"arguments": arguments})
+
+    def _resolve_named_folder_path(
+        self, value: str, *, session_id: str
+    ) -> str | Response:
+        folded = value.casefold()
+        token = ASSISTANT_FOLDER_TOKEN.casefold()
+        if folded != token and not (
+            folded.startswith(token + "/") or folded.startswith(token + "\\")
+        ):
+            return value
+        folder = self._find_allowed_folder("assistant", session_id=session_id)
+        if folder is None:
+            return Response(
+                display_text=(
+                    "I could not find an Assistant folder inside the folders I "
+                    "am already allowed to search. Which folder am I allowed to "
+                    "search?"
+                ),
+                speech_text=(
+                    "I could not find an Assistant folder in the folders I can "
+                    "search. Where am I allowed to search?"
+                ),
+                response_type=ResponseType.CLARIFICATION,
+                severity="warning",
+                speak=True,
+            )
+        suffix = value[len(ASSISTANT_FOLDER_TOKEN) :].lstrip("/\\")
+        return str((folder / suffix).resolve())
+
+    def _find_allowed_folder(self, folder_name: str, *, session_id: str) -> Path | None:
+        roots = self.engine.permissions.allowed_targets(
+            user_id="local-user",
+            capability="filesystem.read",
+            session_id=session_id,
+        )
+        matches: list[Path] = []
+        for root_text in roots:
+            root = Path(root_text)
+            if not root.exists():
+                continue
+            if root.is_file():
+                root = root.parent
+            matches.extend(self._matching_directories(root, folder_name))
+        if not matches:
+            return None
+        return sorted(
+            set(matches),
+            key=lambda path: (len(path.parts), str(path)),
+        )[0]
+
+    @staticmethod
+    def _matching_directories(root: Path, folder_name: str) -> list[Path]:
+        needle = folder_name.casefold()
+        matches: list[Path] = []
+        try:
+            if root.name.casefold() == needle:
+                matches.append(root.resolve())
+            for path in root.rglob("*"):
+                if path.is_dir() and path.name.casefold() == needle:
+                    matches.append(path.resolve())
+        except (OSError, PermissionError):
+            return matches
+        return matches
+
     async def handle_text(
         self,
         text: str,
@@ -602,6 +787,8 @@ class AssistantOrchestrator:
             )
         if intent.name == "control.forget":
             self._session_context.clear()
+            self._file_candidates = ()
+            self._selected_file = None
             response = Response(
                 display_text="I forgot the current session context.",
                 speech_text="Session context cleared.",
@@ -630,6 +817,42 @@ class AssistantOrchestrator:
                 session_id=session_id,
                 invoked_by_voice=invoked_by_voice,
             )
+        if intent.name == "control.file_select":
+            response = self._select_file_candidate(intent.arguments["selector"])
+            response = self._with_reasoning_steps(
+                response,
+                request_text=text,
+                intent=intent,
+                outcome_label="selected",
+            )
+            return await self._finish_interaction(
+                correlation_id,
+                text,
+                response,
+                intent_name=intent.name,
+                outcome_label="selected",
+                invoked_by_voice=invoked_by_voice,
+            )
+        resolved_intent = self._resolve_file_placeholders(
+            intent,
+            session_id=session_id,
+        )
+        if isinstance(resolved_intent, Response):
+            response = self._with_reasoning_steps(
+                resolved_intent,
+                request_text=text,
+                intent=intent,
+                outcome_label="needs_clarification",
+            )
+            return await self._finish_interaction(
+                correlation_id,
+                text,
+                response,
+                intent_name=intent.name,
+                outcome_label="needs_clarification",
+                invoked_by_voice=invoked_by_voice,
+            )
+        intent = resolved_intent
         call = SkillCall(
             skill_id=intent.name,
             arguments=intent.arguments,

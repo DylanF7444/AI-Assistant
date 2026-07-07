@@ -108,6 +108,17 @@ class DeterministicRouter:
                     source="deterministic",
                 )
             )
+        if match := re.fullmatch(
+            r"(?:select|choose|pick) (?:file |result |item |number )?(.+)", routed
+        ):
+            return RouteResult(
+                Intent(
+                    name="control.file_select",
+                    arguments={"selector": match.group(1).strip()},
+                    confidence=0.95,
+                    source="rule",
+                )
+            )
         if match := re.fullmatch(r"save that (.+)", routed):
             return RouteResult(
                 Intent(
@@ -380,6 +391,20 @@ class DeterministicRouter:
                     source="rule",
                 )
             )
+        if re.fullmatch(
+            r"(?:show|list) (?:the )?file (?:access )?(?:policy|lists|blacklist|whitelist|blacklists|whitelists)",
+            routed,
+        ):
+            return RouteResult(
+                Intent(
+                    name="core.file_access_policy",
+                    arguments={"operation": "list"},
+                    confidence=0.96,
+                    source="rule",
+                )
+            )
+        if policy_intent := self._route_file_access_policy(routed):
+            return RouteResult(policy_intent)
         audio_target = r"(?:(?:my|the) )?(?:(?:system|device|computer) )?(?:volume|sound|audio)"
         if match := re.fullmatch(
             rf"(?:set|adjust) {audio_target}(?: to)? (.+?)(?: percent|%)?",
@@ -474,6 +499,60 @@ class DeterministicRouter:
                     source="rule",
                 )
             )
+        if match := re.fullmatch(
+            r"copy (?:it|that|the selected file|this file)(?: to| onto| into) (.+)",
+            routed,
+        ):
+            return RouteResult(
+                Intent(
+                    name="windows.file_operation",
+                    arguments={
+                        "operation": "copy",
+                        "source": "${selected_file}",
+                        "destination": f"{match.group(1).strip()}/${{selected_file_name}}",
+                    },
+                    confidence=0.95,
+                    source="rule",
+                )
+            )
+        if re.fullmatch(r"delete (?:it|that|the selected file|this file)", routed):
+            return RouteResult(
+                Intent(
+                    name="windows.file_operation",
+                    arguments={"operation": "delete", "source": "${selected_file}"},
+                    confidence=0.95,
+                    source="rule",
+                )
+            )
+        if re.fullmatch(r"open (?:it|that|the selected file|this file)", routed):
+            return RouteResult(
+                Intent(
+                    name="windows.file_operation",
+                    arguments={"operation": "open", "source": "${selected_file}"},
+                    confidence=0.95,
+                    source="rule",
+                )
+            )
+        if match := re.fullmatch(
+            r"(?:add|create|make) (?:a |an )?(?:new |blank )?(?:text|txt) file"
+            r"(?: (?:named|called) ([a-z0-9][a-z0-9_. -]*))?"
+            r" (?:to|in|inside|into) (.+)",
+            routed,
+        ):
+            target = self._file_destination_folder(match.group(2))
+            if target:
+                filename = self._text_filename(match.group(1))
+                return RouteResult(
+                    Intent(
+                        name="windows.file_operation",
+                        arguments={
+                            "operation": "create_text",
+                            "source": f"{target}/{filename}",
+                        },
+                        confidence=0.94,
+                        source="rule",
+                    )
+                )
         if match := re.fullmatch(
             r"disconnect (?:from )?(?:my |the )?(?:wi-?fi|wifi|wireless)(?: network)?(?: (.+))?",
             routed,
@@ -1022,6 +1101,58 @@ class DeterministicRouter:
         )
 
     @staticmethod
+    def _route_file_access_policy(routed: str) -> Intent | None:
+        access_words = r"read|reading|write|writing|delete|deleting|write/delete"
+        list_words = r"blacklist|whitelist"
+        if match := re.fullmatch(
+            rf"(?P<operation>add|remove) (?P<path>.+) "
+            rf"(?:to|from) (?:the )?(?P<access>{access_words}) "
+            rf"(?P<list_name>{list_words})",
+            routed,
+        ):
+            operation = match.group("operation")
+            return Intent(
+                name="core.file_access_policy",
+                arguments={
+                    "operation": operation,
+                    "path": match.group("path").strip(),
+                    "access": DeterministicRouter._policy_access(
+                        match.group("access")
+                    ),
+                    "list_name": match.group("list_name"),
+                },
+                confidence=0.94,
+                source="rule",
+            )
+        if match := re.fullmatch(
+            rf"(?P<list_name>{list_words}) (?P<path>.+) "
+            rf"for (?P<access>{access_words})(?: access)?",
+            routed,
+        ):
+            return Intent(
+                name="core.file_access_policy",
+                arguments={
+                    "operation": "add",
+                    "path": match.group("path").strip(),
+                    "access": DeterministicRouter._policy_access(
+                        match.group("access")
+                    ),
+                    "list_name": match.group("list_name"),
+                },
+                confidence=0.94,
+                source="rule",
+            )
+        return None
+
+    @staticmethod
+    def _policy_access(value: str) -> str:
+        if value in {"write", "writing", "write/delete"}:
+            return "write"
+        if value in {"delete", "deleting"}:
+            return "delete"
+        return "read"
+
+    @staticmethod
     def _percent(text: str) -> int | None:
         cleaned = re.sub(r"\b(?:percent|per cent)\b|%", "", text.strip().casefold()).strip()
         if match := re.fullmatch(r"\d{1,3}", cleaned):
@@ -1388,6 +1519,29 @@ class DeterministicRouter:
                 if website and self._website_url(website):
                     return name, website
         return None
+
+    @staticmethod
+    def _file_destination_folder(target: str) -> str | None:
+        target = re.sub(r"^(?:a|an|the|my)\s+", "", target.strip().casefold())
+        assistant_folder_patterns = {
+            "assistant folder",
+            "assistant folder on desktop",
+            "assistant folder on my desktop",
+            "assistant folder on the desktop",
+            "assistant folder in desktop",
+            "assistant folder in my desktop",
+            "assistant folder in the desktop",
+        }
+        if target in assistant_folder_patterns:
+            return "${assistant_folder}"
+        return target
+
+    @staticmethod
+    def _text_filename(raw_name: str | None) -> str:
+        name = (raw_name or "my_text_file.txt").strip().strip(".")
+        if not name.casefold().endswith(".txt"):
+            name = f"{name}.txt"
+        return re.sub(r'[<>:"/\\|?*]+', "_", name)
 
     @staticmethod
     def _monitor_index(text: str) -> int | None:

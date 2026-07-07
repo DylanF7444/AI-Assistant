@@ -123,6 +123,7 @@ class ClipboardAdapter(Protocol):
 
 class FileSystemAdapter(Protocol):
     async def search(self, root: Path, query: str, limit: int) -> list[Path]: ...
+    async def create_text_file(self, path: Path, content: str) -> Path: ...
     async def copy(self, source: Path, destination: Path) -> Path: ...
     async def move(self, source: Path, destination: Path) -> Path: ...
     async def delete_to_recycle_bin(self, path: Path) -> None: ...
@@ -678,6 +679,11 @@ class LocalFileSystemAdapter:
 
     async def copy(self, source: Path, destination: Path) -> Path:
         return Path(shutil.copy2(source, destination))
+
+    async def create_text_file(self, path: Path, content: str) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return path
 
     async def move(self, source: Path, destination: Path) -> Path:
         return Path(shutil.move(source, destination))

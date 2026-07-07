@@ -23,8 +23,10 @@ from assistant.contracts import (
     SkillManifest,
     SkillResult,
 )
+from assistant.policy.file_access import FileAccessPolicyStore
 from assistant.skills.base import Skill
 from assistant.skills.base import ApplicationRegistrationRequired
+from assistant.windows.paths import resolve_user_path
 from assistant.windows.adapters import (
     ApplicationAdapter,
     ClipboardAdapter,
@@ -229,12 +231,18 @@ class FileSearchSkill(Skill):
 
     async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult:
         args = self.validate(call.arguments)
-        paths = await self.adapter.search(Path(args.root), args.query, args.limit)
+        paths = await self.adapter.search(resolve_user_path(args.root), args.query, args.limit)
         values = [str(path) for path in paths]
+        display = f"Found {len(values)} matching item{'s' if len(values) != 1 else ''}."
+        if values:
+            display += "\n" + "\n".join(
+                f"{index}. {path}" for index, path in enumerate(values, 1)
+            )
         return SkillResult(
             status=ResultStatus.COMPLETED,
             summary=f"Found {len(values)} matching item{'s' if len(values) != 1 else ''}.",
             data=FileSearchOutput(paths=values).model_dump(),
+            display_text=display,
         )
 
     def required_permissions(self, call: SkillCall):
@@ -242,10 +250,128 @@ class FileSearchSkill(Skill):
         return (
             PermissionScope(
                 capability="filesystem.read",
-                targets=(str(Path(args.root).resolve()),),
+                targets=(str(resolve_user_path(args.root)),),
                 reason="Search filenames inside the selected folder.",
             ),
         )
+
+
+class FileAccessPolicyInput(BaseModel):
+    operation: Literal["add", "remove", "list"]
+    list_name: Literal["whitelist", "blacklist"] | None = None
+    access: Literal["read", "write", "delete", "write/delete"] | None = None
+    path: str | None = None
+
+
+class FileAccessPolicyOutput(BaseModel):
+    read_whitelist: list[str]
+    read_blacklist: list[str]
+    write_whitelist: list[str]
+    write_blacklist: list[str]
+
+
+class FileAccessPolicySkill(Skill):
+    input_model = FileAccessPolicyInput
+    output_model = FileAccessPolicyOutput
+
+    def __init__(self, store: FileAccessPolicyStore) -> None:
+        self.store = store
+        self.manifest = manifest(
+            skill_id="core.file_access_policy",
+            display_name="File Access Policy",
+            description="List or change file read and write/delete allow and block lists.",
+            input_model=self.input_model,
+            output_model=self.output_model,
+            permissions=(
+                PermissionScope(
+                    capability="settings.get",
+                    targets=("file_access_policy",),
+                    reason="Read file access policy lists.",
+                ),
+                PermissionScope(
+                    capability="settings.set",
+                    targets=("file_access_policy",),
+                    reason="Change file access policy lists.",
+                ),
+            ),
+            risk=RiskLevel.HIGH,
+        )
+
+    def required_permissions(self, call: SkillCall):
+        args = self.validate(call.arguments)
+        capability = "settings.get" if args.operation == "list" else "settings.set"
+        reason = (
+            "Read file access policy lists."
+            if args.operation == "list"
+            else "Change file access policy lists."
+        )
+        return (
+            PermissionScope(
+                capability=capability,
+                targets=("file_access_policy",),
+                reason=reason,
+            ),
+        )
+
+    def risk_for(self, call: SkillCall) -> RiskLevel:
+        return (
+            RiskLevel.MEDIUM
+            if self.validate(call.arguments).operation == "list"
+            else RiskLevel.HIGH
+        )
+
+    async def preview(self, call: SkillCall) -> str:
+        args = self.validate(call.arguments)
+        if args.operation == "list":
+            return "Show file access policy lists"
+        if not args.list_name or not args.access or not args.path:
+            raise ValueError("add/remove requires list_name, access, and path")
+        verb = "Add" if args.operation == "add" else "Remove"
+        preposition = "to" if args.operation == "add" else "from"
+        return (
+            f"{verb} {resolve_user_path(args.path)} {preposition} the "
+            f"{args.access} {args.list_name}"
+        )
+
+    async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult:
+        args = self.validate(call.arguments)
+        if args.operation == "list":
+            policy = self.store.get()
+            summary = "File access policy lists loaded."
+        else:
+            if not args.list_name or not args.access or not args.path:
+                raise ValueError("add/remove requires list_name, access, and path")
+            policy = self.store.update_entry(
+                list_name=args.list_name,
+                access=args.access,
+                path=args.path,
+                add=args.operation == "add",
+            )
+            summary = "File access policy updated."
+        data = FileAccessPolicyOutput(**policy.to_mapping()).model_dump()
+        return SkillResult(
+            status=ResultStatus.COMPLETED,
+            summary=summary,
+            data=data,
+            display_text=_format_file_policy(data),
+        )
+
+
+def _format_file_policy(data: dict[str, list[str]]) -> str:
+    labels = {
+        "read_whitelist": "Read whitelist",
+        "read_blacklist": "Read blacklist",
+        "write_whitelist": "Write/delete whitelist",
+        "write_blacklist": "Write/delete blacklist",
+    }
+    lines = ["File access policy:"]
+    for key, label in labels.items():
+        values = data.get(key) or []
+        lines.append(f"{label}:")
+        lines.extend(f"- {value}" for value in values)
+        if not values:
+            lines.append("- None")
+    return "\n".join(lines)
 
 
 class LaunchInput(BaseModel):

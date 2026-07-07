@@ -28,12 +28,14 @@ from assistant.windows.adapters import (
     WindowsSettingsAdapter,
 )
 from assistant.windows.process_names import normalize_process_name
+from assistant.windows.paths import resolve_user_path
 
 
 class FileOperationInput(BaseModel):
-    operation: Literal["copy", "move", "rename", "delete", "open"]
+    operation: Literal["copy", "move", "rename", "delete", "open", "create_text"]
     source: str
     destination: str | None = None
+    content: str = ""
     dry_run: bool = False
 
     @model_validator(mode="after")
@@ -59,7 +61,10 @@ class FileOperationSkill(Skill):
         self.manifest = manifest(
             skill_id="windows.file_operation",
             display_name="File Operation",
-            description="Copy, move, rename, recycle, or open an approved file.",
+            description=(
+                "Create text files, copy, move, rename, recycle, or open an "
+                "approved file."
+            ),
             input_model=self.input_model,
             output_model=self.output_model,
             permissions=(),
@@ -69,7 +74,15 @@ class FileOperationSkill(Skill):
 
     def required_permissions(self, call: SkillCall):
         args = self.validate(call.arguments)
-        source = str(Path(args.source).resolve())
+        source = str(resolve_user_path(args.source))
+        if args.operation == "create_text":
+            return (
+                PermissionScope(
+                    capability="filesystem.write",
+                    targets=(source,),
+                    reason="Create this exact approved text file.",
+                ),
+            )
         if args.operation == "open":
             return (
                 PermissionScope(
@@ -78,9 +91,23 @@ class FileOperationSkill(Skill):
                     reason="Open this exact approved file.",
                 ),
             )
+        if args.operation == "copy":
+            assert args.destination
+            return (
+                PermissionScope(
+                    capability="filesystem.read",
+                    targets=(source,),
+                    reason="Copy from this exact displayed source file.",
+                ),
+                PermissionScope(
+                    capability="filesystem.write",
+                    targets=(str(resolve_user_path(args.destination)),),
+                    reason="Copy to this exact displayed destination.",
+                ),
+            )
         targets = [source]
         if args.destination:
-            targets.append(str(Path(args.destination).resolve()))
+            targets.append(str(resolve_user_path(args.destination)))
         return (
             PermissionScope(
                 capability="filesystem.write",
@@ -94,6 +121,7 @@ class FileOperationSkill(Skill):
         return {
             "open": RiskLevel.MEDIUM,
             "copy": RiskLevel.MEDIUM,
+            "create_text": RiskLevel.MEDIUM,
             "move": RiskLevel.HIGH,
             "rename": RiskLevel.HIGH,
             "delete": RiskLevel.HIGH,
@@ -101,15 +129,23 @@ class FileOperationSkill(Skill):
 
     async def preview(self, call: SkillCall) -> str:
         args = self.validate(call.arguments)
-        destination = f" to {Path(args.destination).resolve()}" if args.destination else ""
+        destination = (
+            f" to {resolve_user_path(args.destination)}" if args.destination else ""
+        )
         prefix = "Preview only: " if args.dry_run else ""
-        return f"{prefix}{args.operation.title()} {Path(args.source).resolve()}{destination}"
+        return (
+            f"{prefix}{_file_operation_label(args.operation)} "
+            f"{resolve_user_path(args.source)}{destination}"
+        )
 
     async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult:
         args = self.validate(call.arguments)
-        source = Path(args.source).resolve()
-        destination = Path(args.destination).resolve() if args.destination else None
-        if not source.exists():
+        source = resolve_user_path(args.source)
+        destination = resolve_user_path(args.destination) if args.destination else None
+        if args.operation == "create_text":
+            if source.exists():
+                raise FileExistsError(source)
+        elif not source.exists():
             raise FileNotFoundError(source)
         data = FileOperationOutput(
             operation=args.operation,
@@ -124,7 +160,12 @@ class FileOperationSkill(Skill):
                 data=data,
             )
         rollback_token = None
-        if args.operation == "copy":
+        if args.operation == "create_text":
+            created = await self.adapter.create_text_file(source, args.content)
+            rollback_token = json.dumps(
+                {"operation": "remove_created_file", "path": str(created)}
+            )
+        elif args.operation == "copy":
             assert destination
             copied = await self.adapter.copy(source, destination)
             rollback_token = json.dumps(
@@ -146,18 +187,22 @@ class FileOperationSkill(Skill):
             await self.adapter.open(source)
         return SkillResult(
             status=ResultStatus.COMPLETED,
-            summary=f"{args.operation.title()} completed.",
+            summary=f"{_file_operation_label(args.operation)} completed.",
             data=data,
             rollback_token=rollback_token,
         )
 
     async def rollback(self, token: str) -> SkillResult:
         payload = json.loads(token)
-        if payload["operation"] == "remove_copy":
+        if payload["operation"] in {"remove_copy", "remove_created_file"}:
             path = Path(payload["path"])
             if path.exists():
                 await self.adapter.delete_to_recycle_bin(path)
-            summary = "Copied file moved to the Recycle Bin."
+            summary = (
+                "Created file moved to the Recycle Bin."
+                if payload["operation"] == "remove_created_file"
+                else "Copied file moved to the Recycle Bin."
+            )
         elif payload["operation"] == "move_back":
             await self.adapter.move(
                 Path(payload["source"]), Path(payload["destination"])
@@ -170,6 +215,10 @@ class FileOperationSkill(Skill):
             summary=summary,
             data={"operation": "rollback"},
         )
+
+
+def _file_operation_label(operation: str) -> str:
+    return "Create text file" if operation == "create_text" else operation.title()
 
 
 class WindowInput(BaseModel):

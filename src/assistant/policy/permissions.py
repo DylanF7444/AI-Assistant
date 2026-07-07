@@ -9,6 +9,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from assistant.contracts import PermissionScope, SkillCall
+from assistant.policy.file_access import FileAccessPolicyStore
 from assistant.storage.database import AuditStore, Database, PermissionRow
 
 
@@ -23,6 +24,7 @@ class GrantType(StrEnum):
 class PermissionDecision:
     allowed: bool
     missing: tuple[PermissionScope, ...] = ()
+    policy_denied: tuple[PermissionScope, ...] = ()
     reason: str = ""
 
 
@@ -40,9 +42,15 @@ def _target_in_scope(requested: str, allowed: str) -> bool:
 
 
 class PermissionManager:
-    def __init__(self, database: Database, audit: AuditStore) -> None:
+    def __init__(
+        self,
+        database: Database,
+        audit: AuditStore,
+        file_policy_store: FileAccessPolicyStore | None = None,
+    ) -> None:
         self.database = database
         self.audit = audit
+        self.file_policy_store = file_policy_store
 
     def grant(
         self,
@@ -136,6 +144,44 @@ class PermissionManager:
                 for row in rows
             ]
 
+    def allowed_targets(
+        self,
+        *,
+        user_id: str,
+        capability: str,
+        session_id: str | None = None,
+    ) -> tuple[str, ...]:
+        now = datetime.now(UTC)
+        policy = self.file_policy_store.get() if self.file_policy_store else None
+        targets: list[str] = []
+        with self.database.session() as session:
+            rows = list(
+                session.scalars(
+                    select(PermissionRow).where(
+                        PermissionRow.user_id == user_id,
+                        PermissionRow.capability == capability,
+                        PermissionRow.effect == "allow",
+                    )
+                )
+            )
+        for row in rows:
+            if row.expires_at is not None and _aware(row.expires_at) <= now:
+                continue
+            if (
+                row.grant_type == GrantType.SESSION.value
+                and row.session_id != session_id
+            ):
+                continue
+            for target in json.loads(row.targets_json):
+                if target in {"", "*"}:
+                    continue
+                if policy and policy.denial_reason(capability, target):
+                    continue
+                normalized = str(Path(target).expanduser().resolve())
+                if normalized not in targets:
+                    targets.append(normalized)
+        return tuple(targets)
+
     def authorize(
         self,
         call: SkillCall,
@@ -144,7 +190,9 @@ class PermissionManager:
         consume_once: bool = True,
     ) -> PermissionDecision:
         missing: list[PermissionScope] = []
+        policy_denied: list[PermissionScope] = []
         now = datetime.now(UTC)
+        policy = self.file_policy_store.get() if self.file_policy_store else None
         with self.database.session() as session:
             rows = list(
                 session.scalars(
@@ -155,6 +203,23 @@ class PermissionManager:
                 )
             )
             for scope in required:
+                policy_reason = None
+                if policy and scope.capability in {
+                    "filesystem.read",
+                    "filesystem.write",
+                }:
+                    for target in scope.targets:
+                        policy_reason = policy.denial_reason(
+                            scope.capability, target
+                        )
+                        if policy_reason:
+                            break
+                if policy_reason:
+                    denied_scope = scope.model_copy(
+                        update={"reason": policy_reason}
+                    )
+                    policy_denied.append(denied_scope)
+                    continue
                 applicable = [
                     row
                     for row in rows
@@ -183,10 +248,16 @@ class PermissionManager:
                         break
                 if not allowed:
                     missing.append(scope)
+        reason = ""
+        if policy_denied:
+            reason = policy_denied[0].reason
+        elif missing:
+            reason = "Required permission has not been granted"
         decision = PermissionDecision(
-            allowed=not missing,
+            allowed=not missing and not policy_denied,
             missing=tuple(missing),
-            reason="" if not missing else "Required permission has not been granted",
+            policy_denied=tuple(policy_denied),
+            reason=reason,
         )
         self.audit.record(
             correlation_id=str(call.correlation_id),
@@ -194,7 +265,12 @@ class PermissionManager:
             skill_id=call.skill_id,
             decision="allowed" if decision.allowed else "denied",
             permissions=[scope.capability for scope in required],
-            details={"missing": [scope.model_dump() for scope in missing]},
+            details={
+                "missing": [scope.model_dump() for scope in missing],
+                "policy_denied": [
+                    scope.model_dump() for scope in policy_denied
+                ],
+            },
         )
         return decision
 

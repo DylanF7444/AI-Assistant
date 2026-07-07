@@ -85,6 +85,16 @@ def run_desktop(container: Container) -> int:
         }
         return labels.get(value, value)
 
+    def policy_lines(values: Any) -> str:
+        return "\n".join(str(value) for value in values or ())
+
+    def parse_policy_lines(value: str) -> tuple[str, ...]:
+        return tuple(
+            line.strip()
+            for line in value.splitlines()
+            if line.strip()
+        )
+
     confirmation_prompt_actions = (
         ("risk:low", "All low-risk actions", False),
         ("risk:medium", "All medium-risk actions", True),
@@ -1479,6 +1489,27 @@ def run_desktop(container: Container) -> int:
             self.setting_hide_sensitive.setChecked(
                 container.settings.hide_sensitive_display
             )
+            file_policy = container.file_access_policy.get()
+            self.setting_read_whitelist = QTextEdit(
+                policy_lines(file_policy.read_whitelist)
+            )
+            self.setting_read_blacklist = QTextEdit(
+                policy_lines(file_policy.read_blacklist)
+            )
+            self.setting_write_whitelist = QTextEdit(
+                policy_lines(file_policy.write_whitelist)
+            )
+            self.setting_write_blacklist = QTextEdit(
+                policy_lines(file_policy.write_blacklist)
+            )
+            for field in (
+                self.setting_read_whitelist,
+                self.setting_read_blacklist,
+                self.setting_write_whitelist,
+                self.setting_write_blacklist,
+            ):
+                field.setMinimumHeight(70)
+                field.setPlaceholderText("One path per line")
             self.setting_confirmation_prompts = QTableWidget(
                 len(confirmation_prompt_actions), 2
             )
@@ -1545,6 +1576,10 @@ def run_desktop(container: Container) -> int:
             form.addRow("Show request breakdown", self.setting_show_reasoning)
             form.addRow("Terminal debug output", self.setting_terminal_debug)
             form.addRow("Hide sensitive display results", self.setting_hide_sensitive)
+            form.addRow("Read whitelist", self.setting_read_whitelist)
+            form.addRow("Read blacklist", self.setting_read_blacklist)
+            form.addRow("Write/delete whitelist", self.setting_write_whitelist)
+            form.addRow("Write/delete blacklist", self.setting_write_blacklist)
             form.addRow("Require yes/no prompts", self.setting_confirmation_prompts)
             form.addRow(save)
             self.setting_speech.currentTextChanged.connect(
@@ -1658,6 +1693,24 @@ def run_desktop(container: Container) -> int:
             )
             SettingsStore(container.database).set(
                 "application_settings", persisted
+            )
+            container.file_access_policy.set(
+                container.file_access_policy.get().__class__.from_mapping(
+                    {
+                        "read_whitelist": parse_policy_lines(
+                            self.setting_read_whitelist.toPlainText()
+                        ),
+                        "read_blacklist": parse_policy_lines(
+                            self.setting_read_blacklist.toPlainText()
+                        ),
+                        "write_whitelist": parse_policy_lines(
+                            self.setting_write_whitelist.toPlainText()
+                        ),
+                        "write_blacklist": parse_policy_lines(
+                            self.setting_write_blacklist.toPlainText()
+                        ),
+                    }
+                )
             )
             vault = SecretVault(validated.data_dir / "secrets")
             for name, field in (
@@ -2540,6 +2593,9 @@ def run_desktop(container: Container) -> int:
             worker.start()
 
         def _show_skill_result(self, result: Any) -> None:
+            paths = result.data.get("paths") if isinstance(result.data, dict) else None
+            if isinstance(paths, list):
+                container.orchestrator.remember_file_candidates(paths)
             response = response_from_result(
                 result,
                 detail=container.orchestrator.response_detail,

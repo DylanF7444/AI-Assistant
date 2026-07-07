@@ -37,6 +37,12 @@ class FakeFiles:
     async def copy(self, source, destination):
         return Path(shutil.copy2(source, destination))
 
+    async def create_text_file(self, path, content):
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return path
+
     async def move(self, source, destination):
         return Path(shutil.move(source, destination))
 
@@ -492,11 +498,13 @@ async def test_file_dry_run_and_scoped_targets(tmp_path):
         },
     )
     result = await skill.execute(skill_call, __import__("asyncio").Event())
-    targets = skill.required_permissions(skill_call)[0].targets
+    scopes = skill.required_permissions(skill_call)
     assert result.status == ResultStatus.COMPLETED
     assert not destination.exists()
-    assert str(source.resolve()) in targets
-    assert str(destination.resolve()) in targets
+    assert scopes[0].capability == "filesystem.read"
+    assert scopes[0].targets == (str(source.resolve()),)
+    assert scopes[1].capability == "filesystem.write"
+    assert scopes[1].targets == (str(destination.resolve()),)
     assert skill.risk_for(skill_call) == RiskLevel.MEDIUM
 
 
@@ -522,6 +530,32 @@ async def test_file_copy_and_reliable_rollback(tmp_path):
     rollback = await skill.rollback(result.rollback_token)
     assert rollback.status == ResultStatus.COMPLETED
     assert not destination.exists()
+
+
+@pytest.mark.asyncio
+async def test_file_create_text_and_reliable_rollback(tmp_path):
+    target = tmp_path / "my_text_file.txt"
+    adapter = FakeFiles()
+    skill = FileOperationSkill(adapter)
+    skill_call = call(
+        "windows.file_operation",
+        {
+            "operation": "create_text",
+            "source": str(target),
+            "content": "hello",
+        },
+    )
+
+    scopes = skill.required_permissions(skill_call)
+    result = await skill.execute(skill_call, __import__("asyncio").Event())
+
+    assert scopes[0].capability == "filesystem.write"
+    assert scopes[0].targets == (str(target.resolve()),)
+    assert skill.risk_for(skill_call) == RiskLevel.MEDIUM
+    assert target.read_text(encoding="utf-8") == "hello"
+    rollback = await skill.rollback(result.rollback_token)
+    assert rollback.status == ResultStatus.COMPLETED
+    assert not target.exists()
 
 
 @pytest.mark.asyncio

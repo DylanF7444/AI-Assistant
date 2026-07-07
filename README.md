@@ -1,5 +1,3 @@
-Start-Process powershell -Verb RunAs -ArgumentList '-NoExit', '-Command', 'cd "C:\Users\Dylan nonadmin\Desktop\PROJECTS\Assistant"; python -m assistant.app'
-
 # Local Assistant
 
 An offline-first Windows desktop assistant with typed skill contracts, explicit
@@ -24,6 +22,7 @@ skills can execute. Every call is schema-validated, checked against scoped
 permissions, and, for sensitive actions, bound to a short-lived immutable
 confirmation request.
 
-See `docs/USER_GUIDE.md` for setup and operation. The remaining documents cover
+See `docs/USER_GUIDE.md` for setup and operation and `docs/FEATURES.md` for
+the current implemented feature catalog. The remaining documents cover
 architecture, offline guarantees, threat model, permissions, compatibility,
 and plugin authoring.
