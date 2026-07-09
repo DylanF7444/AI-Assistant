@@ -6,6 +6,12 @@ from dataclasses import dataclass
 from assistant.config import Settings
 from assistant.audio.capture import AudioCapture
 from assistant.audio.wakeword import OpenWakeWordProvider
+from assistant.context.providers import (
+    DesktopContextProvider,
+    DeviceContextProvider,
+    FileContextProvider,
+    ProcessContextProvider,
+)
 from assistant.events import EventBus
 from assistant.execution.engine import ExecutionEngine
 from assistant.orchestrator import AssistantOrchestrator
@@ -44,6 +50,7 @@ from assistant.skills.windows import (
     WindowsSettingSkill,
 )
 from assistant.skills.macros import MacroSkill
+from assistant.skills.memory import MemorySkill
 from assistant.skills.network import CloudAskSkill, WebFetchSkill, WebSearchSkill
 from assistant.skills.diagnostic import DiagnosticSkill
 from assistant.storage.database import AuditStore, Database, SettingsStore
@@ -51,15 +58,29 @@ from assistant.storage.database import MetricsStore
 from assistant.logging import configure_logging
 from assistant.storage.history import HistoryStore
 from assistant.storage.macros import MacroStore
+from assistant.storage.memory import MemoryStore
 from assistant.storage.aliases import AliasStore
 from assistant.storage.knowledge import KnowledgeBaseStore
 from assistant.storage.secrets import SecretVault
 from assistant.stt.faster_whisper import FasterWhisperProvider
 from assistant.tts.piper import PiperProvider
 from assistant.models import ModelManager
+from assistant.language.embeddings import (
+    FallbackEmbeddingProvider,
+    LexicalFallbackEmbeddingProvider,
+    OllamaEmbeddingProvider,
+)
 from assistant.language.ollama import OllamaProvider
 from assistant.language.planner import LocalPlanner, SkillRetriever
+from assistant.language.retrieval import (
+    KnowledgeSemanticIndexer,
+    MemorySemanticIndexer,
+    SemanticRetriever,
+    SkillSemanticIndexer,
+    WorkflowTemplateSemanticIndexer,
+)
 from assistant.integrations.web import CloudModelClient, WebClient
+from assistant.storage.vector_index import VectorIndex
 from assistant.windows.adapters import (
     LocalFileSystemAdapter,
     WindowsApplicationAdapter,
@@ -93,6 +114,12 @@ class Container:
     aliases: AliasStore
     knowledge_bases: KnowledgeBaseStore
     file_access_policy: FileAccessPolicyStore
+    vector_index: VectorIndex
+    semantic_retriever: SemanticRetriever
+    knowledge_semantic_indexer: KnowledgeSemanticIndexer
+    memory_semantic_indexer: MemorySemanticIndexer
+    workflow_template_indexer: WorkflowTemplateSemanticIndexer
+    memory_store: MemoryStore
 
 
 def _decode_trusted_keys(encoded_keys: dict[str, str]) -> dict[str, bytes]:
@@ -167,12 +194,13 @@ def _register_windows_skills(
 
 
 def _register_productivity_skills(
-    registry: SkillRegistry, database: Database
+    registry: SkillRegistry, database: Database, memory_store: MemoryStore
 ) -> None:
     registry.register(TaskSkill(database))
     registry.register(NoteSkill(database))
     registry.register(ReminderSkill(database))
     registry.register(UnitConversionSkill())
+    registry.register(MemorySkill(memory_store))
 
 
 def _register_network_skills(
@@ -213,6 +241,31 @@ def build_container(settings: Settings | None = None) -> Container:
     permissions = PermissionManager(database, audit, file_access_policy)
     aliases = AliasStore(database)
     knowledge_bases = KnowledgeBaseStore(database)
+    memory_store = MemoryStore(database)
+    vector_index = VectorIndex(database)
+    lexical_embedding_provider = LexicalFallbackEmbeddingProvider()
+    embedding_provider = (
+        FallbackEmbeddingProvider(
+            OllamaEmbeddingProvider(
+                settings.embedding_model,
+                timeout_seconds=settings.embedding_timeout_seconds,
+            ),
+            lexical_embedding_provider,
+        )
+        if settings.embedding_provider == "ollama"
+        else lexical_embedding_provider
+    )
+    semantic_retriever = SemanticRetriever(vector_index, embedding_provider)
+    skill_semantic_indexer = SkillSemanticIndexer(vector_index, embedding_provider)
+    knowledge_semantic_indexer = KnowledgeSemanticIndexer(
+        vector_index,
+        embedding_provider,
+    )
+    memory_semantic_indexer = MemorySemanticIndexer(vector_index, embedding_provider)
+    workflow_template_indexer = WorkflowTemplateSemanticIndexer(
+        vector_index,
+        embedding_provider,
+    )
     secret_vault = SecretVault(settings.data_dir / "secrets")
     registry = SkillRegistry(
         settings.data_dir / "skills",
@@ -220,8 +273,31 @@ def build_container(settings: Settings | None = None) -> Container:
     )
     _register_core_skills(registry, file_access_policy)
     _register_windows_skills(registry, aliases)
-    _register_productivity_skills(registry, database)
+    _register_productivity_skills(registry, database, memory_store)
     _register_network_skills(registry, settings, secret_vault)
+    desktop_adapter = WindowsApplicationAdapter()
+    process_adapter = WindowsProcessAdapter()
+    device_adapter = LocalWindowsDeviceAdapter()
+    file_adapter = LocalFileSystemAdapter()
+    context_providers = (
+        DesktopContextProvider(
+            desktop_adapter,
+            include_open_applications=settings.context_include_open_applications,
+        ),
+        ProcessContextProvider(
+            process_adapter,
+            include_open_applications=settings.context_include_open_applications,
+        ),
+        DeviceContextProvider(
+            device_adapter,
+            include_connected_devices=settings.context_include_connected_devices,
+        ),
+        FileContextProvider(
+            file_adapter,
+            file_policy_store=file_access_policy,
+            allow_file_contents=settings.context_allow_file_contents,
+        ),
+    )
     macro_store = MacroStore(database)
     registry.register(MacroSkill(macro_store, registry, permissions, audit))
     registry.register(HelpSkill(registry.list))
@@ -264,6 +340,14 @@ def build_container(settings: Settings | None = None) -> Container:
         terminal_debug=settings.terminal_debug,
         allow_sensitive_speech=settings.allow_sensitive_speech,
         hide_sensitive_display=settings.hide_sensitive_display,
+        semantic_retriever=semantic_retriever,
+        skill_semantic_indexer=skill_semantic_indexer,
+        knowledge_bases=knowledge_bases,
+        knowledge_semantic_indexer=knowledge_semantic_indexer,
+        memory_store=memory_store,
+        memory_semantic_indexer=memory_semantic_indexer,
+        workflow_template_indexer=workflow_template_indexer,
+        context_providers=context_providers,
     )
     audio_capture = AudioCapture(
         device=settings.audio_input_device,
@@ -332,4 +416,10 @@ def build_container(settings: Settings | None = None) -> Container:
         aliases=aliases,
         knowledge_bases=knowledge_bases,
         file_access_policy=file_access_policy,
+        vector_index=vector_index,
+        semantic_retriever=semantic_retriever,
+        knowledge_semantic_indexer=knowledge_semantic_indexer,
+        memory_semantic_indexer=memory_semantic_indexer,
+        workflow_template_indexer=workflow_template_indexer,
+        memory_store=memory_store,
     )

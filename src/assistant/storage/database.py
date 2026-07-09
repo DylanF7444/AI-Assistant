@@ -9,7 +9,9 @@ from typing import Any
 from sqlalchemy import (
     Boolean,
     DateTime,
+    Float,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -145,8 +147,48 @@ class KnowledgeBaseRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class VectorItemRow(Base):
+    __tablename__ = "vector_items"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    namespace: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    source_id: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    embedding_blob: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    embedding_model: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        UniqueConstraint(
+            "namespace",
+            "source_id",
+            name="uq_vector_item_namespace_source",
+        ),
+    )
+
+
+class MemoryItemRow(Base):
+    __tablename__ = "memory_items"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    key: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(String(100), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        UniqueConstraint(
+            "type",
+            "key",
+            name="uq_memory_type_key",
+        ),
+    )
+
+
 class Database:
-    CURRENT_SCHEMA_VERSION = 4
+    CURRENT_SCHEMA_VERSION = 6
 
     def __init__(self, url: str) -> None:
         self.url = url
@@ -196,6 +238,10 @@ class Database:
                 MetricRow.__table__.create(self.engine, checkfirst=True)
             if version == 3:
                 KnowledgeBaseRow.__table__.create(self.engine, checkfirst=True)
+            if version == 4:
+                VectorItemRow.__table__.create(self.engine, checkfirst=True)
+            if version == 5:
+                MemoryItemRow.__table__.create(self.engine, checkfirst=True)
             version += 1
         session.get(SchemaVersionRow, 1).version = version  # type: ignore[union-attr]
 

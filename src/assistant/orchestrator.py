@@ -13,6 +13,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID, uuid4
 
+from assistant.context.providers import (
+    ContextProvider,
+    PermissionContextProvider,
+    PreferenceContextProvider,
+    SessionContextProvider,
+    SkillContextProvider,
+    collect_context_snapshot,
+)
+from assistant.context.snapshot import ContextSnapshot
 from assistant.contracts import (
     AudioSession,
     ExecutionPlan,
@@ -37,11 +46,21 @@ from assistant.language.planner import (
     PlannedIntentStep,
     PlannerDecision,
 )
+from assistant.language.retrieval import (
+    KnowledgeSemanticIndexer,
+    MemorySemanticIndexer,
+    RetrievedContextItem,
+    SemanticRetriever,
+    SkillSemanticIndexer,
+    WorkflowTemplateSemanticIndexer,
+)
 from assistant.policy.permissions import GrantType
 from assistant.response import response_from_result
 from assistant.router.deterministic import DeterministicRouter
 from assistant.storage.history import HistoryStore
+from assistant.storage.knowledge import KnowledgeBaseStore
 from assistant.storage.database import MetricsStore
+from assistant.storage.memory import MemoryStore
 from assistant.windows.paths import (
     ASSISTANT_FOLDER_TOKEN,
     KNOWN_USER_FOLDERS,
@@ -76,6 +95,14 @@ class AssistantOrchestrator:
         terminal_debug: bool = True,
         allow_sensitive_speech: bool = False,
         hide_sensitive_display: bool = False,
+        semantic_retriever: SemanticRetriever | None = None,
+        skill_semantic_indexer: SkillSemanticIndexer | None = None,
+        knowledge_bases: KnowledgeBaseStore | None = None,
+        knowledge_semantic_indexer: KnowledgeSemanticIndexer | None = None,
+        memory_store: MemoryStore | None = None,
+        memory_semantic_indexer: MemorySemanticIndexer | None = None,
+        workflow_template_indexer: WorkflowTemplateSemanticIndexer | None = None,
+        context_providers: tuple[ContextProvider, ...] = (),
     ) -> None:
         self.router = router
         self.engine = engine
@@ -90,6 +117,14 @@ class AssistantOrchestrator:
         self.terminal_debug = terminal_debug
         self.allow_sensitive_speech = allow_sensitive_speech
         self.hide_sensitive_display = hide_sensitive_display
+        self.semantic_retriever = semantic_retriever
+        self.skill_semantic_indexer = skill_semantic_indexer
+        self.knowledge_bases = knowledge_bases
+        self.knowledge_semantic_indexer = knowledge_semantic_indexer
+        self.memory_store = memory_store
+        self.memory_semantic_indexer = memory_semantic_indexer
+        self.workflow_template_indexer = workflow_template_indexer
+        self.context_providers = context_providers
         self._active_correlation: UUID | None = None
         self._active_stt: STTProvider | None = None
         self._session_context: deque[dict[str, str]] = deque(maxlen=6)
@@ -411,6 +446,119 @@ class AssistantOrchestrator:
             severity="warning",
         )
 
+    async def _context_snapshot_for_planner_goal(
+        self,
+        text: str,
+        *,
+        session_id: str,
+    ) -> ContextSnapshot:
+        providers = [
+            SessionContextProvider(
+                recent_context=lambda: tuple(self._session_context),
+                pending_clarification=self._pending_clarification_context,
+                selected_file=lambda: self._selected_file,
+                file_candidates=lambda: self._file_candidates,
+            ),
+            SkillContextProvider(self.engine.registry),
+            PermissionContextProvider(
+                self.engine.permissions,
+                confirmation_overrides=self.engine.confirmation_overrides,
+            ),
+        ]
+        if self.memory_store is not None:
+            providers.append(PreferenceContextProvider(self.memory_store))
+        providers.extend(self.context_providers)
+        return await collect_context_snapshot(
+            text,
+            session_id=session_id,
+            providers=tuple(providers),
+        )
+
+    def _pending_clarification_context(self) -> dict[str, str] | None:
+        pending = self._pending_clarification_follow_up
+        if pending is None:
+            return None
+        return {
+            "original_text": pending.original_text,
+            "clarification": pending.clarification,
+            "kind": pending.kind,
+        }
+
+    async def _interpret_planner_goal(
+        self,
+        text: str,
+        *,
+        session_id: str,
+    ) -> PlannerDecision | None:
+        assert self.planner is not None
+        retrieved = await self._retrieve_planner_goal_context(text)
+        context = await self._context_snapshot_for_planner_goal(
+            text,
+            session_id=session_id,
+        )
+        interpretation = await self.planner.interpret(
+            text,
+            context=context,
+            retrieved=retrieved,
+        )
+        if interpretation.should_ask_clarification:
+            question = (interpretation.clarification_question or "").strip()
+            if question:
+                return PlannerDecision(clarification=question)
+        if hasattr(self.planner, "plan_from_interpretation"):
+            decision = await self.planner.plan_from_interpretation(
+                text,
+                interpretation=interpretation,
+                context=context,
+                retrieved=retrieved,
+            )
+            return PlannerDecision(
+                intent=decision.intent,
+                steps=decision.steps,
+                clarification=decision.clarification,
+                interpretation=interpretation,
+                context=context,
+                retrieved=retrieved,
+                allow_replanning=True,
+            )
+        return None
+
+    async def _retrieve_planner_goal_context(
+        self,
+        text: str,
+    ) -> tuple[RetrievedContextItem, ...]:
+        if self.semantic_retriever is None:
+            return ()
+        try:
+            if self.skill_semantic_indexer is not None:
+                await self.skill_semantic_indexer.refresh(self.engine.registry)
+            if (
+                self.knowledge_semantic_indexer is not None
+                and self.knowledge_bases is not None
+            ):
+                await self.knowledge_semantic_indexer.refresh(self.knowledge_bases)
+            if (
+                self.memory_semantic_indexer is not None
+                and self.memory_store is not None
+            ):
+                await self.memory_semantic_indexer.refresh(self.memory_store)
+            if self.workflow_template_indexer is not None:
+                await self.workflow_template_indexer.refresh()
+            return await self.semantic_retriever.search(
+                text,
+                namespaces={
+                    "knowledge",
+                    "memory",
+                    "skill",
+                    "skill_example",
+                    "workflow_template",
+                },
+                limit=8,
+            )
+        except Exception as exc:
+            logger.warning("Semantic retrieval failed", exc_info=exc)
+            return ()
+
     def _with_reasoning_steps(
         self,
         response: Response,
@@ -419,6 +567,9 @@ class AssistantOrchestrator:
         intent: Intent | None,
         outcome_label: str,
         step_summaries: tuple[str, ...] = (),
+        interpretation=None,
+        context: ContextSnapshot | None = None,
+        retrieved: tuple[Any, ...] = (),
     ) -> Response:
         if not self.show_reasoning_steps:
             return response
@@ -427,6 +578,38 @@ class AssistantOrchestrator:
             "Request breakdown:",
             f"- Request: {request_text}",
         ]
+        if interpretation is not None:
+            lines.extend(
+                [
+                    f"- User goal: {interpretation.user_goal}",
+                    f"- Request type: {interpretation.request_type}",
+                ]
+            )
+            if interpretation.missing_information:
+                lines.append(
+                    "- Missing information: "
+                    + "; ".join(interpretation.missing_information)
+                )
+            if interpretation.assumptions:
+                lines.append(
+                    "- Assumptions: " + "; ".join(interpretation.assumptions)
+                )
+            if interpretation.relevant_context_keys:
+                lines.append(
+                    "- Relevant context keys: "
+                    + ", ".join(interpretation.relevant_context_keys)
+                )
+        if context is not None:
+            lines.append("- Context keys: " + (", ".join(context.keys()) or "none"))
+        if retrieved:
+            lines.append(
+                "- Retrieved items: "
+                + json.dumps(
+                    [self._retrieved_debug_item(item) for item in retrieved],
+                    sort_keys=True,
+                    default=str,
+                )
+            )
         if intent is None:
             lines.append("- Classification: clarification needed")
         else:
@@ -453,6 +636,28 @@ class AssistantOrchestrator:
         return response.model_copy(
             update={"display_text": response.display_text + "\n".join(lines)}
         )
+
+    @staticmethod
+    def _retrieved_debug_item(item: Any) -> dict[str, Any]:
+        metadata = getattr(item, "metadata", {})
+        safe_metadata = {}
+        if isinstance(metadata, dict):
+            for key in (
+                "skill_id",
+                "template_id",
+                "knowledge_base_id",
+                "type",
+                "key",
+                "requires_clarification",
+            ):
+                if key in metadata:
+                    safe_metadata[key] = metadata[key]
+        return {
+            "namespace": getattr(item, "namespace", ""),
+            "source_id": getattr(item, "source_id", ""),
+            "score": round(float(getattr(item, "score", 0.0)), 3),
+            "metadata": safe_metadata,
+        }
 
     @staticmethod
     def _outcome_label(outcome: ExecutionOutcome) -> str:
@@ -1179,6 +1384,23 @@ class AssistantOrchestrator:
                     invoked_by_voice=invoked_by_voice,
                 )
             try:
+                if (
+                    intent is not None
+                    and intent.name == "planner.goal"
+                    and hasattr(self.planner, "interpret")
+                ):
+                    decision = await self._interpret_planner_goal(
+                        text,
+                        session_id=session_id,
+                    )
+                    if decision is not None:
+                        return await self._handle_planner_decision(
+                            correlation_id,
+                            text,
+                            decision,
+                            session_id=session_id,
+                            invoked_by_voice=invoked_by_voice,
+                        )
                 if hasattr(self.planner, "plan_decision"):
                     decision = await self.planner.plan_decision(
                         text, tuple(self._session_context)
@@ -1437,6 +1659,9 @@ class AssistantOrchestrator:
                 request_text=text,
                 intent=None,
                 outcome_label="needs_clarification",
+                interpretation=decision.interpretation,
+                context=decision.context,
+                retrieved=decision.retrieved,
             )
             return await self._finish_interaction(
                 correlation_id,
@@ -1466,6 +1691,9 @@ class AssistantOrchestrator:
                 request_text=text,
                 intent=None,
                 outcome_label="planner_empty",
+                interpretation=decision.interpretation,
+                context=decision.context,
+                retrieved=decision.retrieved,
             )
             return await self._finish_interaction(
                 correlation_id,
@@ -1475,13 +1703,254 @@ class AssistantOrchestrator:
                 outcome_label="failed",
                 invoked_by_voice=invoked_by_voice,
             )
+        if (
+            decision.allow_replanning
+            and decision.interpretation is not None
+            and decision.context is not None
+            and decision.intent.name not in {"conversation.answer", "conversation.reject"}
+            and hasattr(self.planner, "revise_plan")
+        ):
+            return await self._handle_replanning_intent(
+                correlation_id,
+                text,
+                decision.intent,
+                interpretation=decision.interpretation,
+                context=decision.context,
+                retrieved=decision.retrieved,
+                session_id=session_id,
+                invoked_by_voice=invoked_by_voice,
+            )
         return await self._handle_planner_intent(
             correlation_id,
             text,
             decision.intent,
             session_id=session_id,
             invoked_by_voice=invoked_by_voice,
+            interpretation=decision.interpretation,
+            context=decision.context,
+            retrieved=decision.retrieved,
         )
+
+    async def _handle_replanning_intent(
+        self,
+        correlation_id: UUID,
+        text: str,
+        intent: Intent,
+        *,
+        interpretation,
+        context: ContextSnapshot,
+        retrieved: tuple[RetrievedContextItem, ...],
+        session_id: str,
+        invoked_by_voice: bool,
+        max_iterations: int = 5,
+    ) -> tuple[Response, ExecutionOutcome]:
+        assert self.planner is not None
+        observations: list[dict[str, Any]] = []
+        current_intent = intent
+        last_outcome = ExecutionOutcome()
+        step_summaries: list[str] = []
+        for iteration in range(1, max_iterations + 1):
+            call = SkillCall(
+                skill_id=current_intent.name,
+                caller="planner",
+                arguments=current_intent.arguments,
+                permission_context=PermissionContext(session_id=session_id),
+                correlation_id=correlation_id,
+            )
+            try:
+                outcome = await self.engine.prepare(call)
+            except Exception as exc:
+                logger.warning("Replanned command preparation failed", exc_info=exc)
+                response = Response(
+                    display_text=f"I could not prepare that command: {exc}",
+                    speech_text="I could not prepare that command.",
+                    response_type=ResponseType.ERROR,
+                    severity="warning",
+                )
+                response = self._with_reasoning_steps(
+                    response,
+                    request_text=text,
+                    intent=current_intent,
+                    outcome_label="preparation_failed",
+                    step_summaries=tuple(step_summaries),
+                    interpretation=interpretation,
+                    context=context,
+                    retrieved=retrieved,
+                )
+                return await self._finish_interaction(
+                    correlation_id,
+                    text,
+                    response,
+                    intent_name=current_intent.name,
+                    outcome_label="preparation_failed",
+                    invoked_by_voice=invoked_by_voice,
+                )
+            last_outcome = outcome
+            step_summaries.append(
+                f"Prepare {current_intent.name} with "
+                f"{json.dumps(current_intent.arguments, default=str)}"
+            )
+            outcome_label = self._outcome_label(outcome)
+            observations.append(
+                self._observation_from_outcome(
+                    current_intent,
+                    outcome,
+                    iteration=iteration,
+                    outcome_label=outcome_label,
+                )
+            )
+            if (
+                outcome.confirmation
+                or outcome.permission_requests
+                or outcome.registration_requests
+                or outcome.result is None
+                or outcome.result.status.value != "completed"
+            ):
+                response = self._response_from_outcome(outcome)
+                response = self._with_reasoning_steps(
+                    response,
+                    request_text=text,
+                    intent=current_intent,
+                    outcome_label=outcome_label,
+                    step_summaries=tuple(step_summaries),
+                    interpretation=interpretation,
+                    context=context,
+                    retrieved=retrieved,
+                )
+                return await self._finish_interaction(
+                    correlation_id,
+                    text,
+                    response,
+                    outcome,
+                    intent_name=current_intent.name,
+                    outcome_label=outcome_label,
+                    invoked_by_voice=invoked_by_voice,
+                )
+            revision = await self.planner.revise_plan(
+                text,
+                interpretation=interpretation,
+                context=context,
+                retrieved=retrieved,
+                observations=tuple(observations),
+            )
+            if revision.disposition == "next_step":
+                current_intent = Intent(
+                    name=revision.skill_id,
+                    arguments=revision.arguments,
+                    confidence=revision.confidence,
+                    source="llm",
+                )
+                continue
+            if revision.disposition == "clarify":
+                question = revision.clarification or "What should I do next?"
+                self._set_pending_clarification(
+                    original_text=text,
+                    clarification=question,
+                    session_id=session_id,
+                )
+                response = Response(
+                    display_text=question,
+                    speech_text=question,
+                    response_type=ResponseType.CLARIFICATION,
+                )
+                response = self._with_reasoning_steps(
+                    response,
+                    request_text=text,
+                    intent=current_intent,
+                    outcome_label="needs_clarification",
+                    step_summaries=tuple(step_summaries),
+                    interpretation=interpretation,
+                    context=context,
+                    retrieved=retrieved,
+                )
+                return await self._finish_interaction(
+                    correlation_id,
+                    text,
+                    response,
+                    last_outcome,
+                    intent_name="planner.replan",
+                    outcome_label="needs_clarification",
+                    invoked_by_voice=invoked_by_voice,
+                )
+            response = Response(
+                display_text=revision.response or last_outcome.result.summary,
+                speech_text=revision.response or last_outcome.result.summary,
+                response_type=(
+                    ResponseType.ERROR
+                    if revision.disposition == "reject"
+                    else ResponseType.STATUS
+                ),
+                severity="warning" if revision.disposition == "reject" else "success",
+            )
+            response = self._with_reasoning_steps(
+                response,
+                request_text=text,
+                intent=current_intent,
+                outcome_label=f"replan_{revision.disposition}",
+                step_summaries=tuple(step_summaries),
+                interpretation=interpretation,
+                context=context,
+                retrieved=retrieved,
+            )
+            return await self._finish_interaction(
+                correlation_id,
+                text,
+                response,
+                last_outcome,
+                intent_name="planner.replan",
+                outcome_label=f"replan_{revision.disposition}",
+                invoked_by_voice=invoked_by_voice,
+            )
+        response = Response(
+            display_text=(
+                "I stopped after reaching the replanning limit before taking more steps."
+            ),
+            speech_text="I stopped after reaching the replanning limit.",
+            response_type=ResponseType.ERROR,
+            severity="warning",
+        )
+        response = self._with_reasoning_steps(
+            response,
+            request_text=text,
+            intent=current_intent,
+            outcome_label="replan_limit",
+            step_summaries=tuple(step_summaries),
+            interpretation=interpretation,
+            context=context,
+            retrieved=retrieved,
+        )
+        return await self._finish_interaction(
+            correlation_id,
+            text,
+            response,
+            last_outcome,
+            intent_name="planner.replan",
+            outcome_label="replan_limit",
+            invoked_by_voice=invoked_by_voice,
+        )
+
+    @staticmethod
+    def _observation_from_outcome(
+        intent: Intent,
+        outcome: ExecutionOutcome,
+        *,
+        iteration: int,
+        outcome_label: str,
+    ) -> dict[str, Any]:
+        result = outcome.result
+        return {
+            "iteration": iteration,
+            "skill_id": intent.name,
+            "arguments": intent.arguments,
+            "outcome": outcome_label,
+            "result_status": result.status.value if result else None,
+            "summary": (result.summary[:500] if result else ""),
+            "data_keys": (
+                sorted(result.data.keys())
+                if result and isinstance(result.data, dict)
+                else []
+            ),
+        }
 
     async def _handle_planner_intent(
         self,
@@ -1491,6 +1960,9 @@ class AssistantOrchestrator:
         *,
         session_id: str,
         invoked_by_voice: bool,
+        interpretation=None,
+        context: ContextSnapshot | None = None,
+        retrieved: tuple[Any, ...] = (),
     ) -> tuple[Response, ExecutionOutcome]:
         if intent.name in {"conversation.answer", "conversation.reject"}:
             response = Response(
@@ -1504,6 +1976,9 @@ class AssistantOrchestrator:
                 request_text=text,
                 intent=intent,
                 outcome_label="answered",
+                interpretation=interpretation,
+                context=context,
+                retrieved=retrieved,
             )
             return await self._finish_interaction(
                 correlation_id,
@@ -1544,6 +2019,9 @@ class AssistantOrchestrator:
                 request_text=text,
                 intent=intent,
                 outcome_label="preparation_failed",
+                interpretation=interpretation,
+                context=context,
+                retrieved=retrieved,
             )
             return await self._finish_interaction(
                 correlation_id,
@@ -1563,6 +2041,9 @@ class AssistantOrchestrator:
             step_summaries=(
                 f"Prepare {intent.name} with {json.dumps(intent.arguments, default=str)}",
             ),
+            interpretation=interpretation,
+            context=context,
+            retrieved=retrieved,
         )
         return await self._finish_interaction(
             correlation_id,

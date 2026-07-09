@@ -1,7 +1,10 @@
 import pytest
 from jsonschema import ValidationError
 
+from assistant.context.snapshot import ContextSnapshot
 from assistant.language.planner import InvalidPlannerResponse, LocalPlanner, SkillRetriever
+from assistant.language.retrieval import RetrievedContextItem
+from assistant.language.understanding import UserIntentInterpretation
 from assistant.skills.builtin import (
     CalculatorSkill,
     DateTimeSkill,
@@ -563,6 +566,99 @@ async def test_complex_planner_treats_single_action_plan_arguments_as_skill():
 
 
 @pytest.mark.asyncio
+async def test_plan_from_interpretation_uses_retrieved_candidate_skills():
+    provider = FakeProvider(
+        {
+            "disposition": "skill",
+            "skill_id": "windows.application_window",
+            "arguments": {"operation": "minimize_focused"},
+            "answer": None,
+            "confidence": 0.92,
+            "clarification": None,
+        }
+    )
+    planner = LocalPlanner(
+        provider,
+        SkillRetriever(
+            (
+                CalculatorSkill.manifest,
+                ApplicationWindowSkill(FakeApplications()).manifest,
+            )
+        ),
+    )
+
+    decision = await planner.plan_from_interpretation(
+        "get this out of the way",
+        interpretation=UserIntentInterpretation(
+            user_goal="Minimize the focused application window",
+            request_type="local_action",
+            explicit_requests=["get this out of the way"],
+            relevant_context_keys=["desktop.focused_application"],
+            success_criteria=["focused window is minimized"],
+            confidence=0.88,
+        ),
+        context=ContextSnapshot(request_text="get this out of the way", session_id="s1"),
+        retrieved=(
+            RetrievedContextItem(
+                namespace="skill_example",
+                source_id="windows.application_window:0",
+                text="get this out of the way",
+                metadata={"skill_id": "windows.application_window"},
+                score=0.91,
+            ),
+        ),
+    )
+
+    assert decision.intent is not None
+    assert decision.intent.name == "windows.application_window"
+    assert "windows.application_window" in provider.last_prompt
+    assert "core.calculator" not in provider.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_plan_revision_rejects_unavailable_next_step_skill():
+    provider = FakeProvider(
+        {
+            "disposition": "next_step",
+            "rationale": "Use an unavailable capability.",
+            "skill_id": "shell.run",
+            "arguments": {"command": "echo hi"},
+            "clarification": None,
+            "response": None,
+            "confidence": 0.8,
+        }
+    )
+    planner = LocalPlanner(
+        provider,
+        SkillRetriever((CalculatorSkill.manifest,)),
+    )
+
+    with pytest.raises(InvalidPlannerResponse):
+        await planner.revise_plan(
+            "calculate and run a shell command",
+            interpretation=UserIntentInterpretation(
+                user_goal="Calculate and run shell",
+                request_type="multi_step_goal",
+                explicit_requests=["calculate and run a shell command"],
+                confidence=0.8,
+            ),
+            context=ContextSnapshot(
+                request_text="calculate and run a shell command",
+                session_id="s1",
+            ),
+            retrieved=(),
+            observations=(
+                {
+                    "iteration": 1,
+                    "skill_id": "core.calculator",
+                    "outcome": "completed",
+                    "summary": "4",
+                },
+            ),
+        )
+
+
+@pytest.mark.asyncio
 async def test_complex_planner_treats_single_step_plan_as_skill():
     provider = FakeProvider(
         {
@@ -610,6 +706,89 @@ async def test_complex_planner_can_request_clarification():
 
     assert decision.needs_clarification
     assert decision.clarification == "Which folder should I search?"
+
+
+@pytest.mark.asyncio
+async def test_complex_planner_uses_clarification_from_invalid_skill_call():
+    provider = FakeProvider(
+        {
+            "disposition": "skill",
+            "skill_id": "windows.file_operation",
+            "arguments": {
+                "operation": "clean up downloads",
+                "destination": None,
+            },
+            "answer": (
+                "I will help you clean up your Downloads folder by organizing "
+                "the files."
+            ),
+            "confidence": 0.95,
+            "clarification": (
+                "Should I organize Downloads by file type, date, or project/name?"
+            ),
+        }
+    )
+    planner = LocalPlanner(
+        provider,
+        SkillRetriever((FileOperationSkill(object()).manifest,)),
+    )
+
+    decision = await planner.plan_decision("Clean up my downloads")
+
+    assert decision.intent is None
+    assert decision.clarification == (
+        "Should I organize Downloads by file type, date, or project/name?"
+    )
+    assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_interpreted_planner_uses_clarification_from_invalid_skill_call():
+    provider = FakeProvider(
+        {
+            "disposition": "skill",
+            "skill_id": "windows.file_operation",
+            "arguments": {
+                "operation": "clean up downloads",
+                "destination": None,
+            },
+            "answer": None,
+            "confidence": 0.95,
+            "clarification": (
+                "Should I organize Downloads by file type, date, or project/name?"
+            ),
+        }
+    )
+    planner = LocalPlanner(
+        provider,
+        SkillRetriever((FileOperationSkill(object()).manifest,)),
+    )
+
+    decision = await planner.plan_from_interpretation(
+        "Clean up my downloads",
+        interpretation=UserIntentInterpretation(
+            user_goal="Organize files in the Downloads folder",
+            request_type="multi_step_goal",
+            explicit_requests=["clean up my downloads"],
+            confidence=0.86,
+        ),
+        context=ContextSnapshot(request_text="Clean up my downloads", session_id="s1"),
+        retrieved=(
+            RetrievedContextItem(
+                namespace="skill_example",
+                source_id="windows.file_operation:0",
+                text="clean up my downloads",
+                metadata={"skill_id": "windows.file_operation"},
+                score=0.91,
+            ),
+        ),
+    )
+
+    assert decision.intent is None
+    assert decision.clarification == (
+        "Should I organize Downloads by file type, date, or project/name?"
+    )
+    assert provider.calls == 1
 
 
 @pytest.mark.asyncio

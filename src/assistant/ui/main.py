@@ -85,16 +85,6 @@ def run_desktop(container: Container) -> int:
         }
         return labels.get(value, value)
 
-    def policy_lines(values: Any) -> str:
-        return "\n".join(str(value) for value in values or ())
-
-    def parse_policy_lines(value: str) -> tuple[str, ...]:
-        return tuple(
-            line.strip()
-            for line in value.splitlines()
-            if line.strip()
-        )
-
     confirmation_prompt_actions = (
         ("risk:low", "All low-risk actions", False),
         ("risk:medium", "All medium-risk actions", True),
@@ -1201,7 +1191,8 @@ def run_desktop(container: Container) -> int:
             layout.addWidget(
                 QLabel(
                     "Skills start with no sensitive permissions. Grants can be one-time, "
-                    "session-only, always, or deny, and may be target-scoped."
+                    "session-only, always, or deny, and may be target-scoped. "
+                    "File access grants are managed in the File Access tab."
                 )
             )
             self.permission_table = QTableWidget(0, 5)
@@ -1224,6 +1215,11 @@ def run_desktop(container: Container) -> int:
         def _reload_permissions(self) -> None:
             self.permission_table.setRowCount(0)
             for value in container.permissions.list_grants():
+                if value["capability"] in {
+                    "filesystem.read",
+                    "filesystem.write",
+                }:
+                    continue
                 row = self.permission_table.rowCount()
                 self.permission_table.insertRow(row)
                 manifest = container.registry.get(value["skill_id"]).manifest
@@ -1263,7 +1259,19 @@ def run_desktop(container: Container) -> int:
             capability_choices = {
                 capability_choice_label(capability): capability
                 for capability in available_capabilities(manifest.permissions)
+                if capability
+                not in {
+                    "filesystem.read",
+                    "filesystem.write",
+                }
             }
+            if not capability_choices:
+                QMessageBox.information(
+                    self,
+                    "No Permissions Available",
+                    "This skill only exposes file access permissions. Use the File Access tab.",
+                )
+                return
             capability_label, ok = QInputDialog.getItem(
                 self,
                 "Grant Permission",
@@ -1362,10 +1370,13 @@ def run_desktop(container: Container) -> int:
             layout.addWidget(self.file_access_grants_table)
 
             grant_controls = QHBoxLayout()
+            grant_access = QPushButton("Grant File Access")
+            grant_access.clicked.connect(self._grant_file_access)
             revoke_grant = QPushButton("Revoke Selected Grant")
             revoke_grant.clicked.connect(self._revoke_file_access_grant)
             refresh = QPushButton("Refresh")
             refresh.clicked.connect(self._reload_file_access)
+            grant_controls.addWidget(grant_access)
             grant_controls.addWidget(revoke_grant)
             grant_controls.addWidget(refresh)
             layout.addLayout(grant_controls)
@@ -1460,6 +1471,102 @@ def run_desktop(container: Container) -> int:
             )
             self._reload_permissions()
 
+        def _grant_file_access(self) -> None:
+            skill_choices = {}
+            for item in container.registry.list():
+                capabilities = available_capabilities(item.permissions)
+                if {"filesystem.read", "filesystem.write"} & set(capabilities):
+                    skill_choices[skill_choice_label(item)] = item.skill_id
+            if not skill_choices:
+                QMessageBox.information(
+                    self,
+                    "No File Access Skills",
+                    "No skills declare file access permissions.",
+                )
+                return
+            skill_label, ok = QInputDialog.getItem(
+                self,
+                "Grant File Access",
+                "Skill",
+                list(skill_choices),
+                editable=False,
+            )
+            if not ok:
+                return
+            skill_id = skill_choices[skill_label]
+            manifest = container.registry.get(skill_id).manifest
+            capability_choices = {
+                capability_choice_label(capability): capability
+                for capability in available_capabilities(manifest.permissions)
+                if capability
+                in {
+                    "filesystem.read",
+                    "filesystem.write",
+                }
+            }
+            capability_label, ok = QInputDialog.getItem(
+                self,
+                "Grant File Access",
+                "Access",
+                list(capability_choices),
+                editable=False,
+            )
+            if not ok or not capability_label:
+                return
+            capability = capability_choices[capability_label]
+            target_mode, ok = QInputDialog.getItem(
+                self,
+                "Grant File Access",
+                "Scope",
+                [
+                    "Any path",
+                    "One exact file or approved folder",
+                ],
+                editable=False,
+            )
+            if not ok:
+                return
+            target = ""
+            if target_mode != "Any path":
+                target, ok = QInputDialog.getText(
+                    self,
+                    "Grant File Access",
+                    "Exact file path or approved folder",
+                )
+                if not ok:
+                    return
+            mode, ok = QInputDialog.getItem(
+                self,
+                "Grant File Access",
+                "Grant mode",
+                [
+                    "Just once",
+                    "This session",
+                    "Always",
+                    "Deny",
+                ],
+                editable=False,
+            )
+            if not ok:
+                return
+            modes = {
+                "Just once": GrantType.ONCE,
+                "This session": GrantType.SESSION,
+                "Always": GrantType.ALWAYS,
+                "Deny": GrantType.DENY,
+            }
+            grant_type = modes[mode]
+            container.permissions.grant(
+                user_id="local-user",
+                skill_id=skill_id,
+                capability=capability,
+                grant_type=grant_type,
+                targets=(target,) if target else (),
+                session_id="desktop" if grant_type == GrantType.SESSION else None,
+                correlation_id="desktop-file-access-manager",
+            )
+            self._reload_permissions()
+
         def _add_file_access_policy_rule(self, rule: str) -> None:
             access_label, ok = QInputDialog.getItem(
                 self,
@@ -1483,7 +1590,6 @@ def run_desktop(container: Container) -> int:
                 path=path.strip(),
                 add=True,
             )
-            self._sync_file_policy_settings_fields()
             self._reload_file_access()
 
         def _remove_file_access_policy_rule(self) -> None:
@@ -1504,25 +1610,7 @@ def run_desktop(container: Container) -> int:
                 path=path,
                 add=False,
             )
-            self._sync_file_policy_settings_fields()
             self._reload_file_access()
-
-        def _sync_file_policy_settings_fields(self) -> None:
-            if not hasattr(self, "setting_read_whitelist"):
-                return
-            policy = container.file_access_policy.get()
-            self.setting_read_whitelist.setPlainText(
-                policy_lines(policy.read_whitelist)
-            )
-            self.setting_read_blacklist.setPlainText(
-                policy_lines(policy.read_blacklist)
-            )
-            self.setting_write_whitelist.setPlainText(
-                policy_lines(policy.write_whitelist)
-            )
-            self.setting_write_blacklist.setPlainText(
-                policy_lines(policy.write_blacklist)
-            )
 
         def _audit_tab(self) -> QWidget:
             page = QWidget()
@@ -1541,10 +1629,7 @@ def run_desktop(container: Container) -> int:
                     ]
                 ):
                     table.setItem(row, column, QTableWidgetItem(str(value or "")))
-            clear = QPushButton("Delete Audit Log")
-            clear.clicked.connect(lambda: (container.audit.clear(), table.setRowCount(0)))
             layout.addWidget(table)
-            layout.addWidget(clear)
             return page
 
         def _settings_tab(self) -> QWidget:
@@ -1677,27 +1762,6 @@ def run_desktop(container: Container) -> int:
             self.setting_hide_sensitive.setChecked(
                 container.settings.hide_sensitive_display
             )
-            file_policy = container.file_access_policy.get()
-            self.setting_read_whitelist = QTextEdit(
-                policy_lines(file_policy.read_whitelist)
-            )
-            self.setting_read_blacklist = QTextEdit(
-                policy_lines(file_policy.read_blacklist)
-            )
-            self.setting_write_whitelist = QTextEdit(
-                policy_lines(file_policy.write_whitelist)
-            )
-            self.setting_write_blacklist = QTextEdit(
-                policy_lines(file_policy.write_blacklist)
-            )
-            for field in (
-                self.setting_read_whitelist,
-                self.setting_read_blacklist,
-                self.setting_write_whitelist,
-                self.setting_write_blacklist,
-            ):
-                field.setMinimumHeight(70)
-                field.setPlaceholderText("One path per line")
             self.setting_confirmation_prompts = QTableWidget(
                 len(confirmation_prompt_actions), 2
             )
@@ -1764,10 +1828,6 @@ def run_desktop(container: Container) -> int:
             form.addRow("Show request breakdown", self.setting_show_reasoning)
             form.addRow("Terminal debug output", self.setting_terminal_debug)
             form.addRow("Hide sensitive display results", self.setting_hide_sensitive)
-            form.addRow("Read whitelist", self.setting_read_whitelist)
-            form.addRow("Read blacklist", self.setting_read_blacklist)
-            form.addRow("Write/delete whitelist", self.setting_write_whitelist)
-            form.addRow("Write/delete blacklist", self.setting_write_blacklist)
             form.addRow("Require yes/no prompts", self.setting_confirmation_prompts)
             form.addRow(save)
             self.setting_speech.currentTextChanged.connect(
@@ -1882,26 +1942,6 @@ def run_desktop(container: Container) -> int:
             SettingsStore(container.database).set(
                 "application_settings", persisted
             )
-            container.file_access_policy.set(
-                container.file_access_policy.get().__class__.from_mapping(
-                    {
-                        "read_whitelist": parse_policy_lines(
-                            self.setting_read_whitelist.toPlainText()
-                        ),
-                        "read_blacklist": parse_policy_lines(
-                            self.setting_read_blacklist.toPlainText()
-                        ),
-                        "write_whitelist": parse_policy_lines(
-                            self.setting_write_whitelist.toPlainText()
-                        ),
-                        "write_blacklist": parse_policy_lines(
-                            self.setting_write_blacklist.toPlainText()
-                        ),
-                    }
-                )
-            )
-            if hasattr(self, "file_access_policy_table"):
-                self._reload_file_access()
             vault = SecretVault(validated.data_dir / "secrets")
             for name, field in (
                 ("openai", self.setting_openai_key),

@@ -18,6 +18,41 @@ class RouteResult:
     clarification: str | None = None
 
 
+def _looks_like_goal_request(text: str) -> bool:
+    return bool(
+        re.search(
+            r"\b("
+            r"help me|clean up|organize|prepare|figure out|make .* easier|"
+            r"what should i|working on yesterday|compare|summarize|rewrite|"
+            r"make this note|note into tasks|turn that down|plan|fix this|"
+            r"remember that|use my usual"
+            r")\b",
+            text,
+            re.I,
+        )
+    )
+
+
+def _memory_key(value: str) -> str:
+    return "_".join(re.findall(r"[a-z0-9]+", value.casefold()))[:200]
+
+
+def _memory_type(value: str) -> str:
+    folded = value.casefold()
+    if "ask before" in folded or folded.startswith("always "):
+        return "constraint"
+    if "project" in folded:
+        return "project"
+    if "prefer" in folded or "usual" in folded:
+        return "preference"
+    return "preference"
+
+
+def _memory_value_from_original(text: str) -> str:
+    value = re.sub(r"^\s*remember\s+that\s+", "", text, flags=re.I).strip()
+    return re.sub(r"[.?!]+$", "", value).strip()
+
+
 class DeterministicRouter:
     def __init__(
         self,
@@ -132,6 +167,50 @@ class DeterministicRouter:
                     source="rule",
                 )
             )
+        if re.fullmatch(r"remember that .+", routed):
+            value = _memory_value_from_original(text)
+            return RouteResult(
+                Intent(
+                    name="core.memory",
+                    arguments={
+                        "operation": "remember",
+                        "type": _memory_type(value),
+                        "key": _memory_key(value),
+                        "value": value,
+                    },
+                    confidence=0.98,
+                    source="rule",
+                )
+            )
+        if re.fullmatch(r"what do you remember(?: about me)?", routed):
+            return RouteResult(
+                Intent(
+                    name="core.memory",
+                    arguments={"operation": "list"},
+                    confidence=0.98,
+                    source="rule",
+                )
+            )
+        if match := re.fullmatch(r"forget memory (\d+)", routed):
+            return RouteResult(
+                Intent(
+                    name="core.memory",
+                    arguments={"operation": "forget", "memory_id": int(match.group(1))},
+                    confidence=0.98,
+                    source="rule",
+                )
+            )
+        if match := re.fullmatch(r"forget that (.+)", routed):
+            return RouteResult(
+                Intent(
+                    name="core.memory",
+                    arguments={"operation": "forget", "query": match.group(1)},
+                    confidence=0.85,
+                    source="rule",
+                    ambiguous=True,
+                    ambiguity_reasons=("Memory lookup must resolve this description",),
+                )
+            )
         if routed in {
             "run diagnostics",
             "diagnostics",
@@ -172,6 +251,18 @@ class DeterministicRouter:
                     confidence=0.99,
                     source="rule",
                 )
+            )
+        if _looks_like_goal_request(routed):
+            return RouteResult(
+                Intent(
+                    name="planner.goal",
+                    arguments={"text": text},
+                    confidence=0.7,
+                    source="classifier",
+                    ambiguous=True,
+                    ambiguity_reasons=("Broad goal request requires interpretation",),
+                ),
+                needs_llm=True,
             )
         if match := re.fullmatch(
             r"(?:set|start) (?:a )?timer for (.+?) (second|seconds|minute|minutes|hour|hours)",

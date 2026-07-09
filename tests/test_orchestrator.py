@@ -18,8 +18,11 @@ from assistant.contracts import (
 from assistant.language.planner import (
     InvalidPlannerResponse,
     PlannedIntentStep,
+    PlanRevision,
     PlannerDecision,
 )
+from assistant.language.retrieval import RetrievedContextItem
+from assistant.language.understanding import UserIntentInterpretation
 from assistant.policy.permissions import GrantType
 from assistant.storage.database import HistoryRow
 from assistant.windows.adapters import WindowsApplicationAdapter
@@ -221,6 +224,144 @@ class ClarifyThenAnswerPlanner:
 
     async def cancel(self):
         pass
+
+
+class InterpretingClarifyingPlanner:
+    def __init__(self):
+        self.calls = []
+
+    async def interpret(self, text, *, context, retrieved):
+        self.calls.append((text, context, retrieved))
+        return UserIntentInterpretation(
+            user_goal="Organize files in the Downloads folder",
+            request_type="multi_step_goal",
+            explicit_requests=["clean up my downloads"],
+            implicit_needs=["inspect folder contents", "avoid deleting files"],
+            missing_information=["preferred organization method"],
+            constraints=["preview before moving files"],
+            risk_notes=["moving files changes filesystem state"],
+            success_criteria=["files are grouped predictably"],
+            should_ask_clarification=True,
+            clarification_question=(
+                "Should I organize Downloads by file type, date, or project/name?"
+            ),
+            confidence=0.86,
+        )
+
+    async def plan_decision(self, text, recent_context=()):
+        raise AssertionError("clarifying interpretation should stop before planning")
+
+    async def cancel(self):
+        pass
+
+
+class InterpretingThenAnswerPlanner:
+    def __init__(self):
+        self.interpret_calls = []
+        self.plan_calls = []
+
+    async def interpret(self, text, *, context, retrieved):
+        self.interpret_calls.append((text, context, retrieved))
+        return UserIntentInterpretation(
+            user_goal="Understand the broad request",
+            request_type="question",
+            explicit_requests=[text],
+            should_ask_clarification=False,
+            confidence=0.8,
+        )
+
+    async def plan_from_interpretation(self, text, *, interpretation, context, retrieved):
+        self.plan_calls.append((text, interpretation, context, retrieved))
+        return PlannerDecision(
+            intent=Intent(
+                name="conversation.answer",
+                arguments={"text": "Handled by the interpreted planner path."},
+                confidence=0.9,
+                source="llm",
+            )
+        )
+
+    async def plan_decision(self, text, recent_context=()):
+        raise AssertionError("broad goals should use plan_from_interpretation")
+
+    async def cancel(self):
+        pass
+
+
+class ReplanningPlanner:
+    def __init__(self, revisions):
+        self.revisions = list(revisions)
+        self.interpret_calls = []
+        self.plan_calls = []
+        self.revision_calls = []
+
+    async def interpret(self, text, *, context, retrieved):
+        self.interpret_calls.append((text, context, retrieved))
+        return UserIntentInterpretation(
+            user_goal="Run a multi-step calculation workflow",
+            request_type="multi_step_goal",
+            explicit_requests=[text],
+            should_ask_clarification=False,
+            confidence=0.9,
+        )
+
+    async def plan_from_interpretation(self, text, *, interpretation, context, retrieved):
+        self.plan_calls.append((text, interpretation, context, retrieved))
+        return PlannerDecision(
+            intent=Intent(
+                name="core.calculator",
+                arguments={"expression": "2 + 2"},
+                confidence=0.95,
+                source="llm",
+            )
+        )
+
+    async def revise_plan(self, text, *, interpretation, context, retrieved, observations):
+        self.revision_calls.append((text, observations))
+        if self.revisions:
+            return self.revisions.pop(0)
+        return PlanRevision(
+            disposition="stop",
+            rationale="Done.",
+            response="Workflow complete.",
+            confidence=0.9,
+        )
+
+    async def cancel(self):
+        pass
+
+
+class FakeSemanticRetriever:
+    def __init__(self):
+        self.calls = []
+
+    async def search(self, query, *, namespaces, limit=8):
+        self.calls.append((query, namespaces, limit))
+        return (
+            RetrievedContextItem(
+                namespace="skill_example",
+                source_id="windows.file_operation:0",
+                text="clean up my downloads",
+                metadata={"skill_id": "windows.file_operation"},
+                score=0.91,
+            ),
+        )
+
+
+class FakeSkillIndexer:
+    def __init__(self):
+        self.calls = 0
+
+    async def refresh(self, registry):
+        self.calls += 1
+
+
+class FakeMemoryIndexer:
+    def __init__(self):
+        self.calls = 0
+
+    async def refresh(self, memory_store):
+        self.calls += 1
 
 
 @pytest.mark.asyncio
@@ -909,6 +1050,28 @@ async def test_conversational_answer_does_not_execute_a_skill(settings):
 
 
 @pytest.mark.asyncio
+async def test_explicit_memory_command_is_stored_and_listed(settings):
+    container = build_container(settings)
+
+    remembered, remember_outcome = await container.orchestrator.handle_text(
+        "Remember that I prefer Brave for browsing."
+    )
+    listed, list_outcome = await container.orchestrator.handle_text(
+        "What do you remember about me?"
+    )
+
+    assert remembered.response_type == ResponseType.SKILL
+    assert remember_outcome.result.data["memories"][0]["key"] == (
+        "i_prefer_brave_for_browsing"
+    )
+    assert listed.response_type == ResponseType.SKILL
+    assert "1 enabled memories" in listed.display_text
+    assert list_outcome.result.data["memories"][0]["value"] == (
+        "I prefer Brave for browsing"
+    )
+
+
+@pytest.mark.asyncio
 async def test_complex_planner_decision_executes_prepared_plan(settings):
     container = build_container(settings)
     container.orchestrator.planner = ComplexPlanner()
@@ -936,6 +1099,243 @@ async def test_complex_planner_decision_can_ask_clarification(settings):
     assert response.response_type == ResponseType.CLARIFICATION
     assert response.display_text == "Which folder should I search?"
     assert outcome.result is None
+
+
+@pytest.mark.asyncio
+async def test_broad_goal_interpretation_can_ask_clarification(settings):
+    container = build_container(settings)
+    planner = InterpretingClarifyingPlanner()
+    container.orchestrator.planner = planner
+
+    response, outcome = await container.orchestrator.handle_text(
+        "Clean up my downloads."
+    )
+
+    assert response.response_type == ResponseType.CLARIFICATION
+    assert response.display_text == (
+        "Should I organize Downloads by file type, date, or project/name?"
+    )
+    assert outcome.result is None
+    assert len(planner.calls) == 1
+    assert planner.calls[0][1].request_text == "Clean up my downloads."
+    assert {
+        "skills.available",
+        "skills.risk_summary",
+        "skills.permission_summary",
+        "permissions.granted",
+        "permissions.file_policy",
+        "permissions.confirmation_required",
+    }.issubset(set(planner.calls[0][1].keys()))
+    assert any(
+        item.namespace == "skill_example"
+        and item.metadata["skill_id"] == "windows.file_operation"
+        for item in planner.calls[0][2]
+    )
+
+
+@pytest.mark.asyncio
+async def test_broad_goal_interpretation_plans_from_interpretation(settings):
+    container = build_container(settings)
+    planner = InterpretingThenAnswerPlanner()
+    container.orchestrator.planner = planner
+
+    response, outcome = await container.orchestrator.handle_text(
+        "Help me think through this."
+    )
+
+    assert response.response_type == ResponseType.ANSWER
+    assert response.display_text == "Handled by the interpreted planner path."
+    assert outcome.result is None
+    assert len(planner.interpret_calls) == 1
+    assert len(planner.plan_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_broad_goal_interpretation_receives_semantic_retrieval(settings):
+    container = build_container(settings)
+    planner = InterpretingClarifyingPlanner()
+    retriever = FakeSemanticRetriever()
+    indexer = FakeSkillIndexer()
+    memory_indexer = FakeMemoryIndexer()
+    container.orchestrator.planner = planner
+    container.orchestrator.semantic_retriever = retriever
+    container.orchestrator.skill_semantic_indexer = indexer
+    container.orchestrator.memory_semantic_indexer = memory_indexer
+
+    response, outcome = await container.orchestrator.handle_text(
+        "Clean up my downloads."
+    )
+
+    assert response.response_type == ResponseType.CLARIFICATION
+    assert outcome.result is None
+    assert indexer.calls == 1
+    assert memory_indexer.calls == 1
+    assert retriever.calls == [
+        (
+            "Clean up my downloads.",
+            {
+                "knowledge",
+                "memory",
+                "skill",
+                "skill_example",
+                "workflow_template",
+            },
+            8,
+        )
+    ]
+    assert planner.calls[0][2][0].namespace == "skill_example"
+    assert planner.calls[0][2][0].metadata["skill_id"] == "windows.file_operation"
+
+
+@pytest.mark.asyncio
+async def test_broad_goal_interpretation_receives_memory_context_and_retrieval(settings):
+    container = build_container(settings)
+    planner = InterpretingThenAnswerPlanner()
+    container.orchestrator.planner = planner
+    container.memory_store.remember(
+        type="preference",
+        key="browser",
+        value="User prefers Brave for browsing.",
+        source="user",
+        confidence=1,
+    )
+
+    response, outcome = await container.orchestrator.handle_text(
+        "Use my usual browser."
+    )
+
+    assert response.response_type == ResponseType.ANSWER
+    assert outcome.result is None
+    context = planner.interpret_calls[0][1]
+    retrieved = planner.interpret_calls[0][2]
+    assert "memory.preferences" in context.keys()
+    assert context.items_by_key()["memory.preferences"].value[0]["key"] == "browser"
+    assert any(
+        item.namespace == "memory"
+        and item.metadata["key"] == "browser"
+        and "Brave" in item.text
+        for item in retrieved
+    )
+
+
+@pytest.mark.asyncio
+async def test_broad_goal_replanning_can_continue_after_observation(settings):
+    container = build_container(settings)
+    planner = ReplanningPlanner(
+        [
+            PlanRevision(
+                disposition="next_step",
+                rationale="Need the date after the calculation.",
+                skill_id="core.datetime",
+                arguments={"query": "date"},
+                confidence=0.9,
+            ),
+            PlanRevision(
+                disposition="stop",
+                rationale="Both steps completed.",
+                response="Workflow complete.",
+                confidence=0.95,
+            ),
+        ]
+    )
+    container.orchestrator.planner = planner
+
+    response, outcome = await container.orchestrator.handle_text(
+        "Help me calculate and then check the date."
+    )
+
+    assert response.response_type == ResponseType.STATUS
+    assert response.display_text == "Workflow complete."
+    assert outcome.result is not None
+    assert len(planner.revision_calls) == 2
+    assert planner.revision_calls[0][1][0]["skill_id"] == "core.calculator"
+    assert planner.revision_calls[1][1][1]["skill_id"] == "core.datetime"
+
+
+@pytest.mark.asyncio
+async def test_broad_goal_replanning_can_stop_for_clarification(settings):
+    container = build_container(settings)
+    planner = ReplanningPlanner(
+        [
+            PlanRevision(
+                disposition="clarify",
+                rationale="Need user choice.",
+                clarification="Which result should I use?",
+                confidence=0.8,
+            )
+        ]
+    )
+    container.orchestrator.planner = planner
+
+    response, outcome = await container.orchestrator.handle_text(
+        "Help me calculate and choose the next thing."
+    )
+
+    assert response.response_type == ResponseType.CLARIFICATION
+    assert response.display_text == "Which result should I use?"
+    assert outcome.result is not None
+    assert len(planner.revision_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_broad_goal_replanning_stops_at_loop_limit(settings):
+    container = build_container(settings)
+    planner = ReplanningPlanner(
+        [
+            PlanRevision(
+                disposition="next_step",
+                rationale="Try another calculation.",
+                skill_id="core.calculator",
+                arguments={"expression": "2 + 2"},
+                confidence=0.9,
+            )
+            for _ in range(10)
+        ]
+    )
+    container.orchestrator.planner = planner
+
+    response, outcome = await container.orchestrator.handle_text(
+        "Help me keep calculating."
+    )
+
+    assert response.response_type == ResponseType.ERROR
+    assert "replanning limit" in response.display_text
+    assert outcome.result is not None
+    assert len(planner.revision_calls) == 5
+
+
+@pytest.mark.asyncio
+async def test_request_breakdown_includes_interpretation_without_retrieved_text(settings):
+    settings = settings.model_copy(update={"show_reasoning_steps": True})
+    container = build_container(settings)
+    planner = InterpretingThenAnswerPlanner()
+    container.orchestrator.planner = planner
+
+    class SensitiveRetriever:
+        async def search(self, query, *, namespaces, limit=8):
+            return (
+                RetrievedContextItem(
+                    namespace="memory",
+                    source_id="1",
+                    text="secret token should not appear",
+                    metadata={"type": "preference", "key": "browser"},
+                    score=0.75,
+                ),
+            )
+
+    container.orchestrator.semantic_retriever = SensitiveRetriever()
+
+    response, outcome = await container.orchestrator.handle_text(
+        "Use my usual browser."
+    )
+
+    assert response.response_type == ResponseType.ANSWER
+    assert outcome.result is None
+    assert "Request breakdown:" in response.display_text
+    assert "- User goal: Understand the broad request" in response.display_text
+    assert "- Context keys:" in response.display_text
+    assert '"namespace": "memory"' in response.display_text
+    assert "secret token should not appear" not in response.display_text
 
 
 @pytest.mark.asyncio

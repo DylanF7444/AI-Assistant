@@ -50,7 +50,61 @@ def test_timer_normalizes_spoken_number():
 def test_unknown_request_needs_local_planner():
     result = DeterministicRouter().route("organize these files for me")
     assert result.needs_llm
+    assert result.intent.name == "planner.goal"
     assert result.intent.ambiguous
+
+
+@pytest.mark.parametrize(
+    ("text", "arguments"),
+    [
+        (
+            "Remember that I prefer Brave for browsing.",
+            {
+                "operation": "remember",
+                "type": "preference",
+                "key": "i_prefer_brave_for_browsing",
+                "value": "I prefer Brave for browsing",
+            },
+        ),
+        (
+            "What do you remember about me?",
+            {"operation": "list"},
+        ),
+        (
+            "Forget memory 12",
+            {"operation": "forget", "memory_id": 12},
+        ),
+    ],
+)
+def test_explicit_memory_commands_route_without_planner(text, arguments):
+    result = DeterministicRouter().route(text)
+
+    assert not result.needs_llm
+    assert result.intent.name == "core.memory"
+    assert result.intent.arguments == arguments
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Clean up my downloads.",
+        "Help me prepare for my meeting.",
+        "Figure out what I was working on yesterday.",
+        "Make this easier to read.",
+        "Use my usual browser.",
+    ],
+)
+def test_broad_goal_requests_route_to_planner_goal(text):
+    result = DeterministicRouter().route(text)
+
+    assert result.needs_llm
+    assert result.intent.name == "planner.goal"
+    assert result.intent.arguments == {"text": text}
+    assert result.intent.source == "classifier"
+    assert result.intent.ambiguous
+    assert result.intent.ambiguity_reasons == (
+        "Broad goal request requires interpretation",
+    )
 
 
 def test_file_search_on_desktop_routes_without_local_planner():
