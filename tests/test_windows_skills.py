@@ -917,6 +917,14 @@ async def test_windows_device_control_covers_status_and_local_controls():
     assert result.data["result"]["percent"] == 80
     assert skill.required_permissions(battery_call)[0].capability == "device.read"
 
+    performance_call = call(
+        "windows.device_control", {"operation": "performance_status"}
+    )
+    result = await skill.execute(performance_call, __import__("asyncio").Event())
+    assert result.summary == "CPU usage: 10%. Memory usage: 40%."
+    assert result.data["result"]["cpu_percent"] == 10
+    assert skill.required_permissions(performance_call)[0].capability == "device.read"
+
     restart_call = call("windows.device_control", {"operation": "restart_device"})
     assert skill.risk_for(restart_call) == RiskLevel.CRITICAL
     assert skill.required_permissions(restart_call)[0].capability == "system.power"

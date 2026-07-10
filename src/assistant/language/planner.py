@@ -129,11 +129,12 @@ class LocalPlanner:
     OPERATING_RULES = (
         "Registered skills are your only action capabilities. Skill results are executed "
         "later by a separate policy and execution layer, so never claim that an action "
-        "has already completed. Never invent skills, arguments, shell commands, access, "
-        "or abilities. Permissions and confirmations are enforced outside this planning "
-        "step; do not bypass them or imply that they are unnecessary. The skill directory "
-        "describes your overall capabilities. Only skills in Detailed candidate skills "
-        "may be selected for this request."
+        "has already completed and never answer with a promise to use a skill later. "
+        "Select the skill now when it can perform the request. Never invent skills, "
+        "arguments, shell commands, access, or abilities. Permissions and confirmations "
+        "are enforced outside this planning step; do not bypass them or imply that they "
+        "are unnecessary. The skill directory describes your overall capabilities. Only "
+        "skills in Detailed candidate skills may be selected for this request."
     )
 
     OUTPUT_SCHEMA = {
@@ -254,13 +255,14 @@ class LocalPlanner:
     async def plan(self, text: str, recent_context: tuple[dict[str, str], ...] = ()) -> Intent:
         if self._looks_like_gibberish(text):
             return self._rejection("I could not understand that request.")
-        skills = self.retriever.relevant(text)
+        skills = self._relevant_skills(text, recent_context)
         prompt = self._build_planning_prompt(text, recent_context, skills)
         for attempt in range(2):
             output = await self._structured_completion(prompt)
             try:
                 validate(output, self.OUTPUT_SCHEMA)
                 if output["disposition"] in {"answer", "reject"}:
+                    self._reject_deferred_skill_answer(output, skills)
                     return self._conversation_intent(output)
                 manifest = self._resolve_skill_manifest(output, skills)
                 if manifest is None:
@@ -299,7 +301,7 @@ class LocalPlanner:
     ) -> PlannerDecision:
         if self._looks_like_gibberish(text):
             return PlannerDecision(intent=self._rejection("I could not understand that request."))
-        skills = self.retriever.relevant(text, limit=12)
+        skills = self._relevant_skills(text, recent_context, limit=12)
         prompt = self._build_planning_prompt(text, recent_context, skills, allow_plan=True)
         for attempt in range(2):
             output = await self._structured_completion(prompt, schema=self.DECISION_OUTPUT_SCHEMA)
@@ -312,6 +314,7 @@ class LocalPlanner:
                         raise ValidationError("Clarification disposition requires a question")
                     return PlannerDecision(clarification=question)
                 if disposition in {"answer", "reject"}:
+                    self._reject_deferred_skill_answer(output, skills)
                     return PlannerDecision(intent=self._conversation_intent(output))
                 if disposition == "skill":
                     if self._resolve_skill_manifest(output, skills) is None and (
@@ -364,6 +367,7 @@ class LocalPlanner:
                         raise ValidationError("Clarification disposition requires a question")
                     return PlannerDecision(clarification=question)
                 if disposition in {"answer", "reject"}:
+                    self._reject_deferred_skill_answer(output, skills)
                     return PlannerDecision(intent=self._conversation_intent(output))
                 if disposition == "skill":
                     if self._resolve_skill_manifest(output, skills) is None and (
@@ -443,6 +447,86 @@ class LocalPlanner:
                     f"\nInvalid response: {json.dumps(output, separators=(',', ':'))}"
                 )
         raise RuntimeError("Planner revision validation retry was exhausted")
+
+    def _relevant_skills(
+        self,
+        text: str,
+        recent_context: tuple[dict[str, str], ...],
+        *,
+        limit: int = 6,
+    ) -> tuple[SkillManifest, ...]:
+        selected = list(self.retriever.relevant(text, limit=limit))
+        if not recent_context or not self._looks_like_contextual_follow_up(text):
+            return tuple(selected)
+        if len(selected) >= limit:
+            return tuple(selected[:limit])
+
+        context_parts: list[str] = []
+        for interaction in recent_context[-2:]:
+            for key in ("request", "response", "intent"):
+                value = interaction.get(key)
+                if isinstance(value, str) and value.strip():
+                    context_parts.append(value)
+        if not context_parts:
+            return tuple(selected)
+
+        selected_ids = {manifest.skill_id for manifest in selected}
+        for manifest in self.retriever.relevant(" ".join(context_parts), limit=limit):
+            if manifest.skill_id in selected_ids:
+                continue
+            selected.append(manifest)
+            selected_ids.add(manifest.skill_id)
+            if len(selected) >= limit:
+                break
+        return tuple(selected)
+
+    @staticmethod
+    def _looks_like_contextual_follow_up(text: str) -> bool:
+        normalized = re.sub(r"[^a-z0-9'’]+", " ", text.casefold()).strip()
+        if not normalized:
+            return False
+        if re.fullmatch(
+            r"(?:yes|yeah|yep|ok|okay|sure|please|go ahead|proceed|continue|"
+            r"do (?:it|that)|please do|please continue|try (?:it|that)|"
+            r"use (?:it|that|the skill)|run (?:it|that|the skill)|"
+            r"can you (?:do|run|use) (?:it|that)(?: now)?)",
+            normalized,
+        ):
+            return True
+        words = normalized.split()
+        return len(words) <= 12 and bool(
+            re.search(
+                r"\b(?:it|that|this|those|them|same|previous|earlier|again)\b",
+                normalized,
+            )
+        )
+
+    @staticmethod
+    def _reject_deferred_skill_answer(
+        output: dict[str, Any],
+        skills: tuple[SkillManifest, ...],
+    ) -> None:
+        if output.get("disposition") != "answer" or not skills:
+            return
+        answer = output.get("answer")
+        if not isinstance(answer, str):
+            return
+        normalized = " ".join(answer.casefold().split())
+        promised_by_assistant = re.search(
+            r"\b(?:i\s+(?:will|am going to)|i['’]ll|let me)\s+"
+            r"(?:now\s+)?(?:use|run|execute|invoke|call|start)\b",
+            normalized,
+        )
+        promised_passively = re.search(
+            r"\b(?:skill|tool|command)\b.{0,80}\bwill\s+be\s+"
+            r"(?:used|run|executed|invoked|called)\b",
+            normalized,
+        )
+        if promised_by_assistant or promised_passively:
+            raise ValidationError(
+                "Conversational response deferred an available skill call; "
+                "select and call the skill now"
+            )
 
     def _build_planning_prompt(
         self,

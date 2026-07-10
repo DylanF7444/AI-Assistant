@@ -11,7 +11,11 @@ from assistant.skills.builtin import (
     LauncherSkill,
     TimerSkill,
 )
-from assistant.skills.windows import ApplicationWindowSkill, FileOperationSkill
+from assistant.skills.windows import (
+    ApplicationWindowSkill,
+    FileOperationSkill,
+    WindowsDeviceControlSkill,
+)
 from assistant.storage.database import Database
 from assistant.storage.knowledge import KnowledgeBaseStore
 
@@ -107,6 +111,101 @@ async def test_planner_uses_configured_timeout():
     await planner.plan("Can you help?")
 
     assert provider.last_timeout_seconds == 45
+
+
+@pytest.mark.asyncio
+async def test_planner_retries_instead_of_promising_to_use_an_available_skill():
+    provider = FakeProvider(
+        [
+            {
+                "disposition": "answer",
+                "skill_id": "",
+                "arguments": {},
+                "answer": (
+                    "I will use the 'Windows Device Control' skill to read your "
+                    "CPU and memory usage information."
+                ),
+                "confidence": 0.95,
+                "clarification": None,
+            },
+            {
+                "disposition": "skill",
+                "skill_id": "windows.device_control",
+                "arguments": {"operation": "performance_status"},
+                "answer": None,
+                "confidence": 0.98,
+                "clarification": None,
+            },
+        ]
+    )
+    device = WindowsDeviceControlSkill(object())
+    planner = LocalPlanner(provider, SkillRetriever((device.manifest,)))
+
+    decision = await planner.plan_decision("What is my CPU and memory usage?")
+
+    assert provider.calls == 2
+    assert decision.intent is not None
+    assert decision.intent.name == "windows.device_control"
+    assert decision.intent.arguments == {"operation": "performance_status"}
+    assert "deferred an available skill call" in provider.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_planner_can_answer_a_question_about_using_an_available_skill():
+    provider = FakeProvider(
+        {
+            "disposition": "answer",
+            "skill_id": "",
+            "arguments": {},
+            "answer": "I can use the Calculator skill for arithmetic.",
+            "confidence": 0.98,
+            "clarification": None,
+        }
+    )
+    planner = LocalPlanner(provider, SkillRetriever((CalculatorSkill.manifest,)))
+
+    decision = await planner.plan_decision("Can you use the calculator skill?")
+
+    assert provider.calls == 1
+    assert decision.intent is not None
+    assert decision.intent.name == "conversation.answer"
+
+
+@pytest.mark.asyncio
+async def test_contextual_follow_up_retrieves_skills_from_the_previous_turn():
+    provider = FakeProvider(
+        {
+            "disposition": "skill",
+            "skill_id": "windows.device_control",
+            "arguments": {"operation": "performance_status"},
+            "answer": None,
+            "confidence": 0.98,
+            "clarification": None,
+        }
+    )
+    device = WindowsDeviceControlSkill(object())
+    planner = LocalPlanner(provider, SkillRetriever((device.manifest,)))
+    recent_context = (
+        {
+            "request": "What's my CPU and memory usage?",
+            "intent": "conversation.answer",
+            "outcome": "answered",
+            "response_type": "answer",
+            "severity": "info",
+            "response": "I can read that with Windows Device Control.",
+        },
+    )
+
+    decision = await planner.plan_decision("go ahead", recent_context)
+
+    assert decision.intent is not None
+    assert decision.intent.name == "windows.device_control"
+    assert decision.intent.arguments == {"operation": "performance_status"}
+    detailed = provider.last_prompt.split(
+        "Detailed candidate skills (the only selectable skills for this request): ",
+        1,
+    )[1].split("\nKnowledge excerpts:", 1)[0]
+    assert '"id":"windows.device_control"' in detailed
 
 
 @pytest.mark.asyncio

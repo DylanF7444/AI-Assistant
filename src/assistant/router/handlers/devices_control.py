@@ -180,8 +180,18 @@ class DeviceControlHandler:
                     source="rule",
                 )
             )
+        performance_metric = (
+            r"(?:memory/cpu|cpu/memory|memory and cpu|cpu and memory|memory|cpu)"
+        )
         if re.fullmatch(
-            r"(?:show|check) (?:my |the )?(?:memory/cpu|cpu/memory|memory and cpu|cpu and memory|memory|cpu) usage",
+            rf"(?:(?:show|check|read|report)(?: me)? (?:my |the )?|"
+            rf"what(?:'s|s| is| are) (?:my |the )?|)"
+            rf"(?:current )?{performance_metric} (?:usage|utilization)"
+            rf"(?: right now| currently)?",
+            routed,
+        ) or re.fullmatch(
+            rf"how much (?:of (?:my |the )?)?{performance_metric} "
+            rf"(?:am i|is (?:my |the )?(?:computer|device|system)) using",
             routed,
         ):
             return RouteResult(

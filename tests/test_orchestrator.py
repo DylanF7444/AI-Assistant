@@ -980,6 +980,27 @@ async def test_turn_off_my_wifi_does_not_use_local_planner(settings):
 
 
 @pytest.mark.asyncio
+async def test_cpu_and_memory_question_uses_device_skill_without_local_planner(settings):
+    container = build_container(settings)
+    container.orchestrator.planner = BrokenPlanner()
+
+    response, outcome = await container.orchestrator.handle_text(
+        "Whats my cpu and memory usage?"
+    )
+
+    assert response.response_type == ResponseType.PERMISSION
+    assert "local planner" not in response.display_text
+    assert len(outcome.permission_requests) == 1
+    request = outcome.permission_requests[0]
+    assert request.call.skill_id == "windows.device_control"
+    assert request.call.arguments == {"operation": "performance_status"}
+    assert request.scope.capability == "device.read"
+    assert container.orchestrator._session_context[-1]["intent"] == (
+        "windows.device_control"
+    )
+
+
+@pytest.mark.asyncio
 async def test_set_my_device_volume_does_not_use_local_planner(settings):
     container = build_container(settings)
     container.orchestrator.planner = BrokenPlanner()

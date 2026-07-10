@@ -571,6 +571,14 @@ def test_window_coordinate_move_and_resize_route():
         ("what's my battery level", {"operation": "battery_status"}),
         ("battery status", {"operation": "battery_status"}),
         (
+            "Whats my cpu and memory usage?",
+            {"operation": "performance_status"},
+        ),
+        (
+            "How much CPU and memory am I using?",
+            {"operation": "performance_status"},
+        ),
+        (
             "disable connected device USB\\VID_1",
             {"operation": "disable_connected_device", "instance_id": "usb\\vid_1"},
         ),

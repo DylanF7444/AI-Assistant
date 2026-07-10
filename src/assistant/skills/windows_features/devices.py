@@ -107,7 +107,10 @@ class WindowsDeviceControlSkill(Skill):
         self.manifest = manifest(
             skill_id="windows.device_control",
             display_name="Windows Device Control",
-            description="Control local Windows device settings and read device status.",
+            description=(
+                "Control local Windows device settings and read CPU, memory, battery, "
+                "storage, performance, and connected-device status."
+            ),
             input_model=self.input_model,
             output_model=self.output_model,
             permissions=(),
@@ -235,7 +238,20 @@ class WindowsDeviceControlSkill(Skill):
             summary = "Storage status retrieved."
         elif args.operation == "performance_status":
             result = await self.adapter.performance_status()
-            summary = "CPU and memory usage retrieved."
+            cpu_percent = result.get("cpu_percent") if isinstance(result, dict) else None
+            memory = result.get("memory") if isinstance(result, dict) else None
+            memory_percent = (
+                memory.get("percent_used") if isinstance(memory, dict) else None
+            )
+            if isinstance(cpu_percent, (int, float)) and isinstance(
+                memory_percent, (int, float)
+            ):
+                summary = (
+                    f"CPU usage: {cpu_percent:g}%. "
+                    f"Memory usage: {memory_percent:g}%."
+                )
+            else:
+                summary = "CPU and memory usage retrieved."
         elif args.operation == "connected_devices":
             result = await self.adapter.connected_devices(args.limit)
             summary = f"Found {len(result)} connected device{'s' if len(result) != 1 else ''}."
