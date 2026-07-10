@@ -527,13 +527,13 @@ async def test_file_search_result_ordinal_copy_uses_named_documents_folder(
     assert response.response_type == ResponseType.PERMISSION
     assert outcome.call.skill_id == "windows.file_operation"
     assert outcome.call.arguments["source"] == str(source.resolve())
-    assert outcome.call.arguments["destination"] == str(
+    assert outcome.call.arguments["destination"].casefold() == str(
         expected_destination.resolve()
-    )
+    ).casefold()
     assert outcome.permission_requests[0].scope.targets == (str(source.resolve()),)
-    assert outcome.permission_requests[1].scope.targets == (
-        str(expected_destination.resolve()),
-    )
+    assert outcome.permission_requests[1].scope.targets[0].casefold() == str(
+        expected_destination.resolve()
+    ).casefold()
 
 
 @pytest.mark.asyncio
@@ -560,6 +560,59 @@ async def test_file_search_result_ordinal_open_uses_matching_candidate(
         "source": str(second.resolve()),
     }
     assert outcome.permission_requests[0].scope.targets == (str(second.resolve()),)
+
+
+@pytest.mark.asyncio
+async def test_file_search_named_delete_prefers_exact_candidate_stem(
+    settings, tmp_path
+):
+    container = build_container(settings)
+    desktop = tmp_path / "Desktop"
+    archive = desktop / "CodeArchive" / "Assistant" / ".venv"
+    starspace = desktop / "PROJECTS" / "Starspace" / "node_modules"
+    archive.mkdir(parents=True)
+    starspace.mkdir(parents=True)
+    resume = desktop / "Resume.txt"
+    resume.write_text("resume")
+    noisy_python = archive / "resume_execution.py"
+    noisy_python.write_text("code")
+    noisy_js = starspace / "GeneratorResume.js"
+    noisy_js.write_text("code")
+    container.orchestrator.remember_file_candidates(
+        [
+            str(resume.resolve()),
+            str(noisy_python.resolve()),
+            str(noisy_js.resolve()),
+        ]
+    )
+
+    response, outcome = await container.orchestrator.handle_text(
+        "Delete the resume in my desktop"
+    )
+
+    assert response.response_type == ResponseType.PERMISSION
+    assert outcome.call.skill_id == "windows.file_operation"
+    assert outcome.call.arguments == {
+        "operation": "delete",
+        "source": str(resume.resolve()),
+    }
+    assert len(outcome.permission_requests) == 1
+    assert outcome.permission_requests[0].scope.targets == (str(resume.resolve()),)
+
+
+@pytest.mark.asyncio
+async def test_unresolved_file_operation_source_asks_for_exact_file(settings):
+    container = build_container(settings)
+
+    response, outcome = await container.orchestrator.handle_text(
+        "Delete the resume in my desktop"
+    )
+
+    assert response.response_type == ResponseType.CLARIFICATION
+    assert "could not resolve" in response.display_text
+    assert "select 1" in response.display_text
+    assert "System32" not in response.display_text
+    assert outcome.call is None
 
 
 @pytest.mark.asyncio

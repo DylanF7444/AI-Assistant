@@ -23,7 +23,7 @@ def test_timer_route_converts_minutes_to_seconds():
 def test_unknown_command_is_delegated_to_the_local_planner():
     result = DeterministicRouter().route("organize this project for me")
 
-    assert result.intent.name == "planner.request"
+    assert result.intent.name == "planner.goal"
     assert result.intent.ambiguous is True
     assert result.needs_llm is True
 

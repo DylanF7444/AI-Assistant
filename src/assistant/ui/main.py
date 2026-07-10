@@ -367,6 +367,7 @@ def run_desktop(container: Container) -> int:
             tabs.addTab(self._macros_tab(), "Macros")
             tabs.addTab(self._models_tab(), "Models")
             tabs.addTab(self._knowledge_tab(), "Knowledge")
+            tabs.addTab(self._memories_tab(), "Memories")
             tabs.addTab(self._privacy_tab(), "Privacy")
             tabs.addTab(self._applications_tab(), "Applications")
             tabs.setTabPosition(QTabWidget.TabPosition.West)
@@ -2246,6 +2247,118 @@ def run_desktop(container: Container) -> int:
             container.knowledge_bases.delete(selected.id)
             self._reload_knowledge()
 
+        def _memories_tab(self) -> QWidget:
+            page = QWidget()
+            layout = QVBoxLayout(page)
+            layout.addWidget(
+                QLabel(
+                    "Stored memories are explicit user-approved facts and preferences. "
+                    "Enabled memories can be used as assistant context; disabled "
+                    "memories remain stored until deleted."
+                )
+            )
+            self.memory_table = QTableWidget(0, 6)
+            self.memory_table.setHorizontalHeaderLabels(
+                ["Status", "Type", "Key", "Memory", "Source", "Confidence"]
+            )
+            self.memory_table.setSelectionBehavior(
+                QTableWidget.SelectionBehavior.SelectRows
+            )
+            self.memory_table.setEditTriggers(
+                QTableWidget.EditTrigger.NoEditTriggers
+            )
+            self.memory_table.setAlternatingRowColors(True)
+            self.memory_table.horizontalHeader().setStretchLastSection(True)
+            self._reload_memories()
+            controls = QHBoxLayout()
+            refresh = QPushButton("Refresh")
+            refresh.clicked.connect(self._reload_memories)
+            edit = QPushButton("Edit Selected")
+            edit.clicked.connect(self._edit_memory)
+            toggle = QPushButton("Enable / Disable")
+            toggle.clicked.connect(self._toggle_memory)
+            delete = QPushButton("Delete Selected")
+            delete.setObjectName("dangerButton")
+            delete.clicked.connect(self._delete_memory)
+            for button in (refresh, edit, toggle, delete):
+                controls.addWidget(button)
+            layout.addWidget(self.memory_table)
+            layout.addLayout(controls)
+            return page
+
+        def _reload_memories(self) -> None:
+            self.memory_table.setRowCount(0)
+            for item in container.memory_store.list(include_disabled=True):
+                row = self.memory_table.rowCount()
+                self.memory_table.insertRow(row)
+                fields = [
+                    "Enabled" if item.enabled else "Disabled",
+                    item.type,
+                    item.key,
+                    item.value,
+                    item.source,
+                    f"{item.confidence:.2f}",
+                ]
+                for column, field in enumerate(fields):
+                    table_item = QTableWidgetItem(field)
+                    if column == 0:
+                        table_item.setData(Qt.ItemDataRole.UserRole, item.id)
+                    self.memory_table.setItem(row, column, table_item)
+
+        def _selected_memory(self):
+            row = self.memory_table.currentRow()
+            if row < 0:
+                return None
+            id_item = self.memory_table.item(row, 0)
+            if id_item is None:
+                return None
+            return container.memory_store.get(id_item.data(Qt.ItemDataRole.UserRole))
+
+        def _edit_memory(self) -> None:
+            selected = self._selected_memory()
+            if selected is None:
+                return
+            value, ok = QInputDialog.getMultiLineText(
+                self,
+                "Edit Memory",
+                "Memory",
+                selected.value,
+            )
+            if not ok:
+                return
+            try:
+                container.memory_store.update(
+                    memory_id=selected.id,
+                    value=value,
+                )
+            except Exception as error:
+                QMessageBox.critical(self, "Memory Save Failed", str(error))
+                return
+            self._reload_memories()
+
+        def _toggle_memory(self) -> None:
+            selected = self._selected_memory()
+            if selected is None:
+                return
+            container.memory_store.update(
+                memory_id=selected.id,
+                enabled=not selected.enabled,
+            )
+            self._reload_memories()
+
+        def _delete_memory(self) -> None:
+            selected = self._selected_memory()
+            if selected is None or not self._confirm(
+                f'Delete memory "{selected.key}"?'
+            ):
+                return
+            container.memory_store.delete(memory_id=selected.id)
+            self._reload_memories()
+
+        def _reload_memories_if_visible(self) -> None:
+            if hasattr(self, "memory_table"):
+                self._reload_memories()
+
         def _privacy_tab(self) -> QWidget:
             page = QWidget()
             layout = QVBoxLayout(page)
@@ -2259,6 +2372,7 @@ def run_desktop(container: Container) -> int:
                 ("Clear Transcript History", self._clear_history),
                 ("Clear Audit Log", self._clear_audit),
                 ("Clear Knowledge Bases", self._clear_knowledge),
+                ("Clear Stored Memories", self._clear_memories),
                 ("Clear TTS Cache", lambda: self._clear_directory("tts-cache")),
                 (
                     "Clear Diagnostic Audio",
@@ -2279,6 +2393,13 @@ def run_desktop(container: Container) -> int:
             if self._confirm("Delete all local knowledge bases?"):
                 container.knowledge_bases.clear()
                 self._reload_knowledge()
+
+        def _clear_memories(self) -> None:
+            if not self._confirm("Delete all stored memories, including disabled ones?"):
+                return
+            for item in container.memory_store.list(include_disabled=True):
+                container.memory_store.delete(memory_id=item.id)
+            self._reload_memories_if_visible()
 
         def _applications_tab(self) -> QWidget:
             page = QWidget()
@@ -2559,6 +2680,8 @@ def run_desktop(container: Container) -> int:
         def _show_result(self, payload: Any) -> None:
             response, outcome = payload
             self._display_response(response)
+            if outcome.call is not None and outcome.call.skill_id == "core.memory":
+                self._reload_memories_if_visible()
             if outcome.registration_requests:
                 self._request_registrations(outcome)
             elif outcome.permission_requests:
@@ -2826,6 +2949,8 @@ def run_desktop(container: Container) -> int:
             paths = result.data.get("paths") if isinstance(result.data, dict) else None
             if isinstance(paths, list):
                 container.orchestrator.remember_file_candidates(paths)
+            if isinstance(result.data, dict) and "memories" in result.data:
+                self._reload_memories_if_visible()
             response = response_from_result(
                 result,
                 detail=container.orchestrator.response_detail,

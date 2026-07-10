@@ -55,6 +55,25 @@ def test_unknown_request_needs_local_planner():
 
 
 @pytest.mark.parametrize(
+    ("text", "expected_intent", "needs_llm"),
+    [
+        ("help me calculate 2 plus 3", "planner.goal", True),
+        ("what time is my timer", "conversation.question", True),
+        ("open brave and search for vlr.gg", "windows.launcher", False),
+        ("find my resume on my desktop", "windows.file_search", False),
+        ("delete the resume in my desktop", "windows.file_operation", False),
+        ("use my usual browser", "planner.goal", True),
+        ("remember that I prefer Brave", "core.memory", False),
+    ],
+)
+def test_route_precedence_is_characterized(text, expected_intent, needs_llm):
+    result = DeterministicRouter().route(text)
+
+    assert result.intent.name == expected_intent
+    assert result.needs_llm is needs_llm
+
+
+@pytest.mark.parametrize(
     ("text", "arguments"),
     [
         (

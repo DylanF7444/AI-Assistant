@@ -761,21 +761,40 @@ class AssistantOrchestrator:
                 speak=True,
             )
 
-        named_reference = re.sub(r"^(?:the|that|this)\s+", "", cleaned)
-        named_reference = re.sub(
-            r"\s+(?:one|file|item|result|match)$", "", named_reference
-        ).strip()
-        if not named_reference or named_reference == cleaned:
+        named_reference = self._file_candidate_name_reference(cleaned)
+        if not named_reference:
             return None
-        words = [word for word in re.split(r"\s+", named_reference) if word]
-        matches = [
-            path
-            for path in self._file_candidates
-            if all(word in Path(path).name.casefold() for word in words)
-        ]
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
+        location_reference = ""
+        if match := re.fullmatch(
+            r"(?P<name>.+?)\s+(?:in|inside|on|from)\s+(?P<location>.+)",
+            named_reference,
+        ):
+            named_reference = self._file_candidate_name_reference(
+                match.group("name")
+            )
+            location_reference = match.group("location").strip()
+        if not named_reference:
+            return None
+
+        scored_matches = sorted(
+            (
+                (score, path)
+                for path in self._file_candidates
+                if self._file_candidate_matches_location(path, location_reference)
+                for score in [self._file_candidate_name_score(named_reference, path)]
+                if score is not None
+            ),
+            key=lambda item: item[0],
+        )
+        if len(scored_matches) == 1:
+            return scored_matches[0][1]
+        if scored_matches:
+            best_score = scored_matches[0][0]
+            best_matches = [
+                path for score, path in scored_matches if score == best_score
+            ]
+            if len(best_matches) == 1:
+                return best_matches[0]
             return Response(
                 display_text=(
                     "That file reference matches more than one result. Use the "
@@ -786,6 +805,69 @@ class AssistantOrchestrator:
                 severity="warning",
                 speak=True,
             )
+        return None
+
+    @staticmethod
+    def _file_candidate_name_reference(value: str) -> str:
+        named_reference = re.sub(
+            r"^(?:the|that|this|my)\s+", "", value.strip(), flags=re.IGNORECASE
+        )
+        named_reference = re.sub(
+            r"\s+(?:one|file|item|result|match)$",
+            "",
+            named_reference,
+            flags=re.IGNORECASE,
+        ).strip()
+        return named_reference
+
+    @staticmethod
+    def _file_candidate_matches_location(path: str, location_reference: str) -> bool:
+        if not location_reference:
+            return True
+        normalized = AssistantOrchestrator._normalize_user_folder_reference(
+            location_reference
+        )
+        first = normalized.replace("\\", "/").partition("/")[0].casefold()
+        path_obj = Path(path)
+        folded_parts = {part.casefold() for part in path_obj.parts}
+        if first in KNOWN_USER_FOLDERS:
+            return KNOWN_USER_FOLDERS[first].casefold() in folded_parts
+        words = [
+            word
+            for word in re.split(
+                r"[^a-z0-9]+",
+                re.sub(
+                    r"^(?:the|my)\s+",
+                    "",
+                    location_reference.strip().casefold(),
+                    flags=re.IGNORECASE,
+                ),
+            )
+            if word and word != "folder"
+        ]
+        parent = str(path_obj.parent).casefold()
+        return bool(words) and all(word in parent for word in words)
+
+    @staticmethod
+    def _file_candidate_name_score(reference: str, path: str) -> int | None:
+        query = AssistantOrchestrator._file_candidate_name_reference(
+            reference
+        ).casefold()
+        if not query:
+            return None
+        candidate = Path(path)
+        name = candidate.name.casefold()
+        stem = candidate.stem.casefold()
+        if query in {name, stem}:
+            return 0
+        query_stem = Path(query).stem.casefold()
+        if query_stem and query_stem in {name, stem}:
+            return 1
+        words = [
+            word for word in re.split(r"[^a-z0-9]+", query_stem or query) if word
+        ]
+        if words and all(word in name for word in words):
+            return 2
         return None
 
     @staticmethod
@@ -878,8 +960,40 @@ class AssistantOrchestrator:
                     return resolved_source
                 source = resolved_source
                 source = self._normalize_user_folder_reference(source)
+                if self._looks_like_unresolved_file_reference(source):
+                    return Response(
+                        display_text=(
+                            f"I could not resolve \"{source}\" to an exact file. "
+                            "Select one of the file search results, for example "
+                            "\"select 1\", or use a full path."
+                        ),
+                        speech_text="Please select one of the file results or use a full path.",
+                        response_type=ResponseType.CLARIFICATION,
+                        severity="warning",
+                        speak=True,
+                    )
             arguments["source"] = str(resolve_user_path(source))
         return intent.model_copy(update={"arguments": arguments})
+
+    @staticmethod
+    def _looks_like_unresolved_file_reference(value: str) -> bool:
+        candidate = value.strip()
+        if not candidate or "/" in candidate or "\\" in candidate or ":" in candidate:
+            return False
+        first = candidate.split(maxsplit=1)[0].casefold()
+        if first in KNOWN_USER_FOLDERS:
+            return False
+        if re.search(
+            r"\b(?:in|inside|on|from)\s+(?:my\s+|the\s+)?"
+            r"(?:desktop|documents?|downloads?|pictures?|music|videos?)\b",
+            candidate,
+            flags=re.IGNORECASE,
+        ):
+            return True
+        return bool(
+            re.match(r"^(?:the|that|this)\s+", candidate, flags=re.IGNORECASE)
+            and " " in candidate
+        )
 
     def _resolve_named_folder_path(
         self, value: str, *, session_id: str, request_text: str
