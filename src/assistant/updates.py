@@ -64,9 +64,7 @@ class UpdateManager:
             raise ValueError("Update signer is not trusted")
         try:
             signature = base64.b64decode(manifest.signature, validate=True)
-            Ed25519PublicKey.from_public_bytes(key).verify(
-                signature, manifest.signed_payload()
-            )
+            Ed25519PublicKey.from_public_bytes(key).verify(signature, manifest.signed_payload())
         except (InvalidSignature, ValueError) as exc:
             raise ValueError("Update signature is invalid") from exc
 
@@ -74,9 +72,7 @@ class UpdateManager:
         with zipfile.ZipFile(package) as archive:
             if "update-manifest.json" not in archive.namelist():
                 raise ValueError("Update package has no manifest")
-            manifest = UpdateManifest.model_validate_json(
-                archive.read("update-manifest.json")
-            )
+            manifest = UpdateManifest.model_validate_json(archive.read("update-manifest.json"))
             self.verify_manifest(manifest)
             expected = {item.path: item for item in manifest.files}
             for name in archive.namelist():
@@ -85,15 +81,11 @@ class UpdateManager:
                 _safe_relative(name)
                 if name not in expected:
                     raise ValueError(f"Unsigned file in update package: {name}")
-            destination = (
-                self.staging_root / manifest.application_version
-            ).resolve()
+            destination = (self.staging_root / manifest.application_version).resolve()
             root = self.staging_root.resolve()
             if root not in destination.parents:
                 raise ValueError("Unsafe update destination")
-            temporary = Path(
-                tempfile.mkdtemp(prefix="update-", dir=root.parent)
-            )
+            temporary = Path(tempfile.mkdtemp(prefix="update-", dir=root.parent))
             try:
                 for name, item in expected.items():
                     relative = _safe_relative(name)
@@ -136,4 +128,3 @@ class UpdateManager:
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
         return backup
-

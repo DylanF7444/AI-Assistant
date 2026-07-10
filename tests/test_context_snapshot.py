@@ -336,9 +336,7 @@ async def test_device_context_provider_obeys_flag_and_summarizes_devices():
         "devices.connected",
         "devices.storage",
     ]
-    assert items[2].value == [
-        {"FriendlyName": "USB Headset", "Class": "Audio", "Status": "OK"}
-    ]
+    assert items[2].value == [{"FriendlyName": "USB Headset", "Class": "Audio", "Status": "OK"}]
 
 
 @pytest.mark.asyncio

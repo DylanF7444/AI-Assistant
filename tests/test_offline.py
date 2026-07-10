@@ -7,9 +7,8 @@ from assistant.policy.network import OfflineNetworkError, offline_lock
 
 
 def test_offline_lock_blocks_outbound_connections():
-    with offline_lock():
-        with pytest.raises(OfflineNetworkError):
-            socket.create_connection(("example.com", 80))
+    with offline_lock(), pytest.raises(OfflineNetworkError):
+        socket.create_connection(("example.com", 80))
 
 
 def test_offline_lock_allows_local_runtime_connections():

@@ -1,2 +1,1 @@
 """Local storage and audit."""
-

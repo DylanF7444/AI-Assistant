@@ -67,4 +67,3 @@ class WhisperCppProvider:
             "executable": str(self.executable),
             "model": str(self.model),
         }
-

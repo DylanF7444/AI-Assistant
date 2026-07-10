@@ -11,18 +11,18 @@ from typing import Any
 
 from sqlalchemy import select
 
+from assistant.audio.activation import keyword_request, parse_voice_prompt_response
+from assistant.audio.capture import display_audio_devices
 from assistant.bootstrap import Container
 from assistant.contracts import PipelineEvent, PipelineState, ResponseType
 from assistant.diagnostics import hardware_report, model_recommendations
-from assistant.policy.permissions import GrantType
-from assistant.policy.capabilities import available_capabilities
-from assistant.response import response_from_result
 from assistant.models import ModelManifest
-from assistant.audio.activation import keyword_request, parse_voice_prompt_response
+from assistant.policy.capabilities import available_capabilities
+from assistant.policy.permissions import GrantType
+from assistant.response import response_from_result
 from assistant.storage.database import ItemRow, SettingsStore
-from assistant.storage.macros import MacroDefinition, MacroStep
 from assistant.storage.history import HistoryStore
-from assistant.audio.capture import display_audio_devices
+from assistant.storage.macros import MacroDefinition, MacroStep
 from assistant.storage.secrets import SecretVault
 from assistant.windows.adapters import LocalWindowsDeviceAdapter
 
@@ -110,7 +110,7 @@ def run_desktop(container: Container) -> int:
     )
 
     try:
-        from PySide6.QtCore import QObject, QSize, QSettings, Qt, QThread, QTimer, Signal
+        from PySide6.QtCore import QObject, QSize, Qt, QThread, QTimer, Signal
         from PySide6.QtGui import (
             QAction,
             QIcon,
@@ -122,9 +122,9 @@ def run_desktop(container: Container) -> int:
             QApplication,
             QCheckBox,
             QComboBox,
-            QFrame,
-            QFormLayout,
             QFileDialog,
+            QFormLayout,
+            QFrame,
             QHBoxLayout,
             QInputDialog,
             QLabel,
@@ -137,14 +137,14 @@ def run_desktop(container: Container) -> int:
             QPushButton,
             QScrollArea,
             QSizePolicy,
-            QSystemTrayIcon,
             QStyle,
             QStyleOptionTab,
             QStylePainter,
+            QSystemTrayIcon,
             QTabBar,
-            QTabWidget,
             QTableWidget,
             QTableWidgetItem,
+            QTabWidget,
             QTextEdit,
             QVBoxLayout,
             QWidget,
@@ -403,9 +403,7 @@ def run_desktop(container: Container) -> int:
             heading = QVBoxLayout()
             title = QLabel("Active scripts")
             title.setObjectName("pageTitle")
-            subtitle = QLabel(
-                "Live assistant jobs, future reminders, and runtime hooks."
-            )
+            subtitle = QLabel("Live assistant jobs, future reminders, and runtime hooks.")
             subtitle.setObjectName("pageSubtitle")
             heading.addWidget(title)
             heading.addWidget(subtitle)
@@ -421,12 +419,8 @@ def run_desktop(container: Container) -> int:
             self.running_scripts.setHorizontalHeaderLabels(
                 ["Type", "Name", "Details", "Started", "Elapsed"]
             )
-            self.running_scripts.setSelectionBehavior(
-                QTableWidget.SelectionBehavior.SelectRows
-            )
-            self.running_scripts.setEditTriggers(
-                QTableWidget.EditTrigger.NoEditTriggers
-            )
+            self.running_scripts.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            self.running_scripts.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
             self.running_scripts.setAlternatingRowColors(True)
             self.running_scripts.horizontalHeader().setStretchLastSection(True)
             cancel = QPushButton("Cancel selected")
@@ -436,24 +430,16 @@ def run_desktop(container: Container) -> int:
             scheduled_label = QLabel("SCHEDULED")
             scheduled_label.setObjectName("sectionLabel")
             self.scheduled_scripts = QTableWidget(0, 4)
-            self.scheduled_scripts.setHorizontalHeaderLabels(
-                ["Type", "Name", "Due", "Status"]
-            )
-            self.scheduled_scripts.setEditTriggers(
-                QTableWidget.EditTrigger.NoEditTriggers
-            )
+            self.scheduled_scripts.setHorizontalHeaderLabels(["Type", "Name", "Due", "Status"])
+            self.scheduled_scripts.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
             self.scheduled_scripts.setAlternatingRowColors(True)
             self.scheduled_scripts.horizontalHeader().setStretchLastSection(True)
 
             hooks_label = QLabel("HOOKS")
             hooks_label.setObjectName("sectionLabel")
             self.script_hooks = QTableWidget(0, 3)
-            self.script_hooks.setHorizontalHeaderLabels(
-                ["Hook", "Trigger", "Status"]
-            )
-            self.script_hooks.setEditTriggers(
-                QTableWidget.EditTrigger.NoEditTriggers
-            )
+            self.script_hooks.setHorizontalHeaderLabels(["Hook", "Trigger", "Status"])
+            self.script_hooks.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
             self.script_hooks.setAlternatingRowColors(True)
             self.script_hooks.horizontalHeader().setStretchLastSection(True)
 
@@ -551,8 +537,7 @@ def run_desktop(container: Container) -> int:
                     "Voice activation",
                     container.settings.voice_activation_mode,
                     "Active"
-                    if self._passive_voice_worker
-                    and self._passive_voice_worker.isRunning()
+                    if self._passive_voice_worker and self._passive_voice_worker.isRunning()
                     else "Hotkey only",
                 ),
                 ("Pipeline events", "Assistant activity", "Active"),
@@ -769,11 +754,14 @@ def run_desktop(container: Container) -> int:
             self._active_state = state
             self._status_frame = 0
             self.status.setText(labels[state])
-            self.status_detail.setText(message or {
-                PipelineState.IDLE: "Waiting for your request",
-                PipelineState.THINKING: "Understanding what you asked",
-                PipelineState.EXECUTING: "A local skill is running",
-            }.get(state, labels[state]))
+            self.status_detail.setText(
+                message
+                or {
+                    PipelineState.IDLE: "Waiting for your request",
+                    PipelineState.THINKING: "Understanding what you asked",
+                    PipelineState.EXECUTING: "A local skill is running",
+                }.get(state, labels[state])
+            )
             self.status_dot.setProperty("state", state.value)
             self.status_dot.style().unpolish(self.status_dot)
             self.status_dot.style().polish(self.status_dot)
@@ -829,9 +817,7 @@ def run_desktop(container: Container) -> int:
         def _update_mic_level(self) -> None:
             level = min(1.0, max(0.0, container.audio_capture.level))
             threshold = max(container.audio_capture.vad_threshold, 0.001)
-            self._set_mic_level_value(
-                round(min(1.0, level / (threshold * 4)) * 100)
-            )
+            self._set_mic_level_value(round(min(1.0, level / (threshold * 4)) * 100))
 
         def _set_mic_level_value(self, value: int) -> None:
             value = max(0, min(100, value))
@@ -911,10 +897,7 @@ def run_desktop(container: Container) -> int:
                 QTimer.singleShot(250, self._start_passive_voice)
 
         def _apply_passive_voice_indicators(self) -> None:
-            if (
-                self._passive_voice_worker
-                and self._passive_voice_worker.isRunning()
-            ):
+            if self._passive_voice_worker and self._passive_voice_worker.isRunning():
                 self.status.setText("Listening")
                 self.status_dot.setProperty("state", PipelineState.LISTENING.value)
                 self.status_dot.style().unpolish(self.status_dot)
@@ -929,9 +912,7 @@ def run_desktop(container: Container) -> int:
             if container.settings.voice_activation_mode == "keyword_clap":
                 triggers = []
                 if container.settings.voice_activation_keyword_enabled:
-                    triggers.append(
-                        f'"{container.settings.voice_activation_keyword}"'
-                    )
+                    triggers.append(f'"{container.settings.voice_activation_keyword}"')
                 if container.settings.voice_activation_clap_enabled:
                     triggers.append("a clap")
                 return "Listening for " + " or ".join(triggers)
@@ -943,9 +924,7 @@ def run_desktop(container: Container) -> int:
                 return
             self._set_pipeline_state(PipelineState.LISTENING, "Microphone is active")
             worker = AsyncWorker(
-                container.orchestrator.listen_once(
-                    container.stt, container.audio_capture.chunks()
-                )
+                container.orchestrator.listen_once(container.stt, container.audio_capture.chunks())
             )
             worker.complete.connect(self._show_result)
             worker.failed.connect(self._show_error)
@@ -1002,9 +981,7 @@ def run_desktop(container: Container) -> int:
                     expected_token=expected_token,
                 )
                 if response is None:
-                    self.statusBar().showMessage(
-                        "I did not catch a valid prompt response.", 1800
-                    )
+                    self.statusBar().showMessage("I did not catch a valid prompt response.", 1800)
                     return
                 if response.action == "approve":
                     choice["value"] = "approve"
@@ -1105,9 +1082,7 @@ def run_desktop(container: Container) -> int:
             )
 
         def _install_skill(self) -> None:
-            package = QFileDialog.getExistingDirectory(
-                self, "Select Signed Skill Package"
-            )
+            package = QFileDialog.getExistingDirectory(self, "Select Signed Skill Package")
             if not package:
                 return
             try:
@@ -1132,9 +1107,7 @@ def run_desktop(container: Container) -> int:
             selected = self._selected_manifest()
             if selected is None:
                 return
-            package = QFileDialog.getExistingDirectory(
-                self, "Select Signed Skill Update"
-            )
+            package = QFileDialog.getExistingDirectory(self, "Select Signed Skill Update")
             if not package:
                 return
             try:
@@ -1243,8 +1216,7 @@ def run_desktop(container: Container) -> int:
 
         def _grant_permission(self) -> None:
             skill_choices = {
-                skill_choice_label(item): item.skill_id
-                for item in container.registry.list()
+                skill_choice_label(item): item.skill_id for item in container.registry.list()
             }
             skill_label, ok = QInputDialog.getItem(
                 self,
@@ -1365,9 +1337,7 @@ def run_desktop(container: Container) -> int:
             self.file_access_grants_table.setHorizontalHeaderLabels(
                 ["Skill", "Access", "Mode", "Targets", "Effect"]
             )
-            self.file_access_grants_table.horizontalHeader().setStretchLastSection(
-                True
-            )
+            self.file_access_grants_table.horizontalHeader().setStretchLastSection(True)
             layout.addWidget(self.file_access_grants_table)
 
             grant_controls = QHBoxLayout()
@@ -1386,12 +1356,8 @@ def run_desktop(container: Container) -> int:
             policy_title.setObjectName("sectionTitle")
             layout.addWidget(policy_title)
             self.file_access_policy_table = QTableWidget(0, 3)
-            self.file_access_policy_table.setHorizontalHeaderLabels(
-                ["Access", "Rule", "Path"]
-            )
-            self.file_access_policy_table.horizontalHeader().setStretchLastSection(
-                True
-            )
+            self.file_access_policy_table.setHorizontalHeaderLabels(["Access", "Rule", "Path"])
+            self.file_access_policy_table.horizontalHeader().setStretchLastSection(True)
             layout.addWidget(self.file_access_policy_table)
 
             policy_controls = QHBoxLayout()
@@ -1462,12 +1428,8 @@ def run_desktop(container: Container) -> int:
                 return
             container.permissions.revoke(
                 "local-user",
-                self.file_access_grants_table.item(row, 0).data(
-                    Qt.ItemDataRole.UserRole
-                ),
-                self.file_access_grants_table.item(row, 1).data(
-                    Qt.ItemDataRole.UserRole
-                ),
+                self.file_access_grants_table.item(row, 0).data(Qt.ItemDataRole.UserRole),
+                self.file_access_grants_table.item(row, 1).data(Qt.ItemDataRole.UserRole),
                 "desktop-file-access-manager",
             )
             self._reload_permissions()
@@ -1597,12 +1559,8 @@ def run_desktop(container: Container) -> int:
             row = self.file_access_policy_table.currentRow()
             if row < 0:
                 return
-            field = self.file_access_policy_table.item(row, 0).data(
-                Qt.ItemDataRole.UserRole
-            )
-            path = self.file_access_policy_table.item(row, 2).data(
-                Qt.ItemDataRole.UserRole
-            )
+            field = self.file_access_policy_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            path = self.file_access_policy_table.item(row, 2).data(Qt.ItemDataRole.UserRole)
             access = "write" if field.startswith("write_") else "read"
             list_name = "whitelist" if field.endswith("_whitelist") else "blacklist"
             container.file_access_policy.update_entry(
@@ -1643,19 +1601,13 @@ def run_desktop(container: Container) -> int:
             self.setting_stt = QLineEdit(container.settings.stt_model)
             self.setting_llm = QLineEdit(container.settings.llm_model)
             self.setting_openai_model = QLineEdit(container.settings.openai_model)
-            self.setting_openai_codex_model = QLineEdit(
-                container.settings.openai_codex_model
-            )
-            self.setting_anthropic_model = QLineEdit(
-                container.settings.anthropic_model
-            )
+            self.setting_openai_codex_model = QLineEdit(container.settings.openai_codex_model)
+            self.setting_anthropic_model = QLineEdit(container.settings.anthropic_model)
             vault = SecretVault(container.settings.data_dir / "secrets")
             self.setting_openai_key = QLineEdit()
             self.setting_openai_key.setEchoMode(QLineEdit.EchoMode.Password)
             self.setting_openai_key.setPlaceholderText(
-                "Stored; enter a new key to replace"
-                if vault.has("openai")
-                else "OpenAI API key"
+                "Stored; enter a new key to replace" if vault.has("openai") else "OpenAI API key"
             )
             self.setting_anthropic_key = QLineEdit()
             self.setting_anthropic_key.setEchoMode(QLineEdit.EchoMode.Password)
@@ -1672,20 +1624,14 @@ def run_desktop(container: Container) -> int:
                 else "Brave Search API key"
             )
             self.setting_search_provider = QComboBox()
-            self.setting_search_provider.addItem(
-                "DuckDuckGo Instant Answer", "duckduckgo"
-            )
+            self.setting_search_provider.addItem("DuckDuckGo Instant Answer", "duckduckgo")
             self.setting_search_provider.addItem("Brave Search", "brave")
-            selected = self.setting_search_provider.findData(
-                container.settings.search_provider
-            )
+            selected = self.setting_search_provider.findData(container.settings.search_provider)
             self.setting_search_provider.setCurrentIndex(max(0, selected))
             self.setting_piper_executable = QLineEdit(
                 str(container.settings.piper_executable or "")
             )
-            self.setting_piper_model = QLineEdit(
-                str(container.settings.piper_model or "")
-            )
+            self.setting_piper_model = QLineEdit(str(container.settings.piper_model or ""))
             self.setting_piper_executable_label = QLabel("Piper executable")
             self.setting_piper_model_label = QLabel("Piper voice model")
             self.setting_speech = QComboBox()
@@ -1693,12 +1639,8 @@ def run_desktop(container: Container) -> int:
             self.setting_speech.setCurrentText(container.settings.speech_mode)
             self.setting_voice_activation_mode = QComboBox()
             self.setting_voice_activation_mode.addItem("Hotkey only", "hotkey")
-            self.setting_voice_activation_mode.addItem(
-                "Keyword or clap", "keyword_clap"
-            )
-            self.setting_voice_activation_mode.addItem(
-                "Persistent voice", "persistent"
-            )
+            self.setting_voice_activation_mode.addItem("Keyword or clap", "keyword_clap")
+            self.setting_voice_activation_mode.addItem("Persistent voice", "persistent")
             selected = self.setting_voice_activation_mode.findData(
                 container.settings.voice_activation_mode
             )
@@ -1707,12 +1649,8 @@ def run_desktop(container: Container) -> int:
             self.setting_voice_keyword_enabled.setChecked(
                 container.settings.voice_activation_keyword_enabled
             )
-            self.setting_voice_keyword = QLineEdit(
-                container.settings.voice_activation_keyword
-            )
-            self.setting_voice_keyword_enabled_label = QLabel(
-                "Enable activation keyword"
-            )
+            self.setting_voice_keyword = QLineEdit(container.settings.voice_activation_keyword)
+            self.setting_voice_keyword_enabled_label = QLabel("Enable activation keyword")
             self.setting_voice_keyword_label = QLabel("Activation keyword")
             self.setting_voice_clap_enabled = QCheckBox()
             self.setting_voice_clap_enabled.setChecked(
@@ -1722,70 +1660,46 @@ def run_desktop(container: Container) -> int:
                 str(container.settings.voice_activation_clap_threshold)
             )
             self.setting_voice_clap_enabled_label = QLabel("Enable clap activation")
-            self.setting_voice_clap_threshold_label = QLabel(
-                "Clap sensitivity threshold"
-            )
+            self.setting_voice_clap_threshold_label = QLabel("Clap sensitivity threshold")
             self.setting_input = QComboBox()
             self.setting_input.addItem("System default", None)
             for device in display_audio_devices(input_only=True):
                 self.setting_input.addItem(device.label, device.index)
-            selected = self.setting_input.findData(
-                container.settings.audio_input_device
-            )
+            selected = self.setting_input.findData(container.settings.audio_input_device)
             self.setting_input.setCurrentIndex(max(0, selected))
             self.setting_ptt = QLineEdit(container.settings.push_to_talk_hotkey)
             self.setting_cancel = QLineEdit(container.settings.cancel_hotkey)
-            self.setting_retention = QLineEdit(
-                str(container.settings.retain_transcripts_days)
-            )
+            self.setting_retention = QLineEdit(str(container.settings.retain_transcripts_days))
             self.setting_diagnostic_audio = QCheckBox()
-            self.setting_diagnostic_audio.setChecked(
-                container.settings.diagnostic_audio
-            )
+            self.setting_diagnostic_audio.setChecked(container.settings.diagnostic_audio)
             self.setting_noise = QCheckBox()
             self.setting_noise.setChecked(container.settings.noise_suppression)
             self.setting_gain = QCheckBox()
-            self.setting_gain.setChecked(
-                container.settings.automatic_gain_control
-            )
+            self.setting_gain.setChecked(container.settings.automatic_gain_control)
             self.setting_detail = QComboBox()
             self.setting_detail.addItems(["short", "normal", "detailed"])
             self.setting_detail.setCurrentText(container.settings.response_detail)
             self.setting_show_reasoning = QCheckBox()
-            self.setting_show_reasoning.setChecked(
-                container.settings.show_reasoning_steps
-            )
+            self.setting_show_reasoning.setChecked(container.settings.show_reasoning_steps)
             self.setting_terminal_debug = QCheckBox()
-            self.setting_terminal_debug.setChecked(
-                container.settings.terminal_debug
-            )
+            self.setting_terminal_debug.setChecked(container.settings.terminal_debug)
             self.setting_hide_sensitive = QCheckBox()
-            self.setting_hide_sensitive.setChecked(
-                container.settings.hide_sensitive_display
-            )
-            self.setting_confirmation_prompts = QTableWidget(
-                len(confirmation_prompt_actions), 2
-            )
-            self.setting_confirmation_prompts.setHorizontalHeaderLabels(
-                ["Action", "Prompt"]
-            )
+            self.setting_hide_sensitive.setChecked(container.settings.hide_sensitive_display)
+            self.setting_confirmation_prompts = QTableWidget(len(confirmation_prompt_actions), 2)
+            self.setting_confirmation_prompts.setHorizontalHeaderLabels(["Action", "Prompt"])
             self.setting_confirmation_prompts.setEditTriggers(
                 QTableWidget.EditTrigger.NoEditTriggers
             )
             self.setting_confirmation_prompt_rows = []
             for row, (key, label, default) in enumerate(confirmation_prompt_actions):
                 checked = container.settings.confirmation_overrides.get(key, default)
-                self.setting_confirmation_prompts.setItem(
-                    row, 0, QTableWidgetItem(label)
-                )
+                self.setting_confirmation_prompts.setItem(row, 0, QTableWidgetItem(label))
                 checkbox = QCheckBox()
                 checkbox.setChecked(checked)
                 checkbox.setAccessibleName(f"Require prompt for {label}")
                 self.setting_confirmation_prompts.setCellWidget(row, 1, checkbox)
                 self.setting_confirmation_prompt_rows.append((key, default, checkbox))
-            self.setting_confirmation_prompts.horizontalHeader().setStretchLastSection(
-                True
-            )
+            self.setting_confirmation_prompts.horizontalHeader().setStretchLastSection(True)
             self.setting_confirmation_prompts.setMinimumHeight(260)
             save = QPushButton("Save Settings")
             save.clicked.connect(self._save_settings)
@@ -1800,9 +1714,7 @@ def run_desktop(container: Container) -> int:
             form.addRow("Anthropic API key", self.setting_anthropic_key)
             form.addRow("Web search provider", self.setting_search_provider)
             form.addRow("Brave Search API key", self.setting_brave_key)
-            form.addRow(
-                self.setting_piper_executable_label, self.setting_piper_executable
-            )
+            form.addRow(self.setting_piper_executable_label, self.setting_piper_executable)
             form.addRow(self.setting_piper_model_label, self.setting_piper_model)
             form.addRow("Speech mode", self.setting_speech)
             form.addRow("Voice activation", self.setting_voice_activation_mode)
@@ -1856,12 +1768,8 @@ def run_desktop(container: Container) -> int:
 
             activation_mode = self.setting_voice_activation_mode.currentData()
             keyword_clap_active = activation_mode == "keyword_clap"
-            keyword_active = (
-                keyword_clap_active and self.setting_voice_keyword_enabled.isChecked()
-            )
-            clap_active = (
-                keyword_clap_active and self.setting_voice_clap_enabled.isChecked()
-            )
+            keyword_active = keyword_clap_active and self.setting_voice_keyword_enabled.isChecked()
+            clap_active = keyword_clap_active and self.setting_voice_clap_enabled.isChecked()
 
             self.setting_voice_keyword_enabled_label.setVisible(keyword_clap_active)
             self.setting_voice_keyword_enabled.setVisible(keyword_clap_active)
@@ -1885,35 +1793,24 @@ def run_desktop(container: Container) -> int:
                     "stt_model": self.setting_stt.text().strip(),
                     "llm_model": self.setting_llm.text().strip(),
                     "openai_model": self.setting_openai_model.text().strip(),
-                    "openai_codex_model": (
-                        self.setting_openai_codex_model.text().strip()
-                    ),
+                    "openai_codex_model": (self.setting_openai_codex_model.text().strip()),
                     "anthropic_model": self.setting_anthropic_model.text().strip(),
                     "search_provider": self.setting_search_provider.currentData(),
-                    "piper_executable": self.setting_piper_executable.text().strip()
-                    or None,
+                    "piper_executable": self.setting_piper_executable.text().strip() or None,
                     "piper_model": self.setting_piper_model.text().strip() or None,
                     "speech_mode": self.setting_speech.currentText(),
-                    "voice_activation_mode": (
-                        self.setting_voice_activation_mode.currentData()
-                    ),
+                    "voice_activation_mode": (self.setting_voice_activation_mode.currentData()),
                     "voice_activation_keyword_enabled": (
                         self.setting_voice_keyword_enabled.isChecked()
                     ),
-                    "voice_activation_keyword": (
-                        self.setting_voice_keyword.text().strip()
-                    ),
-                    "voice_activation_clap_enabled": (
-                        self.setting_voice_clap_enabled.isChecked()
-                    ),
+                    "voice_activation_keyword": (self.setting_voice_keyword.text().strip()),
+                    "voice_activation_clap_enabled": (self.setting_voice_clap_enabled.isChecked()),
                     "voice_activation_clap_threshold": float(
                         self.setting_voice_clap_threshold.text().strip()
                     ),
                     "push_to_talk_hotkey": self.setting_ptt.text().strip(),
                     "cancel_hotkey": self.setting_cancel.text().strip(),
-                    "retain_transcripts_days": int(
-                        self.setting_retention.text().strip()
-                    ),
+                    "retain_transcripts_days": int(self.setting_retention.text().strip()),
                     "diagnostic_audio": self.setting_diagnostic_audio.isChecked(),
                     "noise_suppression": self.setting_noise.isChecked(),
                     "automatic_gain_control": self.setting_gain.isChecked(),
@@ -1924,9 +1821,7 @@ def run_desktop(container: Container) -> int:
                     "confirmation_overrides": confirmation_overrides,
                 }
                 validated = container.settings.model_copy(update=values)
-                validated = type(container.settings).model_validate(
-                    validated.model_dump()
-                )
+                validated = type(container.settings).model_validate(validated.model_dump())
             except Exception as error:
                 QMessageBox.critical(self, "Invalid Settings", str(error))
                 return
@@ -1940,9 +1835,7 @@ def run_desktop(container: Container) -> int:
                     "trusted_skill_keys",
                 },
             )
-            SettingsStore(container.database).set(
-                "application_settings", persisted
-            )
+            SettingsStore(container.database).set("application_settings", persisted)
             vault = SecretVault(validated.data_dir / "secrets")
             for name, field in (
                 ("openai", self.setting_openai_key),
@@ -1956,22 +1849,12 @@ def run_desktop(container: Container) -> int:
             container.settings = validated
             container.orchestrator.speech_mode = validated.speech_mode
             container.orchestrator.response_detail = validated.response_detail
-            container.orchestrator.show_reasoning_steps = (
-                validated.show_reasoning_steps
-            )
+            container.orchestrator.show_reasoning_steps = validated.show_reasoning_steps
             container.orchestrator.terminal_debug = validated.terminal_debug
-            container.orchestrator.hide_sensitive_display = (
-                validated.hide_sensitive_display
-            )
-            container.engine.confirmation_overrides = dict(
-                validated.confirmation_overrides
-            )
-            container.audio_capture.noise_suppression = (
-                validated.noise_suppression
-            )
-            container.audio_capture.automatic_gain_control = (
-                validated.automatic_gain_control
-            )
+            container.orchestrator.hide_sensitive_display = validated.hide_sensitive_display
+            container.engine.confirmation_overrides = dict(validated.confirmation_overrides)
+            container.audio_capture.noise_suppression = validated.noise_suppression
+            container.audio_capture.automatic_gain_control = validated.automatic_gain_control
             container.audio_capture.clap_detector.threshold = (
                 validated.voice_activation_clap_threshold
             )
@@ -2049,23 +1932,17 @@ def run_desktop(container: Container) -> int:
             self.macro_list.clear()
             for definition in container.macro_store.list():
                 self.macro_list.addItem(
-                    f"{definition.name}: {len(definition.steps)} step(s) - "
-                    f"{definition.description}"
+                    f"{definition.name}: {len(definition.steps)} step(s) - {definition.description}"
                 )
 
         def _edit_macro(self) -> None:
             name, ok = QInputDialog.getText(self, "Macro", "Macro name")
             if not ok or not name.strip():
                 return
-            description, ok = QInputDialog.getText(
-                self, "Macro", "Description"
-            )
+            description, ok = QInputDialog.getText(self, "Macro", "Description")
             if not ok:
                 return
-            example = (
-                '[{"skill_id":"core.calculator",'
-                '"arguments":{"expression":"2 + 2"}}]'
-            )
+            example = '[{"skill_id":"core.calculator","arguments":{"expression":"2 + 2"}}]'
             raw, ok = QInputDialog.getMultiLineText(
                 self, "Macro Steps", "JSON list of steps", example
             )
@@ -2084,9 +1961,7 @@ def run_desktop(container: Container) -> int:
                     if step.skill_id == "core.macro":
                         raise ValueError("Macros cannot call macros")
                     container.registry.get(step.skill_id).validate(step.arguments)
-                container.macro_store.save(
-                    MacroDefinition(name, description, steps)
-                )
+                container.macro_store.save(MacroDefinition(name, description, steps))
             except Exception as error:
                 QMessageBox.critical(self, "Invalid Macro", str(error))
                 return
@@ -2240,9 +2115,7 @@ def run_desktop(container: Container) -> int:
 
         def _delete_knowledge(self) -> None:
             selected = self._selected_knowledge()
-            if selected is None or not self._confirm(
-                f'Delete knowledge base "{selected.name}"?'
-            ):
+            if selected is None or not self._confirm(f'Delete knowledge base "{selected.name}"?'):
                 return
             container.knowledge_bases.delete(selected.id)
             self._reload_knowledge()
@@ -2261,12 +2134,8 @@ def run_desktop(container: Container) -> int:
             self.memory_table.setHorizontalHeaderLabels(
                 ["Status", "Type", "Key", "Memory", "Source", "Confidence"]
             )
-            self.memory_table.setSelectionBehavior(
-                QTableWidget.SelectionBehavior.SelectRows
-            )
-            self.memory_table.setEditTriggers(
-                QTableWidget.EditTrigger.NoEditTriggers
-            )
+            self.memory_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            self.memory_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
             self.memory_table.setAlternatingRowColors(True)
             self.memory_table.horizontalHeader().setStretchLastSection(True)
             self._reload_memories()
@@ -2348,9 +2217,7 @@ def run_desktop(container: Container) -> int:
 
         def _delete_memory(self) -> None:
             selected = self._selected_memory()
-            if selected is None or not self._confirm(
-                f'Delete memory "{selected.key}"?'
-            ):
+            if selected is None or not self._confirm(f'Delete memory "{selected.key}"?'):
                 return
             container.memory_store.delete(memory_id=selected.id)
             self._reload_memories()
@@ -2418,11 +2285,7 @@ def run_desktop(container: Container) -> int:
             controls.addWidget(add)
             controls.addWidget(self.bulk_register_applications_button)
             controls.addWidget(delete)
-            layout.addWidget(
-                QLabel(
-                    "Only applications registered here can be launched by skills."
-                )
-            )
+            layout.addWidget(QLabel("Only applications registered here can be launched by skills."))
             self.application_status = QLabel("")
             self.application_status.setObjectName("pageSubtitle")
             layout.addWidget(self.application_list)
@@ -2454,9 +2317,7 @@ def run_desktop(container: Container) -> int:
             self.application_status.setText("Scanning installed applications...")
 
             async def scan_apps():
-                return await LocalWindowsDeviceAdapter().search_installed_apps(
-                    limit=500
-                )
+                return await LocalWindowsDeviceAdapter().search_installed_apps(limit=500)
 
             worker = AsyncWorker(scan_apps())
             worker.complete.connect(self._finish_register_installed_applications)
@@ -2491,9 +2352,7 @@ def run_desktop(container: Container) -> int:
             self.application_status.setText("Installed application scan failed.")
             self._show_error(error)
 
-        def _register_application_alias(
-            self, requested_name: str | None = None
-        ) -> bool:
+        def _register_application_alias(self, requested_name: str | None = None) -> bool:
             path, _ = QFileDialog.getOpenFileName(
                 self, "Select Application", "", "Applications (*.exe)"
             )
@@ -2560,9 +2419,7 @@ def run_desktop(container: Container) -> int:
                 mode="json",
                 exclude={"trusted_model_keys", "trusted_skill_keys"},
             )
-            Path(destination).write_text(
-                json.dumps(payload, indent=2), encoding="utf-8"
-            )
+            Path(destination).write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
         def _backup_database(self) -> None:
             destination, _ = QFileDialog.getSaveFileName(
@@ -2590,24 +2447,16 @@ def run_desktop(container: Container) -> int:
             if not model_path:
                 return
             try:
-                manifest = ModelManifest.model_validate_json(
-                    Path(manifest_path).read_text("utf-8")
-                )
-                destination = container.model_manager.install_from_file(
-                    Path(model_path), manifest
-                )
+                manifest = ModelManifest.model_validate_json(Path(manifest_path).read_text("utf-8"))
+                destination = container.model_manager.install_from_file(Path(model_path), manifest)
             except Exception as error:
                 QMessageBox.critical(self, "Model Installation Failed", str(error))
                 return
-            QMessageBox.information(
-                self, "Model Installed", f"Installed to {destination}"
-            )
+            QMessageBox.information(self, "Model Installed", f"Installed to {destination}")
             self._reload_models()
 
         def _select_model_location(self) -> None:
-            path, _ = QFileDialog.getOpenFileName(
-                self, "Select Existing Local Model"
-            )
+            path, _ = QFileDialog.getOpenFileName(self, "Select Existing Local Model")
             if not path:
                 return
             component, ok = QInputDialog.getItem(
@@ -2618,12 +2467,8 @@ def run_desktop(container: Container) -> int:
                 editable=False,
             )
             if ok:
-                SettingsStore(container.database).set(
-                    f"model_location.{component}", path
-                )
-                QMessageBox.information(
-                    self, "Model Location Saved", f"{component}: {path}"
-                )
+                SettingsStore(container.database).set(f"model_location.{component}", path)
+                QMessageBox.information(self, "Model Location Saved", f"{component}: {path}")
 
         def _first_run(self) -> None:
             store = SettingsStore(container.database)
@@ -2666,9 +2511,7 @@ def run_desktop(container: Container) -> int:
                 return
             self.activity_log.clear()
             self._activity_started = time.perf_counter()
-            self._set_pipeline_state(
-                PipelineState.THINKING, "Interpreting your request"
-            )
+            self._set_pipeline_state(PipelineState.THINKING, "Interpreting your request")
             worker = AsyncWorker(container.orchestrator.handle_text(text))
             worker.complete.connect(self._show_result)
             worker.cancelled.connect(self._show_cancelled)
@@ -2692,8 +2535,7 @@ def run_desktop(container: Container) -> int:
                 self._set_pipeline_state(
                     PipelineState.IDLE,
                     self._passive_voice_status()
-                    if self._passive_voice_worker
-                    and self._passive_voice_worker.isRunning()
+                    if self._passive_voice_worker and self._passive_voice_worker.isRunning()
                     else "Request complete",
                 )
                 self._apply_passive_voice_indicators()
@@ -2725,9 +2567,7 @@ def run_desktop(container: Container) -> int:
                 default_choice="deny",
             )
             if decision != "approve":
-                self._set_pipeline_state(
-                    PipelineState.CANCELLED, "Permission was not granted"
-                )
+                self._set_pipeline_state(PipelineState.CANCELLED, "Permission was not granted")
                 return
             labels = {
                 "once": GrantType.ONCE,
@@ -2748,9 +2588,7 @@ def run_desktop(container: Container) -> int:
                 default_choice="deny",
             )
             if mode_label not in labels:
-                self._set_pipeline_state(
-                    PipelineState.CANCELLED, "Permission was not granted"
-                )
+                self._set_pipeline_state(PipelineState.CANCELLED, "Permission was not granted")
                 return
             grant_type = labels[mode_label]
             target_mode = self._voice_prompt_choice(
@@ -2770,9 +2608,7 @@ def run_desktop(container: Container) -> int:
                 default_choice="deny",
             )
             if target_mode not in {"requested_targets", "any_target"}:
-                self._set_pipeline_state(
-                    PipelineState.CANCELLED, "Permission was not granted"
-                )
+                self._set_pipeline_state(PipelineState.CANCELLED, "Permission was not granted")
                 return
             grants: dict[tuple[str, str, str, str], set[str]] = {}
             for request in outcome.permission_requests:
@@ -2797,17 +2633,11 @@ def run_desktop(container: Container) -> int:
                     capability=capability,
                     grant_type=grant_type,
                     targets=tuple(sorted(targets)),
-                    session_id=(
-                        session_id
-                        if grant_type == GrantType.SESSION
-                        else None
-                    ),
+                    session_id=(session_id if grant_type == GrantType.SESSION else None),
                     correlation_id=str(outcome.call.correlation_id),
                 )
             self._reload_permissions()
-            self._set_pipeline_state(
-                PipelineState.THINKING, "Preparing the approved action"
-            )
+            self._set_pipeline_state(PipelineState.THINKING, "Preparing the approved action")
             worker = AsyncWorker(container.engine.prepare(outcome.call))
             worker.complete.connect(self._show_continued_outcome)
             worker.failed.connect(self._show_error)
@@ -2835,18 +2665,12 @@ def run_desktop(container: Container) -> int:
                 default_choice="deny",
             )
             if decision != "approve":
-                self._set_pipeline_state(
-                    PipelineState.CANCELLED, "Application was not registered"
-                )
+                self._set_pipeline_state(PipelineState.CANCELLED, "Application was not registered")
                 return
             if not self._register_application_alias(request.application):
-                self._set_pipeline_state(
-                    PipelineState.CANCELLED, "Application was not registered"
-                )
+                self._set_pipeline_state(PipelineState.CANCELLED, "Application was not registered")
                 return
-            self._set_pipeline_state(
-                PipelineState.THINKING, "Preparing the registered application"
-            )
+            self._set_pipeline_state(PipelineState.THINKING, "Preparing the registered application")
             worker = AsyncWorker(container.engine.prepare(outcome.call))
             worker.complete.connect(self._show_continued_outcome)
             worker.failed.connect(self._show_error)
@@ -2896,9 +2720,7 @@ def run_desktop(container: Container) -> int:
             )
             if decision != "approve":
                 container.confirmations.deny(request.confirmation_id)
-                self._set_pipeline_state(
-                    PipelineState.CANCELLED, "Action was not confirmed"
-                )
+                self._set_pipeline_state(PipelineState.CANCELLED, "Action was not confirmed")
                 return
             typed_token = None
             if request.requires_typed_token:
@@ -2925,13 +2747,9 @@ def run_desktop(container: Container) -> int:
                         typed_token = None
                 if typed_token != expected:
                     container.confirmations.deny(request.confirmation_id)
-                    self._set_pipeline_state(
-                        PipelineState.CANCELLED, "Action was not confirmed"
-                    )
+                    self._set_pipeline_state(PipelineState.CANCELLED, "Action was not confirmed")
                     return
-            self._set_pipeline_state(
-                PipelineState.EXECUTING, request.exact_action
-            )
+            self._set_pipeline_state(PipelineState.EXECUTING, request.exact_action)
             worker = AsyncWorker(
                 container.engine.execute(
                     outcome.call,
@@ -2967,10 +2785,7 @@ def run_desktop(container: Container) -> int:
 
         def _display_response(self, response: Any) -> None:
             self.response.setPlainText(response.display_text)
-            error = (
-                response.response_type == ResponseType.ERROR
-                or response.severity == "error"
-            )
+            error = response.response_type == ResponseType.ERROR or response.severity == "error"
             self._print_to_terminal(response.display_text, error=error)
             self._set_response_type(response.response_type)
 
@@ -2998,10 +2813,7 @@ def run_desktop(container: Container) -> int:
             QMessageBox.critical(self, "Assistant Error", error)
 
         def _show_cancelled(self) -> None:
-            if (
-                self._passive_voice_worker
-                and self._passive_voice_worker.isRunning()
-            ):
+            if self._passive_voice_worker and self._passive_voice_worker.isRunning():
                 self._append_activity("Cancelled", "Stopped current command")
                 self._set_pipeline_state(PipelineState.IDLE, self._passive_voice_status())
                 self._apply_passive_voice_indicators()

@@ -75,15 +75,13 @@ class Settings(BaseModel):
         return keyword
 
     @model_validator(mode="after")
-    def _keyword_clap_mode_needs_trigger(self) -> "Settings":
+    def _keyword_clap_mode_needs_trigger(self) -> Settings:
         if (
             self.voice_activation_mode == "keyword_clap"
             and not self.voice_activation_keyword_enabled
             and not self.voice_activation_clap_enabled
         ):
-            raise ValueError(
-                "keyword/clap voice activation needs a keyword or clap trigger"
-            )
+            raise ValueError("keyword/clap voice activation needs a keyword or clap trigger")
         return self
 
     @property

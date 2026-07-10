@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import importlib
-import tempfile
 import shutil
+import tempfile
 from pathlib import Path
-from typing import Any
+
 from packaging.version import Version
 
 from assistant import API_VERSION
@@ -131,12 +131,9 @@ class SkillRegistry:
         added = tuple(sorted(new_capabilities - old_capabilities))
         if added and not permission_reviewed:
             raise PermissionError(
-                "Skill update adds capabilities requiring review: "
-                + ", ".join(added)
+                "Skill update adds capabilities requiring review: " + ", ".join(added)
             )
-        staging = Path(
-            tempfile.mkdtemp(prefix=f"{manifest.skill_id}-", dir=self.install_dir)
-        )
+        staging = Path(tempfile.mkdtemp(prefix=f"{manifest.skill_id}-", dir=self.install_dir))
         backup = target.with_name(target.name + ".previous")
         try:
             shutil.rmtree(staging)

@@ -63,7 +63,7 @@ class DeterministicRouter:
     APP_REGISTRATION_HELP = (
         "Open the Applications tab, choose Register Application, select the app's "
         ".exe file, and give it the name you want to use. After that you can say "
-        "\"open <name>\" and I will use that registered path."
+        '"open <name>" and I will use that registered path.'
     )
 
     CONTROL = {
@@ -271,10 +271,15 @@ class DeterministicRouter:
             try:
                 amount = spoken_number(match.group(1))
             except ValueError:
-                return RouteResult(
-                    None, clarification="How long should I set the timer for?"
-                )
-            multiplier = {"second": 1, "seconds": 1, "minute": 60, "minutes": 60, "hour": 3600, "hours": 3600}[match.group(2)]
+                return RouteResult(None, clarification="How long should I set the timer for?")
+            multiplier = {
+                "second": 1,
+                "seconds": 1,
+                "minute": 60,
+                "minutes": 60,
+                "hour": 3600,
+                "hours": 3600,
+            }[match.group(2)]
             return RouteResult(
                 Intent(
                     name="core.timer",
@@ -312,8 +317,7 @@ class DeterministicRouter:
             )
             explicit_calculation = match.group(1) == "calculate"
             numeric_expression = bool(
-                re.fullmatch(r"[\d\s.+\-*/()%]+", expression)
-                and re.search(r"\d", expression)
+                re.fullmatch(r"[\d\s.+\-*/()%]+", expression) and re.search(r"\d", expression)
             )
             if explicit_calculation or numeric_expression:
                 return RouteResult(
@@ -497,36 +501,38 @@ class DeterministicRouter:
         if policy_intent := self._route_file_access_policy(routed):
             return RouteResult(policy_intent)
         audio_target = r"(?:(?:my|the) )?(?:(?:system|device|computer) )?(?:volume|sound|audio)"
-        if match := re.fullmatch(
-            rf"(?:set|adjust) {audio_target}(?: to)? (.+?)(?: percent|%)?",
-            routed,
-        ):
-            if (level := self._percent(match.group(1))) is not None:
-                return RouteResult(
-                    Intent(
-                        name="windows.device_control",
-                        arguments={"operation": "set_volume", "level": level},
-                        confidence=0.98,
-                        source="rule",
-                    )
+        if (
+            match := re.fullmatch(
+                rf"(?:set|adjust) {audio_target}(?: to)? (.+?)(?: percent|%)?",
+                routed,
+            )
+        ) and (level := self._percent(match.group(1))) is not None:
+            return RouteResult(
+                Intent(
+                    name="windows.device_control",
+                    arguments={"operation": "set_volume", "level": level},
+                    confidence=0.98,
+                    source="rule",
                 )
-        if match := re.fullmatch(
-            rf"(increase|raise|decrease|lower|turn up|turn down) {audio_target}(?: by)? (.+?)(?: percent|%)?",
-            routed,
-        ):
-            if (value := self._percent(match.group(2))) is not None:
-                direction = -1 if match.group(1) in {"decrease", "lower", "turn down"} else 1
-                return RouteResult(
-                    Intent(
-                        name="windows.device_control",
-                        arguments={
-                            "operation": "change_volume",
-                            "delta": direction * value,
-                        },
-                        confidence=0.96,
-                        source="rule",
-                    )
+            )
+        if (
+            match := re.fullmatch(
+                rf"(increase|raise|decrease|lower|turn up|turn down) {audio_target}(?: by)? (.+?)(?: percent|%)?",
+                routed,
+            )
+        ) and (value := self._percent(match.group(2))) is not None:
+            direction = -1 if match.group(1) in {"decrease", "lower", "turn down"} else 1
+            return RouteResult(
+                Intent(
+                    name="windows.device_control",
+                    arguments={
+                        "operation": "change_volume",
+                        "delta": direction * value,
+                    },
+                    confidence=0.96,
+                    source="rule",
                 )
+            )
         if re.fullmatch(rf"mute {audio_target}", routed):
             return RouteResult(
                 Intent(
@@ -545,36 +551,38 @@ class DeterministicRouter:
                     source="rule",
                 )
             )
-        if match := re.fullmatch(
-            r"(?:set|adjust) (?:screen )?brightness(?: to)? (.+?)(?: percent|%)?",
-            routed,
-        ):
-            if (level := self._percent(match.group(1))) is not None:
-                return RouteResult(
-                    Intent(
-                        name="windows.device_control",
-                        arguments={"operation": "set_brightness", "level": level},
-                        confidence=0.98,
-                        source="rule",
-                    )
+        if (
+            match := re.fullmatch(
+                r"(?:set|adjust) (?:screen )?brightness(?: to)? (.+?)(?: percent|%)?",
+                routed,
+            )
+        ) and (level := self._percent(match.group(1))) is not None:
+            return RouteResult(
+                Intent(
+                    name="windows.device_control",
+                    arguments={"operation": "set_brightness", "level": level},
+                    confidence=0.98,
+                    source="rule",
                 )
-        if match := re.fullmatch(
-            r"(increase|raise|decrease|lower|turn up|turn down) (?:screen )?brightness(?: by)? (.+?)(?: percent|%)?",
-            routed,
-        ):
-            if (value := self._percent(match.group(2))) is not None:
-                direction = -1 if match.group(1) in {"decrease", "lower", "turn down"} else 1
-                return RouteResult(
-                    Intent(
-                        name="windows.device_control",
-                        arguments={
-                            "operation": "change_brightness",
-                            "delta": direction * value,
-                        },
-                        confidence=0.96,
-                        source="rule",
-                    )
+            )
+        if (
+            match := re.fullmatch(
+                r"(increase|raise|decrease|lower|turn up|turn down) (?:screen )?brightness(?: by)? (.+?)(?: percent|%)?",
+                routed,
+            )
+        ) and (value := self._percent(match.group(2))) is not None:
+            direction = -1 if match.group(1) in {"decrease", "lower", "turn down"} else 1
+            return RouteResult(
+                Intent(
+                    name="windows.device_control",
+                    arguments={
+                        "operation": "change_brightness",
+                        "delta": direction * value,
+                    },
+                    confidence=0.96,
+                    source="rule",
                 )
+            )
         if match := re.fullmatch(
             r"connect (?:to )?(?:my |the )?(?:wi-?fi|wifi|wireless)(?: network)? (.+)",
             routed,
@@ -732,7 +740,13 @@ class DeterministicRouter:
                     source="rule",
                 )
             )
-        if routed in {"lock device", "lock the device", "lock my device", "lock computer", "lock the computer"}:
+        if routed in {
+            "lock device",
+            "lock the device",
+            "lock my device",
+            "lock computer",
+            "lock the computer",
+        }:
             return RouteResult(
                 Intent(
                     name="windows.device_control",
@@ -741,7 +755,14 @@ class DeterministicRouter:
                     source="rule",
                 )
             )
-        if routed in {"restart device", "restart the device", "restart computer", "restart the computer", "reboot device", "reboot computer"}:
+        if routed in {
+            "restart device",
+            "restart the device",
+            "restart computer",
+            "restart the computer",
+            "reboot device",
+            "reboot computer",
+        }:
             return RouteResult(
                 Intent(
                     name="windows.device_control",
@@ -750,7 +771,14 @@ class DeterministicRouter:
                     source="rule",
                 )
             )
-        if routed in {"shut down device", "shutdown device", "shut down the device", "shutdown the device", "shut down computer", "shutdown computer"}:
+        if routed in {
+            "shut down device",
+            "shutdown device",
+            "shut down the device",
+            "shutdown the device",
+            "shut down computer",
+            "shutdown computer",
+        }:
             return RouteResult(
                 Intent(
                     name="windows.device_control",
@@ -866,25 +894,24 @@ class DeterministicRouter:
                     source="rule",
                 )
             )
-        if match := re.fullmatch(
-            r"(?:move|place|put|switch) (.+?) (?:window )?(?:to|on) (?:my |the )?(?:(?:monitor|screen|display) )?(.+?)(?: (?:monitor|screen|display))?",
-            routed,
-        ):
-            if monitor := self._monitor_index(match.group(2)):
-                return RouteResult(
-                    Intent(
-                        name="windows.application_window",
-                        arguments={
-                            "operation": "move_to_monitor",
-                            "process_name": executable_from_command_name(
-                                match.group(1)
-                            ),
-                            "monitor": monitor,
-                        },
-                        confidence=0.93,
-                        source="rule",
-                    )
+        if (
+            match := re.fullmatch(
+                r"(?:move|place|put|switch) (.+?) (?:window )?(?:to|on) (?:my |the )?(?:(?:monitor|screen|display) )?(.+?)(?: (?:monitor|screen|display))?",
+                routed,
+            )
+        ) and (monitor := self._monitor_index(match.group(2))):
+            return RouteResult(
+                Intent(
+                    name="windows.application_window",
+                    arguments={
+                        "operation": "move_to_monitor",
+                        "process_name": executable_from_command_name(match.group(1)),
+                        "monitor": monitor,
+                    },
+                    confidence=0.93,
+                    source="rule",
                 )
+            )
         if match := re.fullmatch(
             r"(?:move|place|put) (.+?) (?:window )?to x ?(-?\d+) y ?(-?\d+)",
             routed,
@@ -1060,19 +1087,13 @@ class DeterministicRouter:
                 if self._is_direct_launcher_follow_up(intent, follow_up_intent):
                     return RouteResult(follow_up_intent)
                 return RouteResult(intent, intents=(intent, follow_up_intent))
-            if placement_intent := self._route_launch_placement(
-                application, raw_target
-            ):
+            if placement_intent := self._route_launch_placement(application, raw_target):
                 return RouteResult(intent, intents=(intent, placement_intent))
-            return RouteResult(
-                intent
-            )
+            return RouteResult(intent)
         if match := re.fullmatch(r"(?:open|launch|start) (.+)", routed):
             raw_target = match.group(1)
             application, follow_up = self._split_launch_target(raw_target)
-            if not follow_up and (
-                fallback_url := self._website_fallback_url(application)
-            ):
+            if not follow_up and (fallback_url := self._website_fallback_url(application)):
                 return RouteResult(
                     Intent(
                         name="windows.browser_navigate",
@@ -1092,13 +1113,9 @@ class DeterministicRouter:
                 if self._is_direct_launcher_follow_up(intent, follow_up_intent):
                     return RouteResult(follow_up_intent)
                 return RouteResult(intent, intents=(intent, follow_up_intent))
-            if placement_intent := self._route_launch_placement(
-                application, raw_target
-            ):
+            if placement_intent := self._route_launch_placement(application, raw_target):
                 return RouteResult(intent, intents=(intent, placement_intent))
-            return RouteResult(
-                intent
-            )
+            return RouteResult(intent)
         if match := re.fullmatch(r"(?:terminate|end) process (\d+)", routed):
             return RouteResult(
                 Intent(
@@ -1197,13 +1214,11 @@ class DeterministicRouter:
                 ambiguity_reasons=("No deterministic rule matched",),
             ),
             needs_llm=True,
-            )
+        )
 
     def _registered_application_names(self) -> tuple[str, ...]:
         names = (
-            self.application_names()
-            if callable(self.application_names)
-            else self.application_names
+            self.application_names() if callable(self.application_names) else self.application_names
         )
         return tuple(
             sorted(
@@ -1233,9 +1248,7 @@ class DeterministicRouter:
                 arguments={
                     "operation": operation,
                     "path": match.group("path").strip(),
-                    "access": DeterministicRouter._policy_access(
-                        match.group("access")
-                    ),
+                    "access": DeterministicRouter._policy_access(match.group("access")),
                     "list_name": match.group("list_name"),
                 },
                 confidence=0.94,
@@ -1251,9 +1264,7 @@ class DeterministicRouter:
                 arguments={
                     "operation": "add",
                     "path": match.group("path").strip(),
-                    "access": DeterministicRouter._policy_access(
-                        match.group("access")
-                    ),
+                    "access": DeterministicRouter._policy_access(match.group("access")),
                     "list_name": match.group("list_name"),
                 },
                 confidence=0.94,
@@ -1350,9 +1361,7 @@ class DeterministicRouter:
             ),
             (
                 "reload",
-                (
-                    r"(?:reload|refresh)(?: (?:this |the |current )?(?:page|tab|browser))?",
-                ),
+                (r"(?:reload|refresh)(?: (?:this |the |current )?(?:page|tab|browser))?",),
             ),
         )
         for operation, operation_patterns in patterns:
@@ -1369,14 +1378,10 @@ class DeterministicRouter:
     def _route_browser_tab_launch(routed: str) -> Intent | None:
         browser_names = "|".join(
             re.escape(name)
-            for name in sorted(
-                DeterministicRouter.BROWSER_APPLICATIONS, key=len, reverse=True
-            )
+            for name in sorted(DeterministicRouter.BROWSER_APPLICATIONS, key=len, reverse=True)
         )
-        website_first_intent = (
-            DeterministicRouter._route_website_first_private_browser_launch(
-                routed, browser_names
-            )
+        website_first_intent = DeterministicRouter._route_website_first_private_browser_launch(
+            routed, browser_names
         )
         if website_first_intent:
             return website_first_intent
@@ -1445,9 +1450,7 @@ class DeterministicRouter:
         if website_match and (
             url := DeterministicRouter._website_url(website_match.group("website"))
         ):
-            application = (
-                website_match.groupdict().get("application") or "browser"
-            ).strip()
+            application = (website_match.groupdict().get("application") or "browser").strip()
             private = bool(website_match.groupdict().get("private_before")) or bool(
                 (website_match.groupdict().get("private_after") or "").strip()
             )
@@ -1748,8 +1751,7 @@ class DeterministicRouter:
     def _is_direct_launcher_follow_up(intent: Intent, follow_up: Intent) -> bool:
         return (
             follow_up.name == "windows.launcher"
-            and intent.arguments.get("application")
-            == follow_up.arguments.get("application")
+            and intent.arguments.get("application") == follow_up.arguments.get("application")
             and bool(follow_up.arguments.get("url"))
         )
 
@@ -1767,23 +1769,23 @@ class DeterministicRouter:
                 name="windows.launcher",
                 arguments={
                     "application": application,
-                    "url": "https://search.brave.com/search?"
-                    + urlencode({"q": match.group(1)}),
+                    "url": "https://search.brave.com/search?" + urlencode({"q": match.group(1)}),
                 },
                 confidence=0.94,
                 source="rule",
             )
-        if match := re.fullmatch(
-            r"(?:read|fetch|open|go to|navigate to) (.+)",
-            routed,
-        ):
-            if url := DeterministicRouter._website_url(match.group(1)):
-                return Intent(
-                    name="windows.launcher",
-                    arguments={"application": application, "url": url},
-                    confidence=0.94,
-                    source="rule",
-                )
+        if (
+            match := re.fullmatch(
+                r"(?:read|fetch|open|go to|navigate to) (.+)",
+                routed,
+            )
+        ) and (url := DeterministicRouter._website_url(match.group(1))):
+            return Intent(
+                name="windows.launcher",
+                arguments={"application": application, "url": url},
+                confidence=0.94,
+                source="rule",
+            )
         if url := DeterministicRouter._website_url(routed):
             return Intent(
                 name="windows.launcher",
@@ -1806,11 +1808,7 @@ class DeterministicRouter:
             parsed = urlsplit(target)
         else:
             parsed = urlsplit(f"https://{target}")
-        if (
-            parsed.scheme != "https"
-            or not parsed.netloc
-            or "." not in parsed.netloc
-        ):
+        if parsed.scheme != "https" or not parsed.netloc or "." not in parsed.netloc:
             return None
         hostname = parsed.hostname or ""
         if not re.fullmatch(r"[a-z0-9.-]+\.[a-z]{2,}", hostname, re.I):

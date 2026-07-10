@@ -1,5 +1,4 @@
 import pytest
-from jsonschema import ValidationError
 
 from assistant.context.snapshot import ContextSnapshot
 from assistant.language.planner import InvalidPlannerResponse, LocalPlanner, SkillRetriever
@@ -27,11 +26,7 @@ class FakeProvider:
     async def structured_completion(self, prompt, schema, timeout_seconds):
         self.last_prompt = prompt
         self.last_timeout_seconds = timeout_seconds
-        output = (
-            self.output[self.calls]
-            if isinstance(self.output, list)
-            else self.output
-        )
+        output = self.output[self.calls] if isinstance(self.output, list) else self.output
         self.calls += 1
         return output
 
@@ -83,9 +78,7 @@ async def test_planner_accepts_only_retrieved_schema_valid_call():
     )
     intent = await planner.plan("calculate two plus two")
     assert intent.name == "core.calculator"
-    assert "planning and conversational intelligence for Local Assistant" in (
-        provider.last_prompt
-    )
+    assert "planning and conversational intelligence for Local Assistant" in (provider.last_prompt)
     assert "Registered skills are your only action capabilities" in provider.last_prompt
     assert '"id":"core.calculator"' in provider.last_prompt
     assert '"id":"core.datetime"' in provider.last_prompt
@@ -307,9 +300,7 @@ async def test_planner_accepts_empty_reject_answer_with_reason():
             {
                 "disposition": "reject",
                 "skill_id": "",
-                "arguments": {
-                    "reason": "The request cannot be handled by any registered skill."
-                },
+                "arguments": {"reason": "The request cannot be handled by any registered skill."},
                 "answer": "",
                 "confidence": 0.95,
                 "clarification": None,
@@ -321,9 +312,7 @@ async def test_planner_accepts_empty_reject_answer_with_reason():
     intent = await planner.plan("turn off my wifi")
 
     assert intent.name == "conversation.reject"
-    assert intent.arguments["text"] == (
-        "The request cannot be handled by any registered skill."
-    )
+    assert intent.arguments["text"] == ("The request cannot be handled by any registered skill.")
 
 
 @pytest.mark.asyncio
@@ -339,9 +328,7 @@ async def test_planner_infers_missing_skill_id_from_valid_arguments():
                 "clarification": "None",
             }
         ),
-        SkillRetriever(
-            (CalculatorSkill.manifest, DateTimeSkill.manifest, TimerSkill.manifest)
-        ),
+        SkillRetriever((CalculatorSkill.manifest, DateTimeSkill.manifest, TimerSkill.manifest)),
     )
 
     intent = await planner.plan("set a timer for one minute")
@@ -360,8 +347,7 @@ async def test_planner_uses_answer_when_skill_call_has_no_executable_arguments()
                 "skill_id": "",
                 "arguments": {},
                 "answer": (
-                    "I can set a timer for you. A 10-second timer will go off "
-                    "in 10 seconds."
+                    "I can set a timer for you. A 10-second timer will go off in 10 seconds."
                 ),
                 "confidence": 1,
                 "clarification": None,
@@ -552,9 +538,7 @@ async def test_complex_planner_treats_single_action_plan_arguments_as_skill():
         SkillRetriever((FileOperationSkill(object()).manifest,)),
     )
 
-    decision = await planner.plan_decision(
-        "Add a text file to the assistant folder on my desktop"
-    )
+    decision = await planner.plan_decision("Add a text file to the assistant folder on my desktop")
 
     assert decision.intent.name == "windows.file_operation"
     assert decision.intent.arguments == {
@@ -718,14 +702,9 @@ async def test_complex_planner_uses_clarification_from_invalid_skill_call():
                 "operation": "clean up downloads",
                 "destination": None,
             },
-            "answer": (
-                "I will help you clean up your Downloads folder by organizing "
-                "the files."
-            ),
+            "answer": ("I will help you clean up your Downloads folder by organizing the files."),
             "confidence": 0.95,
-            "clarification": (
-                "Should I organize Downloads by file type, date, or project/name?"
-            ),
+            "clarification": ("Should I organize Downloads by file type, date, or project/name?"),
         }
     )
     planner = LocalPlanner(
@@ -754,9 +733,7 @@ async def test_interpreted_planner_uses_clarification_from_invalid_skill_call():
             },
             "answer": None,
             "confidence": 0.95,
-            "clarification": (
-                "Should I organize Downloads by file type, date, or project/name?"
-            ),
+            "clarification": ("Should I organize Downloads by file type, date, or project/name?"),
         }
     )
     planner = LocalPlanner(

@@ -1,2 +1,1 @@
 """Versioned Python skill framework."""
-

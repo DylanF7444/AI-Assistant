@@ -53,9 +53,7 @@ class Skill(ABC):
         return f"{self.manifest.display_name}: {arguments.model_dump_json()}"
 
     @abstractmethod
-    async def execute(
-        self, call: SkillCall, cancel_event: asyncio.Event
-    ) -> SkillResult: ...
+    async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult: ...
 
     async def progress(self, call: SkillCall) -> AsyncIterator[PipelineEvent]:
         if False:
@@ -74,6 +72,14 @@ class Skill(ABC):
 def validate_call(skill: Skill, call: SkillCall) -> BaseModel:
     if call.skill_id != skill.manifest.skill_id:
         raise ValidationError.from_exception_data(
-            "SkillCall", [{"type": "value_error", "loc": ("skill_id",), "ctx": {"error": ValueError("Skill ID mismatch")}, "input": call.skill_id}]
+            "SkillCall",
+            [
+                {
+                    "type": "value_error",
+                    "loc": ("skill_id",),
+                    "ctx": {"error": ValueError("Skill ID mismatch")},
+                    "input": call.skill_id,
+                }
+            ],
         )
     return skill.validate(call.arguments)

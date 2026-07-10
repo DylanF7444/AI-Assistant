@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-import asyncio
 import array
+import asyncio
 import math
 import re
 import time
 import wave
-from datetime import UTC, datetime
 from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from assistant.audio.activation import ClapDetector
@@ -118,9 +118,7 @@ def display_audio_devices(
     return tuple(item for _, item in sorted(candidates.values(), key=lambda row: row[0]))
 
 
-def _is_pseudo_device(
-    name: str, *, input_only: bool = False, output_only: bool = False
-) -> bool:
+def _is_pseudo_device(name: str, *, input_only: bool = False, output_only: bool = False) -> bool:
     normalized = name.strip().casefold()
     pseudo_names = set()
     if input_only or not output_only:
@@ -218,9 +216,7 @@ class AudioCapture:
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=100)
         blocksize = int(self.sample_rate * 0.03)
-        pre_roll = deque(
-            maxlen=max(1, int(self.pre_roll_seconds * self.sample_rate / blocksize))
-        )
+        pre_roll = deque(maxlen=max(1, int(self.pre_roll_seconds * self.sample_rate / blocksize)))
         started = speaking = False
         diagnostic = bytearray()
         last_voice = start_time = time.monotonic()
@@ -276,16 +272,11 @@ class AudioCapture:
                         break
         except Exception as exc:
             device = "default" if self.device is None else str(self.device)
-            raise RuntimeError(
-                f"Unable to open or read microphone device {device}: {exc}"
-            ) from exc
+            raise RuntimeError(f"Unable to open or read microphone device {device}: {exc}") from exc
         finally:
             if self.diagnostic_dir and diagnostic:
                 self.diagnostic_dir.mkdir(parents=True, exist_ok=True)
-                name = (
-                    datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-                    + f"-{uuid4().hex[:8]}.wav"
-                )
+                name = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + f"-{uuid4().hex[:8]}.wav"
                 with wave.open(str(self.diagnostic_dir / name), "wb") as output:
                     output.setnchannels(1)
                     output.setsampwidth(2)

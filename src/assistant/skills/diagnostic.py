@@ -63,13 +63,9 @@ class DiagnosticSkill(Skill):
                 )
         devices = enumerate_devices()
         if not any(device.input_channels for device in devices):
-            guidance.append(
-                "No microphone is available. Connect or enable an input device."
-            )
+            guidance.append("No microphone is available. Connect or enable an input device.")
         if not any(device.output_channels for device in devices):
-            guidance.append(
-                "No audio output is available. Connect or enable an output device."
-            )
+            guidance.append("No audio output is available. Connect or enable an output device.")
         skill_health = []
         if args.include_skills:
             for item in self.registry.list():

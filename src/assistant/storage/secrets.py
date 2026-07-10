@@ -85,6 +85,8 @@ class SecretVault:
         return self._path(name).is_file()
 
     def _path(self, name: str) -> Path:
-        if not name or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789_-" for character in name):
+        if not name or any(
+            character not in "abcdefghijklmnopqrstuvwxyz0123456789_-" for character in name
+        ):
             raise ValueError("Invalid secret name")
         return self.root / f"{name}.bin"

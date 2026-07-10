@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 
 from assistant.contracts import PermissionContext, ResultStatus, SkillCall
@@ -56,9 +54,7 @@ async def test_idempotency_key_returns_the_previous_completed_result(
 ):
     engine = build_engine(database, audit)
     first_call = calculator_call()
-    changed_call = first_call.model_copy(
-        update={"arguments": {"expression": "100 + 1"}}
-    )
+    changed_call = first_call.model_copy(update={"arguments": {"expression": "100 + 1"}})
 
     first = await engine.execute(first_call)
     duplicate = await engine.execute(changed_call)

@@ -3,9 +3,9 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass
 
-from assistant.config import Settings
 from assistant.audio.capture import AudioCapture
 from assistant.audio.wakeword import OpenWakeWordProvider
+from assistant.config import Settings
 from assistant.context.providers import (
     DesktopContextProvider,
     DeviceContextProvider,
@@ -14,57 +14,7 @@ from assistant.context.providers import (
 )
 from assistant.events import EventBus
 from assistant.execution.engine import ExecutionEngine
-from assistant.orchestrator import AssistantOrchestrator
-from assistant.policy.confirmations import ConfirmationManager
-from assistant.policy.file_access import FileAccessPolicyStore
-from assistant.policy.permissions import PermissionManager
-from assistant.router.deterministic import DeterministicRouter
-from assistant.skills.builtin import (
-    CalculatorSkill,
-    ClipboardSkill,
-    DateTimeSkill,
-    FileSearchSkill,
-    FileAccessPolicySkill,
-    HelpSkill,
-    LauncherSkill,
-    MediaSkill,
-    RegisteredApplicationsSkill,
-    TimerSkill,
-)
-from assistant.skills.registry import SkillRegistry
-from assistant.skills.productivity import (
-    NoteSkill,
-    ReminderSkill,
-    TaskSkill,
-    UnitConversionSkill,
-)
-from assistant.skills.windows import (
-    ApplicationWindowSkill,
-    BrowserNavigateSkill,
-    ContextNavigationSkill,
-    FileOperationSkill,
-    NotificationSkill,
-    ProcessSkill,
-    InputAutomationSkill,
-    WindowsDeviceControlSkill,
-    WindowsSettingSkill,
-)
-from assistant.skills.macros import MacroSkill
-from assistant.skills.memory import MemorySkill
-from assistant.skills.network import CloudAskSkill, WebFetchSkill, WebSearchSkill
-from assistant.skills.diagnostic import DiagnosticSkill
-from assistant.storage.database import AuditStore, Database, SettingsStore
-from assistant.storage.database import MetricsStore
-from assistant.logging import configure_logging
-from assistant.storage.history import HistoryStore
-from assistant.storage.macros import MacroStore
-from assistant.storage.memory import MemoryStore
-from assistant.storage.aliases import AliasStore
-from assistant.storage.knowledge import KnowledgeBaseStore
-from assistant.storage.secrets import SecretVault
-from assistant.stt.faster_whisper import FasterWhisperProvider
-from assistant.tts.piper import PiperProvider
-from assistant.models import ModelManager
+from assistant.integrations.web import CloudModelClient, WebClient
 from assistant.language.embeddings import (
     FallbackEmbeddingProvider,
     LexicalFallbackEmbeddingProvider,
@@ -79,18 +29,67 @@ from assistant.language.retrieval import (
     SkillSemanticIndexer,
     WorkflowTemplateSemanticIndexer,
 )
-from assistant.integrations.web import CloudModelClient, WebClient
+from assistant.logging import configure_logging
+from assistant.models import ModelManager
+from assistant.orchestrator import AssistantOrchestrator
+from assistant.policy.confirmations import ConfirmationManager
+from assistant.policy.file_access import FileAccessPolicyStore
+from assistant.policy.permissions import PermissionManager
+from assistant.router.deterministic import DeterministicRouter
+from assistant.skills.builtin import (
+    CalculatorSkill,
+    ClipboardSkill,
+    DateTimeSkill,
+    FileAccessPolicySkill,
+    FileSearchSkill,
+    HelpSkill,
+    LauncherSkill,
+    MediaSkill,
+    RegisteredApplicationsSkill,
+    TimerSkill,
+)
+from assistant.skills.diagnostic import DiagnosticSkill
+from assistant.skills.macros import MacroSkill
+from assistant.skills.memory import MemorySkill
+from assistant.skills.network import CloudAskSkill, WebFetchSkill, WebSearchSkill
+from assistant.skills.productivity import (
+    NoteSkill,
+    ReminderSkill,
+    TaskSkill,
+    UnitConversionSkill,
+)
+from assistant.skills.registry import SkillRegistry
+from assistant.skills.windows import (
+    ApplicationWindowSkill,
+    BrowserNavigateSkill,
+    ContextNavigationSkill,
+    FileOperationSkill,
+    InputAutomationSkill,
+    NotificationSkill,
+    ProcessSkill,
+    WindowsDeviceControlSkill,
+    WindowsSettingSkill,
+)
+from assistant.storage.aliases import AliasStore
+from assistant.storage.database import AuditStore, Database, MetricsStore, SettingsStore
+from assistant.storage.history import HistoryStore
+from assistant.storage.knowledge import KnowledgeBaseStore
+from assistant.storage.macros import MacroStore
+from assistant.storage.memory import MemoryStore
+from assistant.storage.secrets import SecretVault
 from assistant.storage.vector_index import VectorIndex
+from assistant.stt.faster_whisper import FasterWhisperProvider
+from assistant.tts.piper import PiperProvider
 from assistant.windows.adapters import (
     LocalFileSystemAdapter,
+    LocalWindowsDeviceAdapter,
+    LocalWindowsSettingsAdapter,
     WindowsApplicationAdapter,
     WindowsClipboardAdapter,
+    WindowsInputAutomationAdapter,
     WindowsMediaAdapter,
     WindowsNotificationAdapter,
     WindowsProcessAdapter,
-    WindowsInputAutomationAdapter,
-    LocalWindowsDeviceAdapter,
-    LocalWindowsSettingsAdapter,
 )
 
 
@@ -123,10 +122,7 @@ class Container:
 
 
 def _decode_trusted_keys(encoded_keys: dict[str, str]) -> dict[str, bytes]:
-    return {
-        key_id: base64.b64decode(value)
-        for key_id, value in encoded_keys.items()
-    }
+    return {key_id: base64.b64decode(value) for key_id, value in encoded_keys.items()}
 
 
 def _settings_with_persisted_values(settings: Settings, database: Database) -> Settings:
@@ -178,9 +174,7 @@ def _register_windows_skills(
             resolver=resolve_application,
         )
     )
-    registry.register(
-        RegisteredApplicationsSkill(registered_applications)
-    )
+    registry.register(RegisteredApplicationsSkill(registered_applications))
     registry.register(ApplicationWindowSkill(applications))
     registry.register(ContextNavigationSkill(applications))
     registry.register(BrowserNavigateSkill(applications))
@@ -209,9 +203,7 @@ def _register_network_skills(
     secret_vault: SecretVault,
 ) -> None:
     web_client = WebClient()
-    registry.register(
-        WebSearchSkill(web_client, secret_vault.get, settings.search_provider)
-    )
+    registry.register(WebSearchSkill(web_client, secret_vault.get, settings.search_provider))
     registry.register(WebFetchSkill(web_client))
     registry.register(
         CloudAskSkill(
@@ -313,11 +305,7 @@ def build_container(settings: Settings | None = None) -> Container:
         confirmation_overrides=settings.confirmation_overrides,
     )
     history = HistoryStore(database, settings.retain_transcripts_days)
-    llm = (
-        OllamaProvider(settings.llm_model)
-        if settings.llm_provider == "ollama"
-        else None
-    )
+    llm = OllamaProvider(settings.llm_model) if settings.llm_provider == "ollama" else None
     planner = (
         LocalPlanner(
             llm,
@@ -357,9 +345,7 @@ def build_container(settings: Settings | None = None) -> Container:
         automatic_gain_control=settings.automatic_gain_control,
         clap_threshold=settings.voice_activation_clap_threshold,
         diagnostic_dir=(
-            settings.data_dir / "diagnostic-audio"
-            if settings.diagnostic_audio
-            else None
+            settings.data_dir / "diagnostic-audio" if settings.diagnostic_audio else None
         ),
     )
     stt = FasterWhisperProvider(settings.stt_model, settings.stt_device)
@@ -392,11 +378,7 @@ def build_container(settings: Settings | None = None) -> Container:
         )
     orchestrator.tts = tts
     orchestrator.speech_mode = settings.speech_mode
-    registry.register(
-        DiagnosticSkill(
-            registry, {"stt": stt, "llm": llm, "tts": tts}
-        )
-    )
+    registry.register(DiagnosticSkill(registry, {"stt": stt, "llm": llm, "tts": tts}))
     return Container(
         settings=settings,
         database=database,

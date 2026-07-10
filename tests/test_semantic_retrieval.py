@@ -104,9 +104,7 @@ def test_vector_index_upserts_and_searches_by_cosine(tmp_path):
         embedding_model="test",
     )
 
-    assert index.search([1.0, 0.0], namespaces={"skill"}, limit=1)[0].metadata == {
-        "updated": True
-    }
+    assert index.search([1.0, 0.0], namespaces={"skill"}, limit=1)[0].metadata == {"updated": True}
 
 
 @pytest.mark.asyncio
@@ -197,10 +195,7 @@ async def test_skill_semantic_indexer_indexes_enabled_skills_and_examples(tmp_pa
 
     assert results[0].namespace == "skill_example"
     assert results[0].metadata["skill_id"] == "windows.application_window"
-    assert {
-        (item.namespace, item.metadata["skill_id"])
-        for item in results
-    } == {
+    assert {(item.namespace, item.metadata["skill_id"]) for item in results} == {
         ("skill", "windows.application_window"),
         ("skill_example", "windows.application_window"),
     }

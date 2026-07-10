@@ -31,9 +31,7 @@ async def test_home_assistant_validates_targets_and_uses_bearer_auth():
         requests.append(request)
         return FakeResponse(b'{"state":"on"}')
 
-    adapter = HomeAssistantAdapter(
-        "https://home.local", "secret-token", opener=opener
-    )
+    adapter = HomeAssistantAdapter("https://home.local", "secret-token", opener=opener)
     state = await adapter.state("light.kitchen")
     assert state["state"] == "on"
     assert requests[0].headers["Authorization"] == "Bearer secret-token"
@@ -87,9 +85,7 @@ class FakeMQTTClient:
             success=True,
             summary="done",
         )
-        self.on_message(
-            self, None, SimpleNamespace(payload=result.model_dump_json().encode())
-        )
+        self.on_message(self, None, SimpleNamespace(payload=result.model_dump_json().encode()))
 
     def loop_start(self):
         pass
@@ -119,8 +115,6 @@ async def test_mqtt_transport_uses_mutual_tls_and_signed_command(tmp_path: Path)
         device_keys={device_id: b"shared-key"},
         client_factory=lambda: client,
     )
-    result = await transport.send(
-        DeviceCommand(device_id=device_id, capability="light.on")
-    )
+    result = await transport.send(DeviceCommand(device_id=device_id, capability="light.on"))
     assert result.success
     assert client.tls["cert_reqs"] is not None

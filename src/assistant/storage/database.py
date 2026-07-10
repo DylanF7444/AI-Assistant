@@ -221,9 +221,7 @@ class Database:
         with self.session() as session:
             row = session.get(SchemaVersionRow, 1)
             if row is None:
-                session.add(
-                    SchemaVersionRow(id=1, version=self.CURRENT_SCHEMA_VERSION)
-                )
+                session.add(SchemaVersionRow(id=1, version=self.CURRENT_SCHEMA_VERSION))
             elif row.version > self.CURRENT_SCHEMA_VERSION:
                 raise RuntimeError("Database was created by a newer application version")
             elif row.version < self.CURRENT_SCHEMA_VERSION:
@@ -264,9 +262,7 @@ class Database:
             path = Path(self.engine.url.database or "")
             connection = None
             try:
-                connection = sqlite3.connect(
-                    f"file:{path.as_posix()}?mode=ro", uri=True, timeout=1
-                )
+                connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=1)
                 return connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
             except Exception:
                 return False
@@ -275,10 +271,7 @@ class Database:
                     connection.close()
         try:
             with self.engine.connect() as connection:
-                return (
-                    connection.exec_driver_sql("PRAGMA integrity_check").scalar()
-                    == "ok"
-                )
+                return connection.exec_driver_sql("PRAGMA integrity_check").scalar() == "ok"
         except Exception:
             return False
 
@@ -447,9 +440,7 @@ class MetricsStore:
 
     def recent(self, limit: int = 500) -> list[dict[str, Any]]:
         with self.database.session() as session:
-            rows = session.scalars(
-                select(MetricRow).order_by(MetricRow.id.desc()).limit(limit)
-            )
+            rows = session.scalars(select(MetricRow).order_by(MetricRow.id.desc()).limit(limit))
             return [
                 {
                     "timestamp": row.timestamp,

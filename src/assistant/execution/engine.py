@@ -171,9 +171,7 @@ class ExecutionEngine:
                 ),
                 call=call,
                 registration_requests=(
-                    ApplicationRegistrationRequest(
-                        call=call, application=exc.application
-                    ),
+                    ApplicationRegistrationRequest(call=call, application=exc.application),
                 ),
             )
         decisions = [
@@ -181,21 +179,13 @@ class ExecutionEngine:
             for check_call, scopes in checks
         ]
         if any(decision.policy_denied for decision in decisions):
-            denied = tuple(
-                scope
-                for decision in decisions
-                for scope in decision.policy_denied
-            )
+            denied = tuple(scope for decision in decisions for scope in decision.policy_denied)
             await self.events.publish(
                 PipelineEvent(
                     correlation_id=call.correlation_id,
                     state=PipelineState.ERROR,
                     message=denied[0].reason,
-                    data={
-                        "policy_denied": [
-                            scope.model_dump() for scope in denied
-                        ]
-                    },
+                    data={"policy_denied": [scope.model_dump() for scope in denied]},
                 )
             )
             return ExecutionOutcome(
@@ -207,11 +197,7 @@ class ExecutionEngine:
                         message=denied[0].reason,
                         recoverable=False,
                     ),
-                    data={
-                        "policy_denied": [
-                            scope.model_dump() for scope in denied
-                        ]
-                    },
+                    data={"policy_denied": [scope.model_dump() for scope in denied]},
                 ),
                 call=call,
             )
@@ -263,9 +249,7 @@ class ExecutionEngine:
         if self._requires_confirmation(call, risk):
             preview = await skill.preview(call)
             targets = tuple(
-                target
-                for permission in required_permissions
-                for target in permission.targets
+                target for permission in required_permissions for target in permission.targets
             )
             confirmation = self.confirmations.create(
                 call,
@@ -316,9 +300,7 @@ class ExecutionEngine:
                 for check_call, scopes in checks
             ]
             policy_denied = tuple(
-                scope
-                for decision in decisions
-                for scope in decision.policy_denied
+                scope for decision in decisions for scope in decision.policy_denied
             )
             if policy_denied:
                 return ExecutionOutcome(
@@ -330,11 +312,7 @@ class ExecutionEngine:
                             message=policy_denied[0].reason,
                             recoverable=False,
                         ),
-                        data={
-                            "policy_denied": [
-                                scope.model_dump() for scope in policy_denied
-                            ]
-                        },
+                        data={"policy_denied": [scope.model_dump() for scope in policy_denied]},
                     ),
                     call=call,
                 )
@@ -350,9 +328,7 @@ class ExecutionEngine:
             if self._requires_confirmation(call, risk):
                 preview = await skill.preview(call)
                 targets = tuple(
-                    target
-                    for permission in required_permissions
-                    for target in permission.targets
+                    target for permission in required_permissions for target in permission.targets
                 )
                 confirmations.append(
                     self.confirmations.create(
@@ -442,7 +418,11 @@ class ExecutionEngine:
         )
 
     async def execute(
-        self, call: SkillCall, *, confirmation_id: UUID | None = None, typed_token: str | None = None
+        self,
+        call: SkillCall,
+        *,
+        confirmation_id: UUID | None = None,
+        typed_token: str | None = None,
     ) -> SkillResult:
         if call.idempotency_key in self._completed_keys:
             self._completed_keys.move_to_end(call.idempotency_key)
@@ -457,9 +437,7 @@ class ExecutionEngine:
             self.permissions.authorize(check_call, scopes)
             for check_call, scopes in skill.permission_checks(call)
         ]
-        policy_denied = tuple(
-            scope for decision in decisions for scope in decision.policy_denied
-        )
+        policy_denied = tuple(scope for decision in decisions for scope in decision.policy_denied)
         if policy_denied:
             return self._failure(
                 "file_policy_denied",
@@ -473,15 +451,15 @@ class ExecutionEngine:
                 ResultStatus.DENIED,
             )
         risk = skill.risk_for(call)
-        if self._requires_confirmation(call, risk):
-            if confirmation_id is None or not self.confirmations.approve(
-                confirmation_id, call, typed_token=typed_token
-            ):
-                return self._failure(
-                    "confirmation_required",
-                    "A matching, unexpired confirmation is required.",
-                    ResultStatus.DENIED,
-                )
+        if self._requires_confirmation(call, risk) and (
+            confirmation_id is None
+            or not self.confirmations.approve(confirmation_id, call, typed_token=typed_token)
+        ):
+            return self._failure(
+                "confirmation_required",
+                "A matching, unexpired confirmation is required.",
+                ResultStatus.DENIED,
+            )
         cancel_event = asyncio.Event()
         self._cancel_events[call.correlation_id] = cancel_event
         await self.events.publish(
@@ -534,9 +512,7 @@ class ExecutionEngine:
                     break
                 except Exception as exc:
                     if attempts >= max_attempts:
-                        result = self._failure(
-                            "skill_failed", str(exc), ResultStatus.FAILED
-                        )
+                        result = self._failure("skill_failed", str(exc), ResultStatus.FAILED)
         finally:
             self._jobs.pop(call.correlation_id, None)
             self._job_details.pop(call.correlation_id, None)
@@ -577,9 +553,7 @@ class ExecutionEngine:
                 skill_id=call.skill_id,
                 display_name=skill.manifest.display_name,
                 rollback_token=(
-                    result.rollback_token
-                    if skill.manifest.supports_rollback
-                    else None
+                    result.rollback_token if skill.manifest.supports_rollback else None
                 ),
                 result_summary=result.summary,
             )
@@ -597,9 +571,7 @@ class ExecutionEngine:
                 "undo_unavailable",
                 "There is no completed command available to undo.",
                 ResultStatus.DENIED,
-            ).model_copy(
-                update={"summary": "There is no command available to undo."}
-            )
+            ).model_copy(update={"summary": "There is no command available to undo."})
         if not record.rollback_token:
             return self._failure(
                 "undo_not_supported",
@@ -758,8 +730,7 @@ class ExecutionEngine:
             display_text="\n\n".join(display_lines),
             data={
                 "steps": {
-                    step_id: result.model_dump(mode="json")
-                    for step_id, result in results.items()
+                    step_id: result.model_dump(mode="json") for step_id, result in results.items()
                 }
             },
             sensitive=any(result.sensitive for result in results.values()),
@@ -768,9 +739,7 @@ class ExecutionEngine:
     async def cancel(self, correlation_id: UUID | None = None) -> None:
         self.confirmations.cancel_all()
         targets = (
-            [correlation_id]
-            if correlation_id is not None
-            else list(self._cancel_events.keys())
+            [correlation_id] if correlation_id is not None else list(self._cancel_events.keys())
         )
         for target in targets:
             event = self._cancel_events.get(target)

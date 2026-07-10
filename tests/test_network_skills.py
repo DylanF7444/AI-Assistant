@@ -77,9 +77,7 @@ def test_network_routes_are_explicit():
 
 @pytest.mark.asyncio
 async def test_duckduckgo_search_is_default_and_parses_nested_topics(monkeypatch):
-    monkeypatch.setattr(
-        "assistant.integrations.web._validate_public_https", lambda _url: None
-    )
+    monkeypatch.setattr("assistant.integrations.web._validate_public_https", lambda _url: None)
     opener = FakeOpener(
         [
             {
@@ -117,18 +115,20 @@ async def test_duckduckgo_search_is_default_and_parses_nested_topics(monkeypatch
 
 @pytest.mark.asyncio
 async def test_brave_search_remains_available(monkeypatch):
-    monkeypatch.setattr(
-        "assistant.integrations.web._validate_public_https", lambda _url: None
-    )
+    monkeypatch.setattr("assistant.integrations.web._validate_public_https", lambda _url: None)
     opener = FakeOpener(
-        [{"web": {"results": [{"title": "Result", "url": "https://example.com", "description": "Text"}]}}]
+        [
+            {
+                "web": {
+                    "results": [
+                        {"title": "Result", "url": "https://example.com", "description": "Text"}
+                    ]
+                }
+            }
+        ]
     )
-    skill = WebSearchSkill(
-        WebClient(opener), lambda _name: "brave-key", provider="brave"
-    )
-    result = await skill.execute(
-        call("web.search", {"query": "test", "count": 1}), asyncio.Event()
-    )
+    skill = WebSearchSkill(WebClient(opener), lambda _name: "brave-key", provider="brave")
+    result = await skill.execute(call("web.search", {"query": "test", "count": 1}), asyncio.Event())
     assert result.data["results"][0]["title"] == "Result"
     assert opener.requests[0].headers["X-subscription-token"] == "brave-key"
     assert skill.manifest.permissions[0].capability == "network"
@@ -140,7 +140,14 @@ async def test_brave_search_remains_available(monkeypatch):
     [
         (
             "openai",
-            {"output": [{"type": "message", "content": [{"type": "output_text", "text": "OpenAI answer"}]}]},
+            {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "OpenAI answer"}],
+                    }
+                ]
+            },
             "OpenAI answer",
         ),
         (
@@ -150,12 +157,8 @@ async def test_brave_search_remains_available(monkeypatch):
         ),
     ],
 )
-async def test_cloud_ask_parses_provider_responses(
-    monkeypatch, provider, response, expected
-):
-    monkeypatch.setattr(
-        "assistant.integrations.web._validate_public_https", lambda _url: None
-    )
+async def test_cloud_ask_parses_provider_responses(monkeypatch, provider, response, expected):
+    monkeypatch.setattr("assistant.integrations.web._validate_public_https", lambda _url: None)
     opener = FakeOpener([response])
     skill = CloudAskSkill(
         CloudModelClient(opener),
@@ -197,9 +200,7 @@ async def test_codex_uses_exec_client_and_configured_codex_model():
         asyncio.Event(),
     )
     assert requested_keys == []
-    assert requested == [
-        {"question": "Review this", "model": "gpt-5.3-codex", "cancelled": False}
-    ]
+    assert requested == [{"question": "Review this", "model": "gpt-5.3-codex", "cancelled": False}]
     assert result.data["model"] == "gpt-5.3-codex"
 
 
@@ -213,7 +214,9 @@ def test_codex_exec_prefers_user_profile_binary(monkeypatch, tmp_path):
     os.utime(old, (1, 1))
     os.utime(new, (2, 2))
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
-    monkeypatch.setattr("assistant.integrations.web.shutil.which", lambda _name: "windowsapps-codex.exe")
+    monkeypatch.setattr(
+        "assistant.integrations.web.shutil.which", lambda _name: "windowsapps-codex.exe"
+    )
 
     assert CodexExecClient()._resolve_executable() == str(new)
 

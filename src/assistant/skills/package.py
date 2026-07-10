@@ -17,9 +17,7 @@ SIGNATURE_FILE = "signature.json"
 def package_digest(package_dir: Path) -> bytes:
     digest = hashlib.sha256()
     files = sorted(
-        path
-        for path in package_dir.rglob("*")
-        if path.is_file() and path.name != SIGNATURE_FILE
+        path for path in package_dir.rglob("*") if path.is_file() and path.name != SIGNATURE_FILE
     )
     if not files:
         raise ValueError("Skill package is empty")
@@ -33,9 +31,7 @@ def package_digest(package_dir: Path) -> bytes:
     return digest.digest()
 
 
-def sign_package(
-    package_dir: Path, key_id: str, private_key: Ed25519PrivateKey
-) -> Path:
+def sign_package(package_dir: Path, key_id: str, private_key: Ed25519PrivateKey) -> Path:
     signature = private_key.sign(package_digest(package_dir))
     destination = package_dir / SIGNATURE_FILE
     destination.write_text(
@@ -75,4 +71,3 @@ class PackageVerifier:
         except (InvalidSignature, ValueError, KeyError) as exc:
             raise ValueError("Skill package signature is invalid") from exc
         return True
-

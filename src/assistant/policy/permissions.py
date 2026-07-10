@@ -104,9 +104,7 @@ class PermissionManager:
             details={"targets": targets, "user_id": user_id},
         )
 
-    def revoke(
-        self, user_id: str, skill_id: str, capability: str, correlation_id: str
-    ) -> None:
+    def revoke(self, user_id: str, skill_id: str, capability: str, correlation_id: str) -> None:
         with self.database.session() as session:
             session.query(PermissionRow).filter(
                 PermissionRow.user_id == user_id,
@@ -125,9 +123,7 @@ class PermissionManager:
         with self.database.session() as session:
             rows = list(
                 session.scalars(
-                    select(PermissionRow).order_by(
-                        PermissionRow.skill_id, PermissionRow.capability
-                    )
+                    select(PermissionRow).order_by(PermissionRow.skill_id, PermissionRow.capability)
                 )
             )
             return [
@@ -167,10 +163,7 @@ class PermissionManager:
         for row in rows:
             if row.expires_at is not None and _aware(row.expires_at) <= now:
                 continue
-            if (
-                row.grant_type == GrantType.SESSION.value
-                and row.session_id != session_id
-            ):
+            if row.grant_type == GrantType.SESSION.value and row.session_id != session_id:
                 continue
             for target in json.loads(row.targets_json):
                 if target in {"", "*"}:
@@ -209,15 +202,11 @@ class PermissionManager:
                     "filesystem.write",
                 }:
                     for target in scope.targets:
-                        policy_reason = policy.denial_reason(
-                            scope.capability, target
-                        )
+                        policy_reason = policy.denial_reason(scope.capability, target)
                         if policy_reason:
                             break
                 if policy_reason:
-                    denied_scope = scope.model_copy(
-                        update={"reason": policy_reason}
-                    )
+                    denied_scope = scope.model_copy(update={"reason": policy_reason})
                     policy_denied.append(denied_scope)
                     continue
                 applicable = [
@@ -236,10 +225,14 @@ class PermissionManager:
                 allowed = False
                 for row in applicable:
                     targets = tuple(json.loads(row.targets_json))
-                    if not scope.targets or not targets or (
-                        all(
-                            any(_target_in_scope(target, grant) for grant in targets)
-                            for target in scope.targets
+                    if (
+                        not scope.targets
+                        or not targets
+                        or (
+                            all(
+                                any(_target_in_scope(target, grant) for grant in targets)
+                                for target in scope.targets
+                            )
                         )
                     ):
                         allowed = True
@@ -267,9 +260,7 @@ class PermissionManager:
             permissions=[scope.capability for scope in required],
             details={
                 "missing": [scope.model_dump() for scope in missing],
-                "policy_denied": [
-                    scope.model_dump() for scope in policy_denied
-                ],
+                "policy_denied": [scope.model_dump() for scope in policy_denied],
             },
         )
         return decision

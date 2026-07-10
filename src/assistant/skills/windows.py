@@ -21,14 +21,14 @@ from assistant.windows.adapters import (
     ApplicationAdapter,
     ContextNavigationAdapter,
     FileSystemAdapter,
+    InputAutomationAdapter,
     NotificationAdapter,
     ProcessAdapter,
-    InputAutomationAdapter,
     WindowsDeviceAdapter,
     WindowsSettingsAdapter,
 )
-from assistant.windows.process_names import normalize_process_name
 from assistant.windows.paths import resolve_user_path
+from assistant.windows.process_names import normalize_process_name
 
 
 class FileOperationInput(BaseModel):
@@ -62,8 +62,7 @@ class FileOperationSkill(Skill):
             skill_id="windows.file_operation",
             display_name="File Operation",
             description=(
-                "Create text files, copy, move, rename, recycle, or open an "
-                "approved file."
+                "Create text files, copy, move, rename, recycle, or open an approved file."
             ),
             input_model=self.input_model,
             output_model=self.output_model,
@@ -129,9 +128,7 @@ class FileOperationSkill(Skill):
 
     async def preview(self, call: SkillCall) -> str:
         args = self.validate(call.arguments)
-        destination = (
-            f" to {resolve_user_path(args.destination)}" if args.destination else ""
-        )
+        destination = f" to {resolve_user_path(args.destination)}" if args.destination else ""
         prefix = "Preview only: " if args.dry_run else ""
         return (
             f"{prefix}{_file_operation_label(args.operation)} "
@@ -162,15 +159,11 @@ class FileOperationSkill(Skill):
         rollback_token = None
         if args.operation == "create_text":
             created = await self.adapter.create_text_file(source, args.content)
-            rollback_token = json.dumps(
-                {"operation": "remove_created_file", "path": str(created)}
-            )
+            rollback_token = json.dumps({"operation": "remove_created_file", "path": str(created)})
         elif args.operation == "copy":
             assert destination
             copied = await self.adapter.copy(source, destination)
-            rollback_token = json.dumps(
-                {"operation": "remove_copy", "path": str(copied)}
-            )
+            rollback_token = json.dumps({"operation": "remove_copy", "path": str(copied)})
         elif args.operation in {"move", "rename"}:
             assert destination
             await self.adapter.move(source, destination)
@@ -204,9 +197,7 @@ class FileOperationSkill(Skill):
                 else "Copied file moved to the Recycle Bin."
             )
         elif payload["operation"] == "move_back":
-            await self.adapter.move(
-                Path(payload["source"]), Path(payload["destination"])
-            )
+            await self.adapter.move(Path(payload["source"]), Path(payload["destination"]))
             summary = "Moved file restored to its original path."
         else:
             raise ValueError("Unknown rollback token")
@@ -249,23 +240,25 @@ class WindowInput(BaseModel):
 
     @model_validator(mode="after")
     def operation_arguments(self):
-        if self.operation in {
-            "focus",
-            "minimize",
-            "maximize",
-            "close",
-            "move_to_monitor",
-            "move",
-            "resize",
-        } and not self.process_name:
+        if (
+            self.operation
+            in {
+                "focus",
+                "minimize",
+                "maximize",
+                "close",
+                "move_to_monitor",
+                "move",
+                "resize",
+            }
+            and not self.process_name
+        ):
             raise ValueError(f"{self.operation} requires process_name")
         if self.operation == "move_to_monitor" and self.monitor is None:
             raise ValueError("move_to_monitor requires monitor")
         if self.operation == "move" and (self.x is None or self.y is None):
             raise ValueError("move requires x and y")
-        if self.operation == "resize" and (
-            self.width is None or self.height is None
-        ):
+        if self.operation == "resize" and (self.width is None or self.height is None):
             raise ValueError("resize requires width and height")
         return self
 
@@ -327,10 +320,7 @@ class ApplicationWindowSkill(Skill):
         if args.operation == "move":
             return f"Move application {args.process_name} to ({args.x}, {args.y})"
         if args.operation == "resize":
-            return (
-                f"Resize application {args.process_name} to "
-                f"{args.width} by {args.height}"
-            )
+            return f"Resize application {args.process_name} to {args.width} by {args.height}"
         return f"{args.operation.title()} application {args.process_name}"
 
     async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult:
@@ -339,9 +329,7 @@ class ApplicationWindowSkill(Skill):
             operation = getattr(self.adapter, args.operation)
             changed = await operation()
         elif args.operation == "move_to_monitor":
-            changed = await self.adapter.move_to_monitor(
-                args.process_name, args.monitor or 1
-            )
+            changed = await self.adapter.move_to_monitor(args.process_name, args.monitor or 1)
         elif args.operation == "move":
             changed = await self.adapter.move(args.process_name, args.x or 0, args.y or 0)
         elif args.operation == "resize":
@@ -358,10 +346,7 @@ class ApplicationWindowSkill(Skill):
         target = args.process_name or "focused window"
         return SkillResult(
             status=ResultStatus.COMPLETED,
-            summary=(
-                f"{args.operation.replace('_', ' ').title()} completed "
-                f"for {target}."
-            ),
+            summary=(f"{args.operation.replace('_', ' ').title()} completed for {target}."),
             data=WindowOutput(
                 operation=args.operation,
                 process_name=args.process_name,
@@ -469,9 +454,7 @@ class ContextNavigationSkill(Skill):
     def risk_for(self, call: SkillCall) -> RiskLevel:
         operation = self.validate(call.arguments).operation
         return (
-            RiskLevel.MEDIUM
-            if operation in {"close_tab", "reopen_closed_tab"}
-            else RiskLevel.LOW
+            RiskLevel.MEDIUM if operation in {"close_tab", "reopen_closed_tab"} else RiskLevel.LOW
         )
 
     async def preview(self, call: SkillCall) -> str:
@@ -503,8 +486,7 @@ class ContextNavigationSkill(Skill):
         if target != "browser":
             return None
         browser_names = {
-            normalize_process_name(process).casefold()
-            for process in self.BROWSER_PROCESSES
+            normalize_process_name(process).casefold() for process in self.BROWSER_PROCESSES
         }
         active = await self.adapter.active_process_name()
         if active and normalize_process_name(active).casefold() in browser_names:
@@ -608,14 +590,11 @@ class BrowserNavigateSkill(Skill):
             ).model_dump(),
         )
 
-    async def _target_process(
-        self, target: str
-    ) -> tuple[str, bool] | Literal["ambiguous"] | None:
+    async def _target_process(self, target: str) -> tuple[str, bool] | Literal["ambiguous"] | None:
         if target != "browser":
             return None
         browser_names = {
-            normalize_process_name(process).casefold()
-            for process in self.BROWSER_PROCESSES
+            normalize_process_name(process).casefold() for process in self.BROWSER_PROCESSES
         }
         active = await self.adapter.active_process_name()
         if active and normalize_process_name(active).casefold() in browser_names:
@@ -881,9 +860,7 @@ class WindowsSettingSkill(Skill):
 
     def risk_for(self, call: SkillCall) -> RiskLevel:
         return (
-            RiskLevel.MEDIUM
-            if self.validate(call.arguments).operation == "set"
-            else RiskLevel.LOW
+            RiskLevel.MEDIUM if self.validate(call.arguments).operation == "set" else RiskLevel.LOW
         )
 
     async def preview(self, call: SkillCall) -> str:
@@ -911,9 +888,7 @@ class WindowsSettingSkill(Skill):
         return SkillResult(
             status=ResultStatus.COMPLETED,
             summary=f"Windows dark mode is {'on' if enabled else 'off'}.",
-            data=WindowsSettingOutput(
-                setting=args.setting, enabled=enabled
-            ).model_dump(),
+            data=WindowsSettingOutput(setting=args.setting, enabled=enabled).model_dump(),
         )
 
 
@@ -966,8 +941,7 @@ class DeviceControlInput(BaseModel):
         if self.operation == "connect_wifi_network" and not self.network_name:
             raise ValueError("connect_wifi_network requires network_name")
         if (
-            self.operation
-            in {"connect_bluetooth_device", "disconnect_bluetooth_device"}
+            self.operation in {"connect_bluetooth_device", "disconnect_bluetooth_device"}
             and not self.device_name
         ):
             raise ValueError(f"{self.operation} requires device_name")
@@ -1151,9 +1125,7 @@ class WindowsDeviceControlSkill(Skill):
         return SkillResult(
             status=ResultStatus.COMPLETED,
             summary=summary,
-            data=DeviceControlOutput(
-                operation=args.operation, result=result
-            ).model_dump(),
+            data=DeviceControlOutput(operation=args.operation, result=result).model_dump(),
             sensitive=args.operation in self.READ_OPERATIONS
             or args.operation == "search_installed_apps",
         )

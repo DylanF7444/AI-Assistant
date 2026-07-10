@@ -7,6 +7,7 @@ import os
 import tempfile
 import wave
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -81,9 +82,7 @@ class FasterWhisperProvider:
             errors = []
             for device, compute_type in candidates:
                 try:
-                    return WhisperModel(
-                        self.model_name, device=device, compute_type=compute_type
-                    )
+                    return WhisperModel(self.model_name, device=device, compute_type=compute_type)
                 except Exception as exc:
                     errors.append(f"{device}/{compute_type}: {exc}")
             detail = "; ".join(errors) if errors else "no compatible device candidates"
@@ -114,20 +113,13 @@ class FasterWhisperProvider:
 
         producer = asyncio.create_task(consume())
         minimum_bytes = int(
-            session.sample_rate
-            * session.channels
-            * 2
-            * self.partial_min_audio_seconds
+            session.sample_rate * session.channels * 2 * self.partial_min_audio_seconds
         )
         last_partial_size = 0
         try:
             while not complete.is_set():
-                try:
-                    await asyncio.wait_for(
-                        complete.wait(), timeout=self.partial_interval_seconds
-                    )
-                except TimeoutError:
-                    pass
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(complete.wait(), timeout=self.partial_interval_seconds)
                 if (
                     not complete.is_set()
                     and len(chunks) >= minimum_bytes
@@ -147,9 +139,7 @@ class FasterWhisperProvider:
                 producer.cancel()
                 await asyncio.gather(producer, return_exceptions=True)
 
-    async def _decode(
-        self, session: AudioSession, chunks: bytes
-    ) -> Transcript:
+    async def _decode(self, session: AudioSession, chunks: bytes) -> Transcript:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
             path = Path(handle.name)
         try:
@@ -177,11 +167,7 @@ class FasterWhisperProvider:
                 for segment in materialized
                 for word in (segment.words or ())
             )
-            confidence = (
-                sum(word.confidence or 0 for word in words) / len(words)
-                if words
-                else None
-            )
+            confidence = sum(word.confidence or 0 for word in words) / len(words) if words else None
             return Transcript(
                 session_id=session.session_id,
                 raw_text=text,

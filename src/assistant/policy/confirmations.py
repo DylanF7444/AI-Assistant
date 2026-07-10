@@ -4,7 +4,6 @@ import hashlib
 import hmac
 import json
 from datetime import UTC, datetime, timedelta
-from typing import Any
 from uuid import UUID
 
 from assistant.contracts import ConfirmationRequest, RiskLevel, SkillCall
@@ -60,13 +59,10 @@ class ConfirmationManager:
             return False
         if not hmac.compare_digest(request.action_digest, action_digest(call)):
             return False
-        if request.requires_typed_token and typed_token != str(confirmation_id)[-6:]:
-            return False
-        return True
+        return not (request.requires_typed_token and typed_token != str(confirmation_id)[-6:])
 
     def deny(self, confirmation_id: UUID) -> bool:
         return self._pending.pop(confirmation_id, None) is not None
 
     def cancel_all(self) -> None:
         self._pending.clear()
-

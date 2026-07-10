@@ -17,7 +17,7 @@ class FileAccessPolicy:
     write_blacklist: tuple[str, ...] = ()
 
     @classmethod
-    def from_mapping(cls, value: dict | None) -> "FileAccessPolicy":
+    def from_mapping(cls, value: dict | None) -> FileAccessPolicy:
         value = value or {}
         return cls(
             read_whitelist=_clean_paths(value.get("read_whitelist", ())),
@@ -48,7 +48,9 @@ class FileAccessPolicy:
         if any(_target_in_rule(target, rule) for rule in blacklist):
             return f"File access policy blocks {access} access to {target}."
         if whitelist and not any(_target_in_rule(target, rule) for rule in whitelist):
-            return f"File access policy allows {access} access only inside the configured whitelist."
+            return (
+                f"File access policy allows {access} access only inside the configured whitelist."
+            )
         return None
 
 
@@ -57,9 +59,7 @@ class FileAccessPolicyStore:
         self.settings = settings
 
     def get(self) -> FileAccessPolicy:
-        return FileAccessPolicy.from_mapping(
-            self.settings.get(POLICY_SETTINGS_KEY, {})
-        )
+        return FileAccessPolicy.from_mapping(self.settings.get(POLICY_SETTINGS_KEY, {}))
 
     def set(self, policy: FileAccessPolicy) -> None:
         self.settings.set(POLICY_SETTINGS_KEY, policy.to_mapping())
@@ -80,9 +80,7 @@ class FileAccessPolicyStore:
             current.append(normalized)
         if not add:
             current = [item for item in current if item != normalized]
-        updated = FileAccessPolicy.from_mapping(
-            {**policy.to_mapping(), field: current}
-        )
+        updated = FileAccessPolicy.from_mapping({**policy.to_mapping(), field: current})
         self.set(updated)
         return updated
 

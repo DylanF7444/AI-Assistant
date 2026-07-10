@@ -2,12 +2,14 @@ from pathlib import Path
 
 from sqlalchemy import inspect
 
-from assistant.storage.database import AuditStore, Database, SettingsStore
 from assistant.storage.database import (
+    AuditStore,
+    Database,
     KnowledgeBaseRow,
-    MemoryItemRow,
     MacroRow,
+    MemoryItemRow,
     SchemaVersionRow,
+    SettingsStore,
     VectorItemRow,
 )
 from assistant.storage.knowledge import KnowledgeBaseStore

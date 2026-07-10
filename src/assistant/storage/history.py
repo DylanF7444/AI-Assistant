@@ -45,4 +45,3 @@ class HistoryStore:
     def clear(self) -> None:
         with self.database.session() as session:
             session.query(HistoryRow).delete()
-

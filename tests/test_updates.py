@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
 import zipfile
 from pathlib import Path
 
@@ -31,11 +30,7 @@ def make_update(tmp_path: Path, *, path="LocalAssistant.exe", content=b"new"):
         signature=base64.b64encode(b"placeholder").decode(),
     )
     manifest = initial.model_copy(
-        update={
-            "signature": base64.b64encode(
-                private.sign(initial.signed_payload())
-            ).decode()
-        }
+        update={"signature": base64.b64encode(private.sign(initial.signed_payload())).decode()}
     )
     package = tmp_path / "update.zip"
     with zipfile.ZipFile(package, "w") as archive:
@@ -46,9 +41,7 @@ def make_update(tmp_path: Path, *, path="LocalAssistant.exe", content=b"new"):
 
 def test_signed_update_stages_and_applies_with_backup(tmp_path):
     package, public = make_update(tmp_path)
-    manager = UpdateManager(
-        tmp_path / "staging", {"release": public}, current_version="1.0.0"
-    )
+    manager = UpdateManager(tmp_path / "staging", {"release": public}, current_version="1.0.0")
     staged = manager.stage(package)
     install = tmp_path / "install"
     install.mkdir()
@@ -61,9 +54,7 @@ def test_signed_update_stages_and_applies_with_backup(tmp_path):
 
 def test_update_rejects_traversal_and_tampering(tmp_path):
     package, public = make_update(tmp_path, path="../escape.exe")
-    manager = UpdateManager(
-        tmp_path / "staging", {"release": public}, current_version="1.0.0"
-    )
+    manager = UpdateManager(tmp_path / "staging", {"release": public}, current_version="1.0.0")
     with pytest.raises(ValueError, match="Unsafe"):
         manager.stage(package)
 
@@ -73,8 +64,6 @@ def test_update_rejects_traversal_and_tampering(tmp_path):
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("update-manifest.json", manifest_bytes)
         archive.writestr("LocalAssistant.exe", b"tampered")
-    manager = UpdateManager(
-        tmp_path / "staging2", {"release": public}, current_version="1.0.0"
-    )
+    manager = UpdateManager(tmp_path / "staging2", {"release": public}, current_version="1.0.0")
     with pytest.raises(ValueError, match="checksum|size"):
         manager.stage(package)

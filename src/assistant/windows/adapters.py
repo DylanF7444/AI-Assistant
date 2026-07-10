@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import os
 import csv
 import ctypes
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -22,9 +22,7 @@ from assistant.windows.process_names import (
 
 class ApplicationAdapter(Protocol):
     async def launch(self, registered_path: str) -> None: ...
-    async def launch_with_args(
-        self, registered_path: str, arguments: tuple[str, ...]
-    ) -> None: ...
+    async def launch_with_args(self, registered_path: str, arguments: tuple[str, ...]) -> None: ...
     async def open_url(self, url: str) -> None: ...
     def default_browser_path(self) -> str | None: ...
     async def focus(self, process_name: str) -> bool: ...
@@ -111,9 +109,7 @@ class WindowsDeviceAdapter(Protocol):
     async def storage_status(self, drive: str | None = None) -> list[dict]: ...
     async def performance_status(self) -> dict: ...
     async def connected_devices(self, limit: int = 50) -> list[dict]: ...
-    async def set_connected_device_enabled(
-        self, instance_id: str, enabled: bool
-    ) -> None: ...
+    async def set_connected_device_enabled(self, instance_id: str, enabled: bool) -> None: ...
 
 
 class ClipboardAdapter(Protocol):
@@ -149,9 +145,7 @@ class WindowsApplicationAdapter:
             raise FileNotFoundError(registered_path)
         os.startfile(path)  # type: ignore[attr-defined]
 
-    async def launch_with_args(
-        self, registered_path: str, arguments: tuple[str, ...]
-    ) -> None:
+    async def launch_with_args(self, registered_path: str, arguments: tuple[str, ...]) -> None:
         path = Path(registered_path)
         if not path.exists():
             raise FileNotFoundError(registered_path)
@@ -274,9 +268,7 @@ class WindowsApplicationAdapter:
             ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
             if not ctypes.windll.user32.IsWindowVisible(hwnd):
                 return True
-            if cls._window_matches_target(
-                hwnd, pid.value, pids, title_filtered_pids
-            ):
+            if cls._window_matches_target(hwnd, pid.value, pids, title_filtered_pids):
                 handles.append(hwnd)
             return True
 
@@ -305,10 +297,7 @@ class WindowsApplicationAdapter:
     ) -> bool:
         if pid in pids:
             return True
-        return (
-            pid in title_filtered_pids
-            and cls._window_title(hwnd) == ASSISTANT_WINDOW_TITLE
-        )
+        return pid in title_filtered_pids and cls._window_title(hwnd) == ASSISTANT_WINDOW_TITLE
 
     @staticmethod
     def _window_title(hwnd: int) -> str:
@@ -322,16 +311,10 @@ class WindowsApplicationAdapter:
     @classmethod
     def _first_visible_process(cls, process_names: tuple[str, ...]) -> str | None:
         normalized = tuple(
-            dict.fromkeys(
-                normalize_process_name(name)
-                for name in process_names
-                if name.strip()
-            )
+            dict.fromkeys(normalize_process_name(name) for name in process_names if name.strip())
         )
         pids_by_name = {
-            pid: process_name
-            for process_name in normalized
-            for pid in cls._pids(process_name)
+            pid: process_name for process_name in normalized for pid in cls._pids(process_name)
         }
         if not pids_by_name:
             return None
@@ -359,16 +342,10 @@ class WindowsApplicationAdapter:
         cls, process_names: tuple[str, ...]
     ) -> tuple[BrowserWindowInfo, ...]:
         normalized = tuple(
-            dict.fromkeys(
-                normalize_process_name(name)
-                for name in process_names
-                if name.strip()
-            )
+            dict.fromkeys(normalize_process_name(name) for name in process_names if name.strip())
         )
         pids_by_name = {
-            pid: process_name
-            for process_name in normalized
-            for pid in cls._pids(process_name)
+            pid: process_name for process_name in normalized for pid in cls._pids(process_name)
         }
         if not pids_by_name:
             return ()
@@ -521,9 +498,7 @@ class WindowsApplicationAdapter:
                 )
             return True
 
-        ctypes.windll.user32.EnumDisplayMonitors(
-            None, None, callback_type(callback), 0
-        )
+        ctypes.windll.user32.EnumDisplayMonitors(None, None, callback_type(callback), 0)
         return work_areas
 
     @classmethod
@@ -565,18 +540,13 @@ class WindowsApplicationAdapter:
             if code is None:
                 raise ValueError(f"Unsupported hotkey key: {key}")
             key_codes.append(code)
-        inputs = [
-            INPUT(1, INPUT_UNION(ki=KEYBDINPUT(code, 0, 0, 0, None)))
-            for code in key_codes
-        ]
+        inputs = [INPUT(1, INPUT_UNION(ki=KEYBDINPUT(code, 0, 0, 0, None))) for code in key_codes]
         inputs.extend(
             INPUT(1, INPUT_UNION(ki=KEYBDINPUT(code, 0, 0x0002, 0, None)))
             for code in reversed(key_codes)
         )
         values = (INPUT * len(inputs))(*inputs)
-        sent = ctypes.windll.user32.SendInput(
-            len(values), values, ctypes.sizeof(INPUT)
-        )
+        sent = ctypes.windll.user32.SendInput(len(values), values, ctypes.sizeof(INPUT))
         if sent != len(values):
             raise ctypes.WinError()
 
@@ -606,24 +576,18 @@ class WindowsApplicationAdapter:
                 [
                     INPUT(
                         1,
-                        INPUT_UNION(
-                            ki=KEYBDINPUT(0, code, 0x0004, 0, None)
-                        ),
+                        INPUT_UNION(ki=KEYBDINPUT(0, code, 0x0004, 0, None)),
                     ),
                     INPUT(
                         1,
-                        INPUT_UNION(
-                            ki=KEYBDINPUT(0, code, 0x0004 | 0x0002, 0, None)
-                        ),
+                        INPUT_UNION(ki=KEYBDINPUT(0, code, 0x0004 | 0x0002, 0, None)),
                     ),
                 ]
             )
         if inputs:
             array_type = INPUT * len(inputs)
             values = array_type(*inputs)
-            sent = ctypes.windll.user32.SendInput(
-                len(values), values, ctypes.sizeof(INPUT)
-            )
+            sent = ctypes.windll.user32.SendInput(len(values), values, ctypes.sizeof(INPUT))
             if sent != len(values):
                 raise ctypes.WinError()
 
@@ -692,9 +656,7 @@ class LocalFileSystemAdapter:
         try:
             from send2trash import send2trash
         except ImportError as exc:
-            raise RuntimeError(
-                "Safe deletion requires the optional send2trash package"
-            ) from exc
+            raise RuntimeError("Safe deletion requires the optional send2trash package") from exc
         send2trash(str(path))
 
     async def open(self, path: Path) -> None:
@@ -759,15 +721,16 @@ class LocalWindowsDeviceAdapter:
         "updater.exe",
     }
 
-    async def search_installed_apps(
-        self, query: str | None = None, limit: int = 20
-    ) -> list[dict]:
+    async def search_installed_apps(self, query: str | None = None, limit: int = 20) -> list[dict]:
         import winreg
 
         roots = (
             (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
             (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
-            (winreg.HKEY_LOCAL_MACHINE, r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+            (
+                winreg.HKEY_LOCAL_MACHINE,
+                r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+            ),
         )
         needle = (query or "").casefold().strip()
         seen: set[str] = set()
@@ -791,9 +754,7 @@ class LocalWindowsDeviceAdapter:
                             if identity in seen:
                                 continue
                             seen.add(identity)
-                            install_location = self._registry_value(
-                                subkey, "InstallLocation"
-                            )
+                            install_location = self._registry_value(subkey, "InstallLocation")
                             display_icon = self._registry_value(subkey, "DisplayIcon")
                             apps.append(
                                 {
@@ -835,11 +796,7 @@ class LocalWindowsDeviceAdapter:
         ]
         if not candidates:
             return None
-        words = {
-            word
-            for word in re.findall(r"[a-z0-9]+", name.casefold())
-            if len(word) > 2
-        }
+        words = {word for word in re.findall(r"[a-z0-9]+", name.casefold()) if len(word) > 2}
         scored = sorted(
             candidates,
             key=lambda path: (
@@ -904,9 +861,7 @@ class LocalWindowsDeviceAdapter:
         target = (adapter.get("Status") != "Up") if enabled is None else enabled
         verb = "Enable-NetAdapter" if target else "Disable-NetAdapter"
         try:
-            await self._powershell(
-                f"{verb} -Name {json.dumps(adapter['Name'])} -Confirm:$false"
-            )
+            await self._powershell(f"{verb} -Name {json.dumps(adapter['Name'])} -Confirm:$false")
         except RuntimeError as exc:
             message = str(exc)
             if any(
@@ -1010,7 +965,9 @@ class LocalWindowsDeviceAdapter:
         return {
             "percent": None if status.BatteryLifePercent == 255 else int(status.BatteryLifePercent),
             "plugged_in": None if status.ACLineStatus == 255 else bool(status.ACLineStatus),
-            "seconds_remaining": None if status.BatteryLifeTime == 0xFFFFFFFF else int(status.BatteryLifeTime),
+            "seconds_remaining": None
+            if status.BatteryLifeTime == 0xFFFFFFFF
+            else int(status.BatteryLifeTime),
             "charging": bool(status.BatteryFlag & 8),
             "battery_present": not bool(status.BatteryFlag & 128),
         }
@@ -1062,9 +1019,7 @@ class LocalWindowsDeviceAdapter:
             if isinstance(row, dict)
         ]
 
-    async def set_connected_device_enabled(
-        self, instance_id: str, enabled: bool
-    ) -> None:
+    async def set_connected_device_enabled(self, instance_id: str, enabled: bool) -> None:
         verb = "Enable-PnpDevice" if enabled else "Disable-PnpDevice"
         await self._powershell(
             f"{verb} -InstanceId {self._ps_single_quoted(instance_id)} -Confirm:$false"
@@ -1225,9 +1180,7 @@ class LocalWindowsDeviceAdapter:
             candidates.append(cleaned)
         return candidates
 
-    async def _set_bluetooth_peripheral_enabled(
-        self, device: dict, enabled: bool
-    ) -> None:
+    async def _set_bluetooth_peripheral_enabled(self, device: dict, enabled: bool) -> None:
         verb = "Enable-PnpDevice" if enabled else "Disable-PnpDevice"
         try:
             await self._powershell(
@@ -1284,9 +1237,7 @@ class LocalWindowsDeviceAdapter:
 
     @classmethod
     async def _json_powershell(cls, script: str):
-        output = await cls._powershell(
-            f"{script} | ConvertTo-Json -Depth 4 -Compress"
-        )
+        output = await cls._powershell(f"{script} | ConvertTo-Json -Depth 4 -Compress")
         return json.loads(output) if output.strip() else None
 
     @staticmethod
@@ -1308,11 +1259,7 @@ class LocalWindowsDeviceAdapter:
     @staticmethod
     def _logical_drives() -> list[str]:
         mask = ctypes.windll.kernel32.GetLogicalDrives()
-        return [
-            f"{chr(65 + index)}:\\"
-            for index in range(26)
-            if mask & (1 << index)
-        ]
+        return [f"{chr(65 + index)}:\\" for index in range(26) if mask & (1 << index)]
 
     @staticmethod
     def _memory_status() -> dict:
@@ -1422,9 +1369,7 @@ class _AudioEndpoint:
 
     def set_volume(self, scalar: float) -> None:
         try:
-            method = self._method(
-                self.volume, 7, ctypes.HRESULT, ctypes.c_float, ctypes.c_void_p
-            )
+            method = self._method(self.volume, 7, ctypes.HRESULT, ctypes.c_float, ctypes.c_void_p)
             result = method(self.volume, ctypes.c_float(scalar), None)
             if result:
                 raise ctypes.WinError(result)
@@ -1433,9 +1378,7 @@ class _AudioEndpoint:
 
     def set_muted(self, muted: bool) -> None:
         try:
-            method = self._method(
-                self.volume, 14, ctypes.HRESULT, ctypes.c_int, ctypes.c_void_p
-            )
+            method = self._method(self.volume, 14, ctypes.HRESULT, ctypes.c_int, ctypes.c_void_p)
             result = method(self.volume, int(muted), None)
             if result:
                 raise ctypes.WinError(result)
@@ -1563,9 +1506,7 @@ class WindowsInputAutomationAdapter:
             return True
         style = ctypes.windll.user32.GetWindowLongW(info.hwndFocus, -16)
         class_name = ctypes.create_unicode_buffer(256)
-        ctypes.windll.user32.GetClassNameW(
-            info.hwndFocus, class_name, len(class_name)
-        )
+        ctypes.windll.user32.GetClassNameW(info.hwndFocus, class_name, len(class_name))
         return bool(style & 0x20) or class_name.value.casefold() in {
             "credential dialog xaml host",
             "passwordbox",
@@ -1596,24 +1537,18 @@ class WindowsInputAutomationAdapter:
                 [
                     INPUT(
                         1,
-                        INPUT_UNION(
-                            ki=KEYBDINPUT(0, code, 0x0004, 0, None)
-                        ),
+                        INPUT_UNION(ki=KEYBDINPUT(0, code, 0x0004, 0, None)),
                     ),
                     INPUT(
                         1,
-                        INPUT_UNION(
-                            ki=KEYBDINPUT(0, code, 0x0004 | 0x0002, 0, None)
-                        ),
+                        INPUT_UNION(ki=KEYBDINPUT(0, code, 0x0004 | 0x0002, 0, None)),
                     ),
                 ]
             )
         if inputs:
             array_type = INPUT * len(inputs)
             values = array_type(*inputs)
-            sent = ctypes.windll.user32.SendInput(
-                len(values), values, ctypes.sizeof(INPUT)
-            )
+            sent = ctypes.windll.user32.SendInput(len(values), values, ctypes.sizeof(INPUT))
             if sent != len(values):
                 raise ctypes.WinError()
 
@@ -1625,9 +1560,7 @@ class WindowsInputAutomationAdapter:
 
 
 class LocalWindowsSettingsAdapter:
-    KEY = (
-        r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
-    )
+    KEY = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
 
     async def get_dark_mode(self) -> bool:
         import winreg

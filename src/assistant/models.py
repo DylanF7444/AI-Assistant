@@ -28,15 +28,11 @@ class ModelManifest(BaseModel):
 
     def signed_payload(self) -> bytes:
         value = self.model_dump(exclude={"signature"})
-        return json.dumps(
-            value, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
+        return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 class ModelManager:
-    def __init__(
-        self, model_dir: Path, trusted_keys: dict[str, bytes] | None = None
-    ) -> None:
+    def __init__(self, model_dir: Path, trusted_keys: dict[str, bytes] | None = None) -> None:
         self.model_dir = model_dir
         self.trusted_keys = trusted_keys or {}
 
@@ -65,9 +61,7 @@ class ModelManager:
         if digest.hexdigest().casefold() != manifest.sha256.casefold():
             raise ValueError("Model package checksum is invalid")
 
-    def install_from_file(
-        self, source: Path, manifest: ModelManifest
-    ) -> Path:
+    def install_from_file(self, source: Path, manifest: ModelManifest) -> Path:
         self.verify_manifest(manifest)
         self.verify_file(source, manifest)
         component_dir = self.model_dir / manifest.component / manifest.model_id
@@ -104,9 +98,10 @@ class ModelManager:
         with tempfile.NamedTemporaryFile(delete=False) as temporary:
             temporary_path = Path(temporary.name)
         try:
-            with urllib.request.urlopen(
-                manifest.source_url, timeout=60
-            ) as response, temporary_path.open("wb") as output:
+            with (
+                urllib.request.urlopen(manifest.source_url, timeout=60) as response,
+                temporary_path.open("wb") as output,
+            ):
                 shutil.copyfileobj(response, output)
             return self.install_from_file(temporary_path, manifest)
         finally:
@@ -118,9 +113,7 @@ class ModelManager:
             return ()
         for manifest_path in self.model_dir.rglob("manifest.json"):
             try:
-                manifest = ModelManifest.model_validate_json(
-                    manifest_path.read_text("utf-8")
-                )
+                manifest = ModelManifest.model_validate_json(manifest_path.read_text("utf-8"))
             except Exception:
                 continue
             model_path = manifest_path.parent / Path(manifest.filename).name
@@ -133,4 +126,3 @@ class ModelManager:
                     }
                 )
         return tuple(values)
-

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 ASSISTANT_FOLDER_TOKEN = "${assistant_folder}"
 
 KNOWN_USER_FOLDERS = {

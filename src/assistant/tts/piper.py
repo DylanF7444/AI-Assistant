@@ -59,9 +59,7 @@ class PiperProvider:
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                _, stderr = await self._process.communicate(
-                    response.speech_text.encode("utf-8")
-                )
+                _, stderr = await self._process.communicate(response.speech_text.encode("utf-8"))
                 if self._process.returncode:
                     raise RuntimeError(stderr.decode("utf-8", errors="replace"))
             yield PipelineEvent(

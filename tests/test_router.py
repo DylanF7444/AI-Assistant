@@ -121,9 +121,7 @@ def test_broad_goal_requests_route_to_planner_goal(text):
     assert result.intent.arguments == {"text": text}
     assert result.intent.source == "classifier"
     assert result.intent.ambiguous
-    assert result.intent.ambiguity_reasons == (
-        "Broad goal request requires interpretation",
-    )
+    assert result.intent.ambiguity_reasons == ("Broad goal request requires interpretation",)
 
 
 def test_file_search_on_desktop_routes_without_local_planner():
@@ -230,9 +228,7 @@ def test_launch_command_uses_registered_app_prefix_before_follow_up():
         ),
     ],
 )
-def test_website_names_route_to_launcher_with_default_browser_fallback(
-    text, arguments
-):
+def test_website_names_route_to_launcher_with_default_browser_fallback(text, arguments):
     result = DeterministicRouter().route(text)
     assert not result.needs_llm
     assert result.intent.name == "windows.browser_navigate"
@@ -387,9 +383,7 @@ def test_notepad_file_wording_routes_to_notepad_launcher(text):
 
 
 def test_create_text_file_in_assistant_folder_routes_without_planner():
-    result = DeterministicRouter().route(
-        "Add a text file to the assistant folder in my desktop"
-    )
+    result = DeterministicRouter().route("Add a text file to the assistant folder in my desktop")
 
     assert not result.needs_llm
     assert result.intent.name == "windows.file_operation"
@@ -432,7 +426,10 @@ def test_contextual_ordinal_file_actions_route_without_planner():
 @pytest.mark.parametrize(
     ("text", "url"),
     [
-        ("Open brave and go to vlr.gg/matches?status=upcoming", "https://vlr.gg/matches?status=upcoming"),
+        (
+            "Open brave and go to vlr.gg/matches?status=upcoming",
+            "https://vlr.gg/matches?status=upcoming",
+        ),
         ("Open brave vlr.gg", "https://vlr.gg"),
         ("Open brave and open https://example.com/docs", "https://example.com/docs"),
         ("Open brave and go to vlr dot gg", "https://vlr.gg"),
@@ -494,9 +491,7 @@ def test_assistant_window_routes_to_packaged_process_name():
         ("Switch chrome on display 3", "chrome.exe", 3),
     ],
 )
-def test_switch_window_monitor_movement_routes_without_local_planner(
-    text, process_name, monitor
-):
+def test_switch_window_monitor_movement_routes_without_local_planner(text, process_name, monitor):
     result = DeterministicRouter().route(text)
     assert not result.needs_llm
     assert result.intent.name == "windows.application_window"

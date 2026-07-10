@@ -26,9 +26,7 @@ def signed_manifest(source: Path):
         signature=base64.b64encode(b"placeholder").decode(),
     )
     signature = private.sign(initial.signed_payload())
-    manifest = initial.model_copy(
-        update={"signature": base64.b64encode(signature).decode()}
-    )
+    manifest = initial.model_copy(update={"signature": base64.b64encode(signature).decode()})
     return manifest, public
 
 

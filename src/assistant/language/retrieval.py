@@ -76,15 +76,11 @@ class SkillSemanticIndexer:
 
     async def refresh(self, registry: SkillRegistry) -> None:
         manifests = tuple(
-            manifest
-            for manifest in registry.list()
-            if registry.is_enabled(manifest.skill_id)
+            manifest for manifest in registry.list() if registry.is_enabled(manifest.skill_id)
         )
         enabled_skill_ids = {manifest.skill_id for manifest in manifests}
         examples = tuple(
-            example
-            for example in self.examples
-            if example.skill_id in enabled_skill_ids
+            example for example in self.examples if example.skill_id in enabled_skill_ids
         )
         signature = (
             tuple(
@@ -95,19 +91,13 @@ class SkillSemanticIndexer:
                         manifest.display_name,
                         manifest.description,
                         manifest.risk.value,
-                        tuple(
-                            sorted(
-                                permission.capability
-                                for permission in manifest.permissions
-                            )
-                        ),
+                        tuple(sorted(permission.capability for permission in manifest.permissions)),
                     )
                     for manifest in manifests
                 )
             ),
             tuple(
-                json.dumps(example.model_dump(mode="json"), sort_keys=True)
-                for example in examples
+                json.dumps(example.model_dump(mode="json"), sort_keys=True) for example in examples
             ),
         )
         if signature == self._last_signature:
@@ -134,10 +124,7 @@ class SkillSemanticIndexer:
                     "skill_id": manifest.skill_id,
                     "display_name": manifest.display_name,
                     "risk": manifest.risk.value,
-                    "permissions": [
-                        permission.capability
-                        for permission in manifest.permissions
-                    ],
+                    "permissions": [permission.capability for permission in manifest.permissions],
                 },
                 embedding=embedding,
                 embedding_model=model_name,
@@ -316,9 +303,7 @@ class WorkflowTemplateSemanticIndexer:
 
 
 def _skill_text(manifest) -> str:
-    permissions = ", ".join(
-        permission.capability for permission in manifest.permissions
-    )
+    permissions = ", ".join(permission.capability for permission in manifest.permissions)
     schema_summary = json.dumps(manifest.input_schema, sort_keys=True)
     return (
         f"Skill ID: {manifest.skill_id}\n"
@@ -352,11 +337,7 @@ def _memory_text(item: MemoryItem) -> str:
 
 
 def _knowledge_text(item, chunk: str) -> str:
-    return (
-        f"Knowledge base: {item.name}\n"
-        f"Description: {item.description}\n"
-        f"Content: {chunk}"
-    )
+    return f"Knowledge base: {item.name}\nDescription: {item.description}\nContent: {chunk}"
 
 
 def _workflow_text(template: WorkflowTemplate) -> str:

@@ -20,9 +20,7 @@ class FakeProvider:
 
 
 def test_retriever_selects_only_skills_related_to_the_request():
-    retriever = SkillRetriever(
-        (CalculatorSkill.manifest, DateTimeSkill.manifest)
-    )
+    retriever = SkillRetriever((CalculatorSkill.manifest, DateTimeSkill.manifest))
 
     matches = retriever.relevant("Please calculate 10 plus 4")
 

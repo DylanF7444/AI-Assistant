@@ -1,2 +1,1 @@
 """Permission and confirmation policy."""
-

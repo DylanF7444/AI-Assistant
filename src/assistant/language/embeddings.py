@@ -11,8 +11,7 @@ from typing import Protocol
 
 
 class EmbeddingProvider(Protocol):
-    async def embed(self, texts: list[str]) -> list[list[float]]:
-        ...
+    async def embed(self, texts: list[str]) -> list[list[float]]: ...
 
 
 class FallbackEmbeddingProvider:
@@ -51,9 +50,7 @@ class OllamaEmbeddingProvider:
     def _embed_sync(self, texts: list[str]) -> list[list[float]]:
         embeddings: list[list[float]] = []
         for text in texts:
-            payload = json.dumps(
-                {"model": self.model, "prompt": text}
-            ).encode("utf-8")
+            payload = json.dumps({"model": self.model, "prompt": text}).encode("utf-8")
             request = urllib.request.Request(
                 self.endpoint,
                 data=payload,

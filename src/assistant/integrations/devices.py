@@ -37,9 +37,7 @@ class DeviceCommand(DeviceContract):
     capability: str
     arguments: dict[str, Any] = Field(default_factory=dict)
     issued_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    expires_at: datetime = Field(
-        default_factory=lambda: datetime.now(UTC) + timedelta(seconds=30)
-    )
+    expires_at: datetime = Field(default_factory=lambda: datetime.now(UTC) + timedelta(seconds=30))
     nonce: str = Field(default_factory=lambda: secrets.token_hex(16))
 
 
@@ -91,13 +89,10 @@ class PairingManager:
         pending = self._pending.pop(code, None)
         if pending is None or pending[0] <= datetime.now(UTC):
             raise ValueError("Pairing code is invalid or expired")
-        identity = DeviceIdentity(
-            display_name=display_name, public_key_fingerprint=pending[1]
-        )
+        identity = DeviceIdentity(display_name=display_name, public_key_fingerprint=pending[1])
         self._devices[identity.device_id] = identity
         return identity
 
     def revoke(self, device_id: UUID) -> None:
         identity = self._devices[device_id]
         self._devices[device_id] = identity.model_copy(update={"revoked": True})
-

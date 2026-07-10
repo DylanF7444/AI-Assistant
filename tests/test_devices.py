@@ -31,4 +31,3 @@ def test_expired_device_command_is_rejected():
     )
     key = b"key"
     assert not ReplayGuard().accept(command, sign_command(command, key), key)
-

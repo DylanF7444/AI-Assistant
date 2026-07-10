@@ -11,6 +11,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from uuid import UUID, uuid4
 
 from assistant.context.providers import (
@@ -36,8 +37,6 @@ from assistant.contracts import (
     Transcript,
     WordTimestamp,
 )
-from assistant.providers import STTProvider
-from assistant.providers import TTSProvider
 from assistant.events import EventBus
 from assistant.execution.engine import ExecutionEngine, ExecutionOutcome
 from assistant.language.planner import (
@@ -55,11 +54,12 @@ from assistant.language.retrieval import (
     WorkflowTemplateSemanticIndexer,
 )
 from assistant.policy.permissions import GrantType
+from assistant.providers import STTProvider, TTSProvider
 from assistant.response import response_from_result
 from assistant.router.deterministic import DeterministicRouter
+from assistant.storage.database import MetricsStore
 from assistant.storage.history import HistoryStore
 from assistant.storage.knowledge import KnowledgeBaseStore
-from assistant.storage.database import MetricsStore
 from assistant.storage.memory import MemoryStore
 from assistant.windows.paths import (
     ASSISTANT_FOLDER_TOKEN,
@@ -198,9 +198,7 @@ class AssistantOrchestrator:
             outcome=outcome_label,
             add_session_context=add_session_context,
         )
-        return await self._finish(
-            response, final_outcome, invoked_by_voice=invoked_by_voice
-        )
+        return await self._finish(response, final_outcome, invoked_by_voice=invoked_by_voice)
 
     def _print_terminal_debug(
         self,
@@ -229,8 +227,7 @@ class AssistantOrchestrator:
                 [
                     f"skill_id={call.skill_id}",
                     f"caller={call.caller}",
-                    "arguments="
-                    + json.dumps(call.arguments, sort_keys=True, default=str),
+                    "arguments=" + json.dumps(call.arguments, sort_keys=True, default=str),
                 ]
             )
         if outcome.permission_requests:
@@ -327,8 +324,7 @@ class AssistantOrchestrator:
             else " The selected local model did not respond before the planner "
             "timeout. Try again, or choose a faster installed local model."
             if isinstance(exc, TimeoutError)
-            else " The local model returned an invalid planner response. "
-            "Please try again."
+            else " The local model returned an invalid planner response. Please try again."
         )
         debug = ""
         if isinstance(exc, InvalidPlannerResponse):
@@ -365,13 +361,10 @@ class AssistantOrchestrator:
             permissions = []
             for request in outcome.permission_requests:
                 target_text = (
-                    f" for {', '.join(request.scope.targets)}"
-                    if request.scope.targets
-                    else ""
+                    f" for {', '.join(request.scope.targets)}" if request.scope.targets else ""
                 )
                 permissions.append(
-                    f"- {request.scope.capability}{target_text}: "
-                    f"{request.scope.reason}"
+                    f"- {request.scope.capability}{target_text}: {request.scope.reason}"
                 )
             return Response(
                 display_text=(
@@ -390,13 +383,10 @@ class AssistantOrchestrator:
             descriptions = []
             for request in outcome.permission_requests:
                 target_text = (
-                    f" for {', '.join(request.scope.targets)}"
-                    if request.scope.targets
-                    else ""
+                    f" for {', '.join(request.scope.targets)}" if request.scope.targets else ""
                 )
                 descriptions.append(
-                    f"- {request.scope.capability}{target_text}: "
-                    f"{request.scope.reason}"
+                    f"- {request.scope.capability}{target_text}: {request.scope.reason}"
                 )
             return Response(
                 display_text=(
@@ -532,15 +522,9 @@ class AssistantOrchestrator:
         try:
             if self.skill_semantic_indexer is not None:
                 await self.skill_semantic_indexer.refresh(self.engine.registry)
-            if (
-                self.knowledge_semantic_indexer is not None
-                and self.knowledge_bases is not None
-            ):
+            if self.knowledge_semantic_indexer is not None and self.knowledge_bases is not None:
                 await self.knowledge_semantic_indexer.refresh(self.knowledge_bases)
-            if (
-                self.memory_semantic_indexer is not None
-                and self.memory_store is not None
-            ):
+            if self.memory_semantic_indexer is not None and self.memory_store is not None:
                 await self.memory_semantic_indexer.refresh(self.memory_store)
             if self.workflow_template_indexer is not None:
                 await self.workflow_template_indexer.refresh()
@@ -587,17 +571,13 @@ class AssistantOrchestrator:
             )
             if interpretation.missing_information:
                 lines.append(
-                    "- Missing information: "
-                    + "; ".join(interpretation.missing_information)
+                    "- Missing information: " + "; ".join(interpretation.missing_information)
                 )
             if interpretation.assumptions:
-                lines.append(
-                    "- Assumptions: " + "; ".join(interpretation.assumptions)
-                )
+                lines.append("- Assumptions: " + "; ".join(interpretation.assumptions))
             if interpretation.relevant_context_keys:
                 lines.append(
-                    "- Relevant context keys: "
-                    + ", ".join(interpretation.relevant_context_keys)
+                    "- Relevant context keys: " + ", ".join(interpretation.relevant_context_keys)
                 )
         if context is not None:
             lines.append("- Context keys: " + (", ".join(context.keys()) or "none"))
@@ -624,9 +604,7 @@ class AssistantOrchestrator:
                 ]
             )
             if intent.ambiguous and intent.ambiguity_reasons:
-                lines.append(
-                    "- Ambiguity: " + "; ".join(intent.ambiguity_reasons)
-                )
+                lines.append("- Ambiguity: " + "; ".join(intent.ambiguity_reasons))
         if step_summaries:
             lines.append("- Steps:")
             lines.extend(f"  {index}. {summary}" for index, summary in enumerate(step_summaries, 1))
@@ -690,10 +668,7 @@ class AssistantOrchestrator:
             index = len(self._file_candidates) - 1
         if index is None or index < 0 or index >= len(self._file_candidates):
             return Response(
-                display_text=(
-                    "Select one of the numbered file results, for example "
-                    "\"select 1\"."
-                ),
+                display_text=('Select one of the numbered file results, for example "select 1".'),
                 speech_text="Please select one of the numbered file results.",
                 response_type=ResponseType.CLARIFICATION,
                 severity="warning",
@@ -712,12 +687,8 @@ class AssistantOrchestrator:
     def _selection_index(selector: str) -> int | None:
         value = selector.strip().casefold()
         value = re.sub(r"^(?:the|that|this)\s+", "", value)
-        value = re.sub(
-            r"\s+(?:one|file|item|result|match)$", "", value
-        ).strip()
-        value = re.sub(
-            r"^(?:file|item|result|match|number)\s+", "", value
-        ).strip()
+        value = re.sub(r"\s+(?:one|file|item|result|match)$", "", value).strip()
+        value = re.sub(r"^(?:file|item|result|match|number)\s+", "", value).strip()
         words = {
             "first": 1,
             "one": 1,
@@ -753,7 +724,7 @@ class AssistantOrchestrator:
             return Response(
                 display_text=(
                     "I do not have that many file search results. Choose one of "
-                    "the numbered results, for example \"the first one\"."
+                    'the numbered results, for example "the first one".'
                 ),
                 speech_text="I do not have that many file results.",
                 response_type=ResponseType.CLARIFICATION,
@@ -769,9 +740,7 @@ class AssistantOrchestrator:
             r"(?P<name>.+?)\s+(?:in|inside|on|from)\s+(?P<location>.+)",
             named_reference,
         ):
-            named_reference = self._file_candidate_name_reference(
-                match.group("name")
-            )
+            named_reference = self._file_candidate_name_reference(match.group("name"))
             location_reference = match.group("location").strip()
         if not named_reference:
             return None
@@ -790,15 +759,13 @@ class AssistantOrchestrator:
             return scored_matches[0][1]
         if scored_matches:
             best_score = scored_matches[0][0]
-            best_matches = [
-                path for score, path in scored_matches if score == best_score
-            ]
+            best_matches = [path for score, path in scored_matches if score == best_score]
             if len(best_matches) == 1:
                 return best_matches[0]
             return Response(
                 display_text=(
                     "That file reference matches more than one result. Use the "
-                    "numbered result instead, for example \"the first one\"."
+                    'numbered result instead, for example "the first one".'
                 ),
                 speech_text="That matches more than one file result.",
                 response_type=ResponseType.CLARIFICATION,
@@ -824,9 +791,7 @@ class AssistantOrchestrator:
     def _file_candidate_matches_location(path: str, location_reference: str) -> bool:
         if not location_reference:
             return True
-        normalized = AssistantOrchestrator._normalize_user_folder_reference(
-            location_reference
-        )
+        normalized = AssistantOrchestrator._normalize_user_folder_reference(location_reference)
         first = normalized.replace("\\", "/").partition("/")[0].casefold()
         path_obj = Path(path)
         folded_parts = {part.casefold() for part in path_obj.parts}
@@ -850,9 +815,7 @@ class AssistantOrchestrator:
 
     @staticmethod
     def _file_candidate_name_score(reference: str, path: str) -> int | None:
-        query = AssistantOrchestrator._file_candidate_name_reference(
-            reference
-        ).casefold()
+        query = AssistantOrchestrator._file_candidate_name_reference(reference).casefold()
         if not query:
             return None
         candidate = Path(path)
@@ -863,9 +826,7 @@ class AssistantOrchestrator:
         query_stem = Path(query).stem.casefold()
         if query_stem and query_stem in {name, stem}:
             return 1
-        words = [
-            word for word in re.split(r"[^a-z0-9]+", query_stem or query) if word
-        ]
+        words = [word for word in re.split(r"[^a-z0-9]+", query_stem or query) if word]
         if words and all(word in name for word in words):
             return 2
         return None
@@ -899,10 +860,7 @@ class AssistantOrchestrator:
         if arguments.get("source") == "${selected_file}":
             if not self._selected_file:
                 return Response(
-                    display_text=(
-                        "Select one of the file search results before using "
-                        "that file."
-                    ),
+                    display_text=("Select one of the file search results before using that file."),
                     speech_text="Select a file first.",
                     response_type=ResponseType.CLARIFICATION,
                     severity="warning",
@@ -920,9 +878,7 @@ class AssistantOrchestrator:
         if isinstance(destination, str):
             if "${selected_file_name}" in destination:
                 selected_name = Path(arguments["source"]).name
-                destination = destination.replace(
-                    "${selected_file_name}", selected_name
-                )
+                destination = destination.replace("${selected_file_name}", selected_name)
             resolved_destination = self._resolve_named_folder_path(
                 destination,
                 session_id=session_id,
@@ -942,9 +898,7 @@ class AssistantOrchestrator:
                 if (
                     operation in {"copy", "move"}
                     and isinstance(source, str)
-                    and self._destination_is_folder_reference(
-                        destination, destination_path
-                    )
+                    and self._destination_is_folder_reference(destination, destination_path)
                 ):
                     destination_path = destination_path / Path(source).name
                 arguments["destination"] = str(destination_path)
@@ -963,9 +917,9 @@ class AssistantOrchestrator:
                 if self._looks_like_unresolved_file_reference(source):
                     return Response(
                         display_text=(
-                            f"I could not resolve \"{source}\" to an exact file. "
+                            f'I could not resolve "{source}" to an exact file. '
                             "Select one of the file search results, for example "
-                            "\"select 1\", or use a full path."
+                            '"select 1", or use a full path.'
                         ),
                         speech_text="Please select one of the file results or use a full path.",
                         response_type=ResponseType.CLARIFICATION,
@@ -991,8 +945,7 @@ class AssistantOrchestrator:
         ):
             return True
         return bool(
-            re.match(r"^(?:the|that|this)\s+", candidate, flags=re.IGNORECASE)
-            and " " in candidate
+            re.match(r"^(?:the|that|this)\s+", candidate, flags=re.IGNORECASE) and " " in candidate
         )
 
     def _resolve_named_folder_path(
@@ -1009,9 +962,7 @@ class AssistantOrchestrator:
             example_path = str(Path.home() / "Desktop")
             self._pending_clarification_follow_up = PendingClarificationFollowUp(
                 original_text=request_text,
-                clarification=(
-                    "Which folder am I allowed to search for the Assistant folder?"
-                ),
+                clarification=("Which folder am I allowed to search for the Assistant folder?"),
                 folder_name="assistant",
                 session_id=session_id,
                 kind="folder_search",
@@ -1318,9 +1269,7 @@ class AssistantOrchestrator:
                     "request. Reply with a folder name or path, such as Desktop "
                     f"or {example_path}, or say cancel."
                 ),
-                speech_text=(
-                    "Please reply with a folder name or path, or say cancel."
-                ),
+                speech_text=("Please reply with a folder name or path, or say cancel."),
                 response_type=ResponseType.CLARIFICATION,
                 severity="warning",
                 speak=True,
@@ -1343,8 +1292,7 @@ class AssistantOrchestrator:
                     "existing folder I may search, or say cancel."
                 ),
                 speech_text=(
-                    "I could not find that folder. Reply with an existing folder, "
-                    "or say cancel."
+                    "I could not find that folder. Reply with an existing folder, or say cancel."
                 ),
                 response_type=ResponseType.CLARIFICATION,
                 severity="warning",
@@ -1359,9 +1307,7 @@ class AssistantOrchestrator:
                 invoked_by_voice=invoked_by_voice,
             )
 
-        grant_session_id = (
-            pending.session_id if pending.session_id == session_id else session_id
-        )
+        grant_session_id = pending.session_id if pending.session_id == session_id else session_id
         self.engine.permissions.grant(
             user_id="local-user",
             skill_id="windows.file_search",
@@ -1516,9 +1462,7 @@ class AssistantOrchestrator:
                             invoked_by_voice=invoked_by_voice,
                         )
                 if hasattr(self.planner, "plan_decision"):
-                    decision = await self.planner.plan_decision(
-                        text, tuple(self._session_context)
-                    )
+                    decision = await self.planner.plan_decision(text, tuple(self._session_context))
                     return await self._handle_planner_decision(
                         correlation_id,
                         text,
@@ -1596,9 +1540,7 @@ class AssistantOrchestrator:
                 invoked_by_voice=invoked_by_voice,
             )
         if intent.name == "control.undo":
-            outcome = ExecutionOutcome(
-                result=await self.engine.undo_last(correlation_id)
-            )
+            outcome = ExecutionOutcome(result=await self.engine.undo_last(correlation_id))
             response = self._response_from_outcome(outcome).model_copy(
                 update={"response_type": ResponseType.CONTROL}
             )
@@ -1990,9 +1932,7 @@ class AssistantOrchestrator:
                 display_text=revision.response or last_outcome.result.summary,
                 speech_text=revision.response or last_outcome.result.summary,
                 response_type=(
-                    ResponseType.ERROR
-                    if revision.disposition == "reject"
-                    else ResponseType.STATUS
+                    ResponseType.ERROR if revision.disposition == "reject" else ResponseType.STATUS
                 ),
                 severity="warning" if revision.disposition == "reject" else "success",
             )
@@ -2060,9 +2000,7 @@ class AssistantOrchestrator:
             "result_status": result.status.value if result else None,
             "summary": (result.summary[:500] if result else ""),
             "data_keys": (
-                sorted(result.data.keys())
-                if result and isinstance(result.data, dict)
-                else []
+                sorted(result.data.keys()) if result and isinstance(result.data, dict) else []
             ),
         }
 
@@ -2287,14 +2225,11 @@ class AssistantOrchestrator:
                 response_type=ResponseType.STATUS,
                 severity="warning",
             )
-            return await self._finish(
-                response, ExecutionOutcome(), invoked_by_voice=True
-            )
+            return await self._finish(response, ExecutionOutcome(), invoked_by_voice=True)
         route = self.router.route(transcript.normalized_text)
         intent = route.intent
         low_word = any(
-            word.confidence is not None and word.confidence < 0.65
-            for word in transcript.words
+            word.confidence is not None and word.confidence < 0.65 for word in transcript.words
         )
         low_words = tuple(
             word
@@ -2312,9 +2247,7 @@ class AssistantOrchestrator:
             "process_name",
             "entity_id",
         }
-        uncertain = (
-            transcript.confidence is not None and transcript.confidence < 0.75
-        ) or low_word
+        uncertain = (transcript.confidence is not None and transcript.confidence < 0.75) or low_word
         sensitive = bool(
             intent
             and (
@@ -2337,9 +2270,7 @@ class AssistantOrchestrator:
                 sensitive=sensitive,
                 low_words=low_words,
                 sensitive_argument_keys=tuple(
-                    sorted(sensitive_keys.intersection(intent.arguments))
-                    if intent
-                    else ()
+                    sorted(sensitive_keys.intersection(intent.arguments)) if intent else ()
                 ),
             )
             response = Response(
@@ -2347,16 +2278,12 @@ class AssistantOrchestrator:
                     "I am not confident I heard the sensitive target correctly. "
                     "Please repeat the exact path, process, or device."
                 ),
-                speech_text=(
-                    "Please repeat the exact target. I did not perform the action."
-                ),
+                speech_text=("Please repeat the exact target. I did not perform the action."),
                 response_type=ResponseType.CLARIFICATION,
                 severity="warning",
                 speak=True,
             )
-            return await self._finish(
-                response, ExecutionOutcome(), invoked_by_voice=True
-            )
+            return await self._finish(response, ExecutionOutcome(), invoked_by_voice=True)
         return await self.handle_text(
             transcript.normalized_text,
             session_id=str(transcript.session_id),
@@ -2384,7 +2311,7 @@ class AssistantOrchestrator:
             f"normalized_text={transcript.normalized_text}",
             f"transcript_confidence={transcript.confidence}",
             "transcript_threshold=0.75",
-            f"word_threshold=0.65",
+            "word_threshold=0.65",
             f"uncertain={uncertain}",
             f"sensitive={sensitive}",
             f"intent={intent.name if intent else None}",
@@ -2419,9 +2346,7 @@ class AssistantOrchestrator:
         await self._speak_if_enabled(response, invoked_by_voice=invoked_by_voice)
         return response, outcome
 
-    async def _speak_if_enabled(
-        self, response: Response, *, invoked_by_voice: bool
-    ) -> None:
+    async def _speak_if_enabled(self, response: Response, *, invoked_by_voice: bool) -> None:
         if self.tts is None or self.speech_mode == "never":
             return
         if self.speech_mode == "voice_only" and not invoked_by_voice:
@@ -2495,9 +2420,7 @@ class AssistantOrchestrator:
             self._active_stt = None
         return final or last_non_empty
 
-    async def listen_once(
-        self, stt: STTProvider, audio
-    ) -> tuple[Response, ExecutionOutcome]:
+    async def listen_once(self, stt: STTProvider, audio) -> tuple[Response, ExecutionOutcome]:
         try:
             final = await self.transcribe_once(stt, audio)
         except RuntimeError as exc:
@@ -2507,9 +2430,7 @@ class AssistantOrchestrator:
                 response_type=ResponseType.ERROR,
                 severity="error",
             )
-            return await self._finish(
-                response, ExecutionOutcome(), invoked_by_voice=False
-            )
+            return await self._finish(response, ExecutionOutcome(), invoked_by_voice=False)
         if final is None:
             response = Response(
                 display_text="No speech was detected.",
@@ -2517,9 +2438,7 @@ class AssistantOrchestrator:
                 response_type=ResponseType.STATUS,
                 severity="warning",
             )
-            return await self._finish(
-                response, ExecutionOutcome(), invoked_by_voice=True
-            )
+            return await self._finish(response, ExecutionOutcome(), invoked_by_voice=True)
         return await self.handle_transcript(final)
 
     async def cancel(self) -> None:
