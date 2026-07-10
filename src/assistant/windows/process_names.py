@@ -50,7 +50,4 @@ def executable_from_command_name(value: str) -> str:
 
 
 def is_assistant_process_name(value: str) -> bool:
-    return (
-        normalize_process_name(value).casefold()
-        == ASSISTANT_PROCESS_NAME.casefold()
-    )
+    return normalize_process_name(value).casefold() == ASSISTANT_PROCESS_NAME.casefold()

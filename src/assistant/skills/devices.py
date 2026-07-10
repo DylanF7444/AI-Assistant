@@ -83,9 +83,7 @@ class DeviceControlSkill(Skill):
         task = asyncio.create_task(transport.send(command))
         cancelled = asyncio.create_task(cancel_event.wait())
         try:
-            done, _ = await asyncio.wait(
-                {task, cancelled}, return_when=asyncio.FIRST_COMPLETED
-            )
+            done, _ = await asyncio.wait({task, cancelled}, return_when=asyncio.FIRST_COMPLETED)
             if cancelled in done:
                 task.cancel()
                 return SkillResult(
@@ -122,9 +120,7 @@ class HomeAssistantInput(BaseModel):
     def required_fields(self):
         if self.operation == "state" and not self.entity_id:
             raise ValueError("state requires entity_id")
-        if self.operation == "call_service" and (
-            not self.domain or not self.service
-        ):
+        if self.operation == "call_service" and (not self.domain or not self.service):
             raise ValueError("call_service requires domain and service")
         return self
 
@@ -154,9 +150,7 @@ class HomeAssistantSkill(Skill):
         target = args.entity_id or f"{args.domain}.{args.service}"
         return (
             PermissionScope(
-                capability="device.control"
-                if args.operation == "call_service"
-                else "device.read",
+                capability="device.control" if args.operation == "call_service" else "device.read",
                 targets=(target,),
                 reason=f"{args.operation.replace('_', ' ').title()} for this exact Home Assistant target.",
             ),

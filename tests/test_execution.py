@@ -22,8 +22,7 @@ from assistant.execution.engine import ExecutionEngine
 from assistant.policy.confirmations import ConfirmationManager
 from assistant.policy.permissions import GrantType, PermissionManager
 from assistant.skills.base import Skill
-from assistant.skills.builtin import CalculatorSkill
-from assistant.skills.builtin import FileSearchSkill
+from assistant.skills.builtin import CalculatorSkill, FileSearchSkill
 from assistant.skills.registry import SkillRegistry
 from assistant.storage.database import AuditStore, Database
 from assistant.windows.adapters import LocalFileSystemAdapter
@@ -51,9 +50,7 @@ class CountingSkill(Skill):
             description="Count executions",
             input_model=self.input_model,
             output_model=self.output_model,
-            permissions=(
-                PermissionScope(capability="test.run", reason="Run the test action"),
-            ),
+            permissions=(PermissionScope(capability="test.run", reason="Run the test action"),),
             risk=risk,
         )
 
@@ -150,9 +147,7 @@ def engine_for(tmp_path: Path, *skills: Skill):
     for skill in skills:
         registry.register(skill)
     confirmations = ConfirmationManager()
-    engine = ExecutionEngine(
-        registry, permissions, confirmations, audit, EventBus()
-    )
+    engine = ExecutionEngine(registry, permissions, confirmations, audit, EventBus())
     return engine, permissions, audit
 
 
@@ -215,9 +210,7 @@ async def test_permission_confirmation_and_idempotency(tmp_path):
     )
     prepared = await engine.prepare(call)
     assert prepared.confirmation is not None
-    result = await engine.execute(
-        call, confirmation_id=prepared.confirmation.confirmation_id
-    )
+    result = await engine.execute(call, confirmation_id=prepared.confirmation.confirmation_id)
     assert result.status == ResultStatus.COMPLETED
     duplicate = await engine.execute(call)
     assert duplicate == result
@@ -230,9 +223,7 @@ async def test_undo_last_completed_command_uses_rollback_token(tmp_path):
     skill = UndoableSkill()
     engine, _, audit = engine_for(tmp_path, skill)
 
-    result = await engine.execute(
-        make_call("test.undoable", {"target": "item"}, key="change")
-    )
+    result = await engine.execute(make_call("test.undoable", {"target": "item"}, key="change"))
     undo = await engine.undo_last()
     second_undo = await engine.undo_last()
 
@@ -249,9 +240,7 @@ async def test_undo_last_completed_command_uses_rollback_token(tmp_path):
 async def test_undo_reports_when_last_command_cannot_be_undone(tmp_path):
     engine, _, _ = engine_for(tmp_path, CalculatorSkill())
 
-    result = await engine.execute(
-        make_call("core.calculator", {"expression": "2 + 2"}, key="math")
-    )
+    result = await engine.execute(make_call("core.calculator", {"expression": "2 + 2"}, key="math"))
     undo = await engine.undo_last()
 
     assert result.status == ResultStatus.COMPLETED
@@ -274,6 +263,33 @@ async def test_missing_permission_publishes_approval_event(tmp_path):
     assert event.state.value == "awaiting_approval"
     assert event.data["permissions"][0]["skill_id"] == "test.count"
     assert event.data["permissions"][0]["capability"] == "test.run"
+
+
+@pytest.mark.asyncio
+async def test_single_call_and_one_step_plan_share_permission_evaluation(tmp_path):
+    (tmp_path / "single").mkdir()
+    single_skill = CountingSkill(risk=RiskLevel.LOW)
+    single_engine, _, _ = engine_for(tmp_path / "single", single_skill)
+    single_call = make_call("test.count", {"target": "item"}, key="single")
+
+    (tmp_path / "plan").mkdir()
+    plan_skill = CountingSkill(risk=RiskLevel.LOW)
+    plan_engine, _, _ = engine_for(tmp_path / "plan", plan_skill)
+    plan_call = make_call("test.count", {"target": "item"}, key="plan")
+    plan = ExecutionPlan(steps=(PlanStep(step_id="only", call=plan_call),))
+
+    single_outcome = await single_engine.prepare(single_call)
+    plan_outcome = await plan_engine.prepare_plan(plan)
+
+    assert single_outcome.result.error.code == plan_outcome.result.error.code
+    assert single_outcome.result.error.code == "permission_denied"
+    assert tuple(request.scope for request in single_outcome.permission_requests) == tuple(
+        request.scope for request in plan_outcome.permission_requests
+    )
+    assert (
+        single_engine.events.history(single_call.correlation_id)[-1].data["permissions"]
+        == plan_engine.events.history(plan_call.correlation_id)[-1].data["permissions"]
+    )
 
 
 @pytest.mark.asyncio
@@ -308,9 +324,7 @@ async def test_confirmation_rejects_changed_arguments(tmp_path):
     call = make_call("test.count", {"target": "a"})
     prepared = await engine.prepare(call)
     changed = call.model_copy(update={"arguments": {"target": "b"}})
-    result = await engine.execute(
-        changed, confirmation_id=prepared.confirmation.confirmation_id
-    )
+    result = await engine.execute(changed, confirmation_id=prepared.confirmation.confirmation_id)
     assert result.status == ResultStatus.DENIED
     assert skill.count == 0
 
@@ -359,9 +373,7 @@ async def test_confirmation_can_be_enabled_for_low_risk_actions(tmp_path):
 async def test_plan_stops_after_failed_prerequisite(tmp_path):
     engine, _, _ = engine_for(tmp_path, CalculatorSkill())
     bad = make_call("missing.skill", key="bad")
-    dependent = make_call(
-        "core.calculator", {"expression": "2 + 2"}, key="dependent"
-    )
+    dependent = make_call("core.calculator", {"expression": "2 + 2"}, key="dependent")
     plan = ExecutionPlan(
         steps=(
             PlanStep(step_id="bad", call=bad),
@@ -430,9 +442,7 @@ async def test_dynamic_filesystem_scope_blocks_other_root(tmp_path):
 async def test_only_skills_marked_safe_are_retried(tmp_path):
     safe = FlakySkill(True)
     engine, _, audit = engine_for(tmp_path, safe)
-    recovered = await engine.execute(
-        make_call("test.flaky", {"target": "x"}, key="safe")
-    )
+    recovered = await engine.execute(make_call("test.flaky", {"target": "x"}, key="safe"))
     assert recovered.status == ResultStatus.COMPLETED
     assert safe.count == 2
     assert audit.query(event_type="skill_execution")[0]["details"]["attempts"] == 2
@@ -441,9 +451,7 @@ async def test_only_skills_marked_safe_are_retried(tmp_path):
     unsafe_path = tmp_path / "unsafe"
     unsafe_path.mkdir()
     engine, _, _ = engine_for(unsafe_path, unsafe)
-    failed = await engine.execute(
-        make_call("test.flaky", {"target": "x"}, key="unsafe")
-    )
+    failed = await engine.execute(make_call("test.flaky", {"target": "x"}, key="unsafe"))
     assert failed.status == ResultStatus.FAILED
     assert unsafe.count == 1
 

@@ -11,10 +11,10 @@ from assistant.skills.windows import (
     BrowserNavigateSkill,
     ContextNavigationSkill,
     FileOperationSkill,
-    WindowInput,
+    InputAutomationSkill,
     NotificationSkill,
     ProcessSkill,
-    InputAutomationSkill,
+    WindowInput,
     WindowsDeviceControlSkill,
     WindowsSettingSkill,
 )
@@ -159,9 +159,7 @@ class FakeContextNavigation:
     async def visible_browser_windows(self, process_names):
         if self.visible_windows:
             return tuple(
-                window
-                for window in self.visible_windows
-                if window.process_name in process_names
+                window for window in self.visible_windows if window.process_name in process_names
             )
         if self.visible in process_names:
             return (BrowserWindowInfo(self.visible, private=False),)
@@ -278,9 +276,7 @@ async def test_local_wifi_toggle_explains_admin_requirement(monkeypatch):
         "_json_powershell",
         staticmethod(fake_json_powershell),
     )
-    monkeypatch.setattr(
-        LocalWindowsDeviceAdapter, "_powershell", staticmethod(fake_powershell)
-    )
+    monkeypatch.setattr(LocalWindowsDeviceAdapter, "_powershell", staticmethod(fake_powershell))
 
     with pytest.raises(RuntimeError, match="administrator privileges"):
         await LocalWindowsDeviceAdapter().set_wifi_enabled(False)
@@ -313,9 +309,7 @@ async def test_local_bluetooth_toggle_targets_radio_not_profile_device(monkeypat
         "_json_powershell",
         staticmethod(fake_json_powershell),
     )
-    monkeypatch.setattr(
-        LocalWindowsDeviceAdapter, "_powershell", staticmethod(fake_powershell)
-    )
+    monkeypatch.setattr(LocalWindowsDeviceAdapter, "_powershell", staticmethod(fake_powershell))
 
     enabled = await LocalWindowsDeviceAdapter().set_bluetooth_enabled(False)
 
@@ -413,15 +407,11 @@ async def test_local_bluetooth_disconnect_targets_paired_device_by_name(monkeypa
         "_json_powershell",
         staticmethod(fake_json_powershell),
     )
-    monkeypatch.setattr(
-        LocalWindowsDeviceAdapter, "_powershell", staticmethod(fake_powershell)
-    )
+    monkeypatch.setattr(LocalWindowsDeviceAdapter, "_powershell", staticmethod(fake_powershell))
 
     await LocalWindowsDeviceAdapter().disconnect_bluetooth_device("headphones")
 
-    assert commands == [
-        "Disable-PnpDevice -InstanceId 'BTHENUM\\DEV_1234\\7&ABC' -Confirm:$false"
-    ]
+    assert commands == ["Disable-PnpDevice -InstanceId 'BTHENUM\\DEV_1234\\7&ABC' -Confirm:$false"]
 
 
 @pytest.mark.asyncio
@@ -463,15 +453,11 @@ async def test_local_bluetooth_disconnect_resolves_generic_headphones_alias(monk
         "_json_powershell",
         staticmethod(fake_json_powershell),
     )
-    monkeypatch.setattr(
-        LocalWindowsDeviceAdapter, "_powershell", staticmethod(fake_powershell)
-    )
+    monkeypatch.setattr(LocalWindowsDeviceAdapter, "_powershell", staticmethod(fake_powershell))
 
     await LocalWindowsDeviceAdapter().disconnect_bluetooth_device("headphones")
 
-    assert commands == [
-        "Disable-PnpDevice -InstanceId 'BTHENUM\\DEV_5678\\9&DEF' -Confirm:$false"
-    ]
+    assert commands == ["Disable-PnpDevice -InstanceId 'BTHENUM\\DEV_5678\\9&DEF' -Confirm:$false"]
 
 
 def call(skill_id, arguments):
@@ -566,7 +552,9 @@ async def test_window_notification_and_process_adapters_are_typed():
         "windows.application_window",
         {"operation": "maximize", "process_name": "test.exe"},
     )
-    assert (await window.execute(window_call, __import__("asyncio").Event())).status == ResultStatus.COMPLETED
+    assert (
+        await window.execute(window_call, __import__("asyncio").Event())
+    ).status == ResultStatus.COMPLETED
     assert window.risk_for(window_call) == RiskLevel.MEDIUM
 
     notifications = FakeNotifications()
@@ -665,9 +653,7 @@ def test_assistant_window_lookup_includes_developer_python_hosts(monkeypatch):
 
     monkeypatch.setattr(WindowsApplicationAdapter, "_pids", staticmethod(fake_pids))
 
-    pids, title_filtered_pids = WindowsApplicationAdapter._target_pid_sets(
-        "LocalAssistant.exe"
-    )
+    pids, title_filtered_pids = WindowsApplicationAdapter._target_pid_sets("LocalAssistant.exe")
 
     assert pids == {10}
     assert title_filtered_pids == {20, 30}
@@ -677,19 +663,11 @@ def test_assistant_developer_window_requires_local_assistant_title(monkeypatch):
     def fake_title(hwnd):
         return "Local Assistant" if hwnd == 100 else "Other Window"
 
-    monkeypatch.setattr(
-        WindowsApplicationAdapter, "_window_title", staticmethod(fake_title)
-    )
+    monkeypatch.setattr(WindowsApplicationAdapter, "_window_title", staticmethod(fake_title))
 
-    assert WindowsApplicationAdapter._window_matches_target(
-        200, 10, {10}, {20}
-    )
-    assert WindowsApplicationAdapter._window_matches_target(
-        100, 20, {10}, {20}
-    )
-    assert not WindowsApplicationAdapter._window_matches_target(
-        101, 20, {10}, {20}
-    )
+    assert WindowsApplicationAdapter._window_matches_target(200, 10, {10}, {20})
+    assert WindowsApplicationAdapter._window_matches_target(100, 20, {10}, {20})
+    assert not WindowsApplicationAdapter._window_matches_target(101, 20, {10}, {20})
 
 
 @pytest.mark.asyncio
@@ -820,21 +798,25 @@ def test_installed_application_executable_resolution(tmp_path):
     updater = install / "Update.exe"
     updater.write_bytes(b"")
 
-    assert LocalWindowsDeviceAdapter._display_icon_executable(
-        f'"{app}",0'
-    ) == app.resolve()
+    assert LocalWindowsDeviceAdapter._display_icon_executable(f'"{app}",0') == app.resolve()
     assert LocalWindowsDeviceAdapter._application_executable_path(
         "Example App", None, str(install)
     ) == str(app.resolve())
 
 
 def test_default_browser_command_executable_path_is_parsed():
-    assert WindowsApplicationAdapter._command_executable_path(
-        r'"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe" --single-argument %1'
-    ) == r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"
-    assert WindowsApplicationAdapter._command_executable_path(
-        r"C:\Browsers\Firefox\firefox.exe -osint -url %1"
-    ) == r"C:\Browsers\Firefox\firefox.exe"
+    assert (
+        WindowsApplicationAdapter._command_executable_path(
+            r'"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe" --single-argument %1'
+        )
+        == r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"
+    )
+    assert (
+        WindowsApplicationAdapter._command_executable_path(
+            r"C:\Browsers\Firefox\firefox.exe -osint -url %1"
+        )
+        == r"C:\Browsers\Firefox\firefox.exe"
+    )
 
 
 def test_window_input_trims_trailing_planner_punctuation():
@@ -843,9 +825,7 @@ def test_window_input_trims_trailing_planner_punctuation():
         "windows.application_window",
         {"operation": "close", "process_name": "roblox.exe\ufe40"},
     )
-    assert skill.required_permissions(skill_call)[0].targets == (
-        "robloxplayerbeta.exe",
-    )
+    assert skill.required_permissions(skill_call)[0].targets == ("robloxplayerbeta.exe",)
 
 
 @pytest.mark.asyncio
@@ -936,6 +916,14 @@ async def test_windows_device_control_covers_status_and_local_controls():
     result = await skill.execute(battery_call, __import__("asyncio").Event())
     assert result.data["result"]["percent"] == 80
     assert skill.required_permissions(battery_call)[0].capability == "device.read"
+
+    performance_call = call(
+        "windows.device_control", {"operation": "performance_status"}
+    )
+    result = await skill.execute(performance_call, __import__("asyncio").Event())
+    assert result.summary == "CPU usage: 10%. Memory usage: 40%."
+    assert result.data["result"]["cpu_percent"] == 10
+    assert skill.required_permissions(performance_call)[0].capability == "device.read"
 
     restart_call = call("windows.device_control", {"operation": "restart_device"})
     assert skill.risk_for(restart_call) == RiskLevel.CRITICAL

@@ -1,8 +1,12 @@
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
-python -m pip install -e ".[desktop,audio,stt,build]"
+python -m pip install -e ".[desktop,audio,stt,build,test,dev,ui-test]"
+python -m ruff format --check .
+python -m ruff check .
 python -m pytest
+python -m pytest learning_tests -q
+python -m pytest -m ui tests/ui -q
 python -m PyInstaller --clean --noconfirm packaging/local-assistant.spec
 $isccCommand = Get-Command iscc -ErrorAction SilentlyContinue
 $isccPath = if ($isccCommand) { $isccCommand.Source } else { $null }

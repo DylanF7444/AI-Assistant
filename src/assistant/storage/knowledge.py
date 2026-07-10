@@ -88,9 +88,7 @@ class KnowledgeBaseStore:
             row = (
                 session.get(KnowledgeBaseRow, knowledge_base_id)
                 if knowledge_base_id is not None
-                else session.scalar(
-                    select(KnowledgeBaseRow).where(KnowledgeBaseRow.name == name)
-                )
+                else session.scalar(select(KnowledgeBaseRow).where(KnowledgeBaseRow.name == name))
             )
             timestamp = now()
             if row is None:
@@ -131,9 +129,7 @@ class KnowledgeBaseStore:
     ) -> KnowledgeBase:
         path = path.resolve()
         if path.suffix.casefold() not in self.SUPPORTED_SUFFIXES:
-            raise ValueError(
-                "Supported knowledge files are TXT, Markdown, RST, CSV, and JSON"
-            )
+            raise ValueError("Supported knowledge files are TXT, Markdown, RST, CSV, and JSON")
         if not path.is_file():
             raise ValueError("Knowledge file does not exist")
         if path.stat().st_size > self.MAX_FILE_BYTES:
@@ -156,9 +152,7 @@ class KnowledgeBaseStore:
 
     def list(self) -> list[KnowledgeBase]:
         with self.database.session() as session:
-            rows = session.scalars(
-                select(KnowledgeBaseRow).order_by(KnowledgeBaseRow.name)
-            )
+            rows = session.scalars(select(KnowledgeBaseRow).order_by(KnowledgeBaseRow.name))
             return [self._value(row) for row in rows]
 
     def set_enabled(self, knowledge_base_id: int, enabled: bool) -> None:
@@ -194,9 +188,7 @@ class KnowledgeBaseStore:
         for knowledge_base in self.list():
             if not knowledge_base.enabled:
                 continue
-            metadata_words = self._words(
-                f"{knowledge_base.name} {knowledge_base.description}"
-            )
+            metadata_words = self._words(f"{knowledge_base.name} {knowledge_base.description}")
             metadata_score = len(query_words & metadata_words) * 3
             for chunk in self._chunks(knowledge_base.content):
                 chunk_words = self._words(chunk)
@@ -204,10 +196,7 @@ class KnowledgeBaseStore:
                 if not overlap and metadata_score == 0:
                     continue
                 phrase_bonus = (
-                    4
-                    if len(query_phrase) >= 5
-                    and query_phrase in chunk.casefold()
-                    else 0
+                    4 if len(query_phrase) >= 5 and query_phrase in chunk.casefold() else 0
                 )
                 density = len(overlap) / max(len(query_words), 1)
                 score = metadata_score + len(overlap) * 2 + density + phrase_bonus
@@ -248,11 +237,7 @@ class KnowledgeBaseStore:
 
     @staticmethod
     def _chunks(content: str, target_chars: int = 1200) -> tuple[str, ...]:
-        paragraphs = [
-            value.strip()
-            for value in re.split(r"\n\s*\n", content)
-            if value.strip()
-        ]
+        paragraphs = [value.strip() for value in re.split(r"\n\s*\n", content) if value.strip()]
         chunks: list[str] = []
         current = ""
         for paragraph in paragraphs:

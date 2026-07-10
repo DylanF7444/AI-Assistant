@@ -34,9 +34,7 @@ class HomeAssistantAdapter:
         self.timeout_seconds = timeout_seconds
         self.opener = opener
 
-    def _request(
-        self, method: str, path: str, payload: dict[str, Any] | None = None
-    ) -> Any:
+    def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> Any:
         request = urllib.request.Request(
             f"{self.base_url}{path}",
             data=json.dumps(payload).encode() if payload is not None else None,
@@ -83,4 +81,3 @@ class HomeAssistantAdapter:
         return await asyncio.to_thread(
             self._request, "POST", f"/api/services/{domain}/{service}", payload
         )
-

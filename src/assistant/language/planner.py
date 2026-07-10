@@ -10,8 +10,8 @@ from jsonschema import ValidationError, validate
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
 
-from assistant.contracts import Intent, SkillManifest, normalize_confidence
 from assistant.context.snapshot import ContextSnapshot
+from assistant.contracts import Intent, SkillManifest, normalize_confidence
 from assistant.language.understanding import UserIntentInterpretation
 from assistant.providers import LLMProvider
 from assistant.storage.knowledge import KnowledgeBaseStore
@@ -43,7 +43,18 @@ class SkillRetriever:
         "compute": {"calculator", "arithmetic", "math"},
         "launch": {"open", "application"},
         "open": {"launch", "launcher", "application"},
+        "start": {"launch", "open", "application"},
+        "run": {"launch", "open", "application"},
+        "blank": {"new", "launch", "open"},
+        "fresh": {"new", "launch", "open"},
+        "bring": {"focus", "window"},
+        "foreground": {"focus", "window"},
+        "hide": {"minimize", "window"},
+        "enlarge": {"maximize", "window"},
+        "quit": {"close", "application"},
+        "exit": {"close", "application"},
         "find": {"search", "file"},
+        "locate": {"find", "search", "file"},
         "copy": {"clipboard", "file"},
         "navigate": {"navigation", "browser"},
         "play": {"media", "music"},
@@ -53,8 +64,7 @@ class SkillRetriever:
 
     def __init__(
         self,
-        manifests: tuple[SkillManifest, ...]
-        | Callable[[], tuple[SkillManifest, ...]],
+        manifests: tuple[SkillManifest, ...] | Callable[[], tuple[SkillManifest, ...]],
     ) -> None:
         self.manifests = manifests
 
@@ -67,11 +77,12 @@ class SkillRetriever:
             words.update(self.SYNONYMS.get(word, ()))
         scored = []
         for manifest in self.available():
-            haystack = set(re.findall(
-                r"[a-z0-9]+",
-                f"{manifest.skill_id} {manifest.display_name} {manifest.description}"
-                .casefold(),
-            ))
+            haystack = set(
+                re.findall(
+                    r"[a-z0-9]+",
+                    f"{manifest.skill_id} {manifest.display_name} {manifest.description}".casefold(),
+                )
+            )
             score = len(words & haystack)
             scored.append((score, manifest.skill_id, manifest))
         return tuple(item[2] for item in sorted(scored, reverse=True)[:limit] if item[0])
@@ -129,11 +140,16 @@ class LocalPlanner:
     OPERATING_RULES = (
         "Registered skills are your only action capabilities. Skill results are executed "
         "later by a separate policy and execution layer, so never claim that an action "
-        "has already completed. Never invent skills, arguments, shell commands, access, "
-        "or abilities. Permissions and confirmations are enforced outside this planning "
-        "step; do not bypass them or imply that they are unnecessary. The skill directory "
-        "describes your overall capabilities. Only skills in Detailed candidate skills "
-        "may be selected for this request."
+        "has already completed and never answer with a promise to use a skill later. "
+        "Infer the requested state change from the user's whole goal, including polite, "
+        "indirect, and outcome-oriented wording. Choose capabilities by their described "
+        "effect rather than by a shared noun or keyword: distinguish creating or starting "
+        "something from reading, changing, moving, or closing something that already exists. "
+        "Select the skill now when it can perform the request. Never invent skills, "
+        "arguments, shell commands, access, or abilities. Permissions and confirmations "
+        "are enforced outside this planning step; do not bypass them or imply that they "
+        "are unnecessary. The skill directory describes your overall capabilities. Only "
+        "skills in Detailed candidate skills may be selected for this request."
     )
 
     OUTPUT_SCHEMA = {
@@ -214,11 +230,13 @@ class LocalPlanner:
         retriever: SkillRetriever,
         knowledge_bases: KnowledgeBaseStore | None = None,
         timeout_seconds: float = 60.0,
+        argument_validator: Callable[[str, dict[str, Any]], Any] | None = None,
     ) -> None:
         self.provider = provider
         self.retriever = retriever
         self.knowledge_bases = knowledge_bases
         self.timeout_seconds = timeout_seconds
+        self.argument_validator = argument_validator
 
     async def interpret(
         self,
@@ -251,18 +269,17 @@ class LocalPlanner:
                 )
         raise RuntimeError("Planner interpretation validation retry was exhausted")
 
-    async def plan(
-        self, text: str, recent_context: tuple[dict[str, str], ...] = ()
-    ) -> Intent:
+    async def plan(self, text: str, recent_context: tuple[dict[str, str], ...] = ()) -> Intent:
         if self._looks_like_gibberish(text):
             return self._rejection("I could not understand that request.")
-        skills = self.retriever.relevant(text)
+        skills = self._relevant_skills(text, recent_context)
         prompt = self._build_planning_prompt(text, recent_context, skills)
         for attempt in range(2):
             output = await self._structured_completion(prompt)
             try:
                 validate(output, self.OUTPUT_SCHEMA)
                 if output["disposition"] in {"answer", "reject"}:
+                    self._reject_deferred_skill_answer(output, skills)
                     return self._conversation_intent(output)
                 manifest = self._resolve_skill_manifest(output, skills)
                 if manifest is None:
@@ -274,22 +291,16 @@ class LocalPlanner:
                             confidence=output["confidence"],
                             source="llm",
                         )
-                    return await self._repair_conversational_response(
-                        text, recent_context
-                    )
-                output["arguments"] = self._normalize_skill_arguments(
-                    manifest, output["arguments"]
-                )
-                validate(output["arguments"], manifest.input_schema)
+                    return await self._repair_conversational_response(text, recent_context)
+                output["arguments"] = self._normalize_skill_arguments(manifest, output["arguments"])
+                self._validate_skill_arguments(manifest, output["arguments"])
                 return Intent(
                     name=manifest.skill_id,
                     arguments=output["arguments"],
                     confidence=output["confidence"],
                     source="llm",
                     ambiguous=bool(output["clarification"]),
-                    ambiguity_reasons=(output["clarification"],)
-                    if output["clarification"]
-                    else (),
+                    ambiguity_reasons=(output["clarification"],) if output["clarification"] else (),
                 )
             except ValidationError as exc:
                 if attempt:
@@ -306,17 +317,11 @@ class LocalPlanner:
         self, text: str, recent_context: tuple[dict[str, str], ...] = ()
     ) -> PlannerDecision:
         if self._looks_like_gibberish(text):
-            return PlannerDecision(
-                intent=self._rejection("I could not understand that request.")
-            )
-        skills = self.retriever.relevant(text, limit=12)
-        prompt = self._build_planning_prompt(
-            text, recent_context, skills, allow_plan=True
-        )
+            return PlannerDecision(intent=self._rejection("I could not understand that request."))
+        skills = self._relevant_skills(text, recent_context, limit=12)
+        prompt = self._build_planning_prompt(text, recent_context, skills, allow_plan=True)
         for attempt in range(2):
-            output = await self._structured_completion(
-                prompt, schema=self.DECISION_OUTPUT_SCHEMA
-            )
+            output = await self._structured_completion(prompt, schema=self.DECISION_OUTPUT_SCHEMA)
             try:
                 validate(output, self.DECISION_OUTPUT_SCHEMA)
                 disposition = output["disposition"]
@@ -326,24 +331,18 @@ class LocalPlanner:
                         raise ValidationError("Clarification disposition requires a question")
                     return PlannerDecision(clarification=question)
                 if disposition in {"answer", "reject"}:
+                    self._reject_deferred_skill_answer(output, skills)
                     return PlannerDecision(intent=self._conversation_intent(output))
                 if disposition == "skill":
-                    if (
-                        self._resolve_skill_manifest(output, skills) is None
-                        and (
-                            question := self._clarification_from_invalid_action(output)
-                        )
+                    if self._resolve_skill_manifest(output, skills) is None and (
+                        question := self._clarification_from_invalid_action(output)
                     ):
                         return PlannerDecision(clarification=question)
-                    return PlannerDecision(
-                        intent=self._skill_intent_from_output(output, skills)
-                    )
+                    return PlannerDecision(intent=self._skill_intent_from_output(output, skills))
                 if disposition == "plan":
                     if intent := self._single_intent_from_plan_output(output, skills):
                         return PlannerDecision(intent=intent)
-                    return PlannerDecision(
-                        steps=self._planned_steps_from_output(output, skills)
-                    )
+                    return PlannerDecision(steps=self._planned_steps_from_output(output, skills))
                 raise ValidationError(f"Unsupported disposition: {disposition}")
             except ValidationError as exc:
                 if question := self._clarification_from_invalid_action(output):
@@ -362,9 +361,7 @@ class LocalPlanner:
         retrieved: tuple[Any, ...],
     ) -> PlannerDecision:
         if self._looks_like_gibberish(text):
-            return PlannerDecision(
-                intent=self._rejection("I could not understand that request.")
-            )
+            return PlannerDecision(intent=self._rejection("I could not understand that request."))
         skills = self._candidate_skills_from_retrieved(text, retrieved)
         prompt = self._build_interpreted_planning_prompt(
             text,
@@ -387,24 +384,18 @@ class LocalPlanner:
                         raise ValidationError("Clarification disposition requires a question")
                     return PlannerDecision(clarification=question)
                 if disposition in {"answer", "reject"}:
+                    self._reject_deferred_skill_answer(output, skills)
                     return PlannerDecision(intent=self._conversation_intent(output))
                 if disposition == "skill":
-                    if (
-                        self._resolve_skill_manifest(output, skills) is None
-                        and (
-                            question := self._clarification_from_invalid_action(output)
-                        )
+                    if self._resolve_skill_manifest(output, skills) is None and (
+                        question := self._clarification_from_invalid_action(output)
                     ):
                         return PlannerDecision(clarification=question)
-                    return PlannerDecision(
-                        intent=self._skill_intent_from_output(output, skills)
-                    )
+                    return PlannerDecision(intent=self._skill_intent_from_output(output, skills))
                 if disposition == "plan":
                     if intent := self._single_intent_from_plan_output(output, skills):
                         return PlannerDecision(intent=intent)
-                    return PlannerDecision(
-                        steps=self._planned_steps_from_output(output, skills)
-                    )
+                    return PlannerDecision(steps=self._planned_steps_from_output(output, skills))
                 raise ValidationError(f"Unsupported disposition: {disposition}")
             except ValidationError as exc:
                 if question := self._clarification_from_invalid_action(output):
@@ -474,6 +465,86 @@ class LocalPlanner:
                 )
         raise RuntimeError("Planner revision validation retry was exhausted")
 
+    def _relevant_skills(
+        self,
+        text: str,
+        recent_context: tuple[dict[str, str], ...],
+        *,
+        limit: int = 6,
+    ) -> tuple[SkillManifest, ...]:
+        selected = list(self.retriever.relevant(text, limit=limit))
+        if not recent_context or not self._looks_like_contextual_follow_up(text):
+            return tuple(selected)
+        if len(selected) >= limit:
+            return tuple(selected[:limit])
+
+        context_parts: list[str] = []
+        for interaction in recent_context[-2:]:
+            for key in ("request", "response", "intent"):
+                value = interaction.get(key)
+                if isinstance(value, str) and value.strip():
+                    context_parts.append(value)
+        if not context_parts:
+            return tuple(selected)
+
+        selected_ids = {manifest.skill_id for manifest in selected}
+        for manifest in self.retriever.relevant(" ".join(context_parts), limit=limit):
+            if manifest.skill_id in selected_ids:
+                continue
+            selected.append(manifest)
+            selected_ids.add(manifest.skill_id)
+            if len(selected) >= limit:
+                break
+        return tuple(selected)
+
+    @staticmethod
+    def _looks_like_contextual_follow_up(text: str) -> bool:
+        normalized = re.sub(r"[^a-z0-9'’]+", " ", text.casefold()).strip()
+        if not normalized:
+            return False
+        if re.fullmatch(
+            r"(?:yes|yeah|yep|ok|okay|sure|please|go ahead|proceed|continue|"
+            r"do (?:it|that)|please do|please continue|try (?:it|that)|"
+            r"use (?:it|that|the skill)|run (?:it|that|the skill)|"
+            r"can you (?:do|run|use) (?:it|that)(?: now)?)",
+            normalized,
+        ):
+            return True
+        words = normalized.split()
+        return len(words) <= 12 and bool(
+            re.search(
+                r"\b(?:it|that|this|those|them|same|previous|earlier|again)\b",
+                normalized,
+            )
+        )
+
+    @staticmethod
+    def _reject_deferred_skill_answer(
+        output: dict[str, Any],
+        skills: tuple[SkillManifest, ...],
+    ) -> None:
+        if output.get("disposition") != "answer" or not skills:
+            return
+        answer = output.get("answer")
+        if not isinstance(answer, str):
+            return
+        normalized = " ".join(answer.casefold().split())
+        promised_by_assistant = re.search(
+            r"\b(?:i\s+(?:will|am going to)|i['’]ll|let me)\s+"
+            r"(?:now\s+)?(?:use|run|execute|invoke|call|start)\b",
+            normalized,
+        )
+        promised_passively = re.search(
+            r"\b(?:skill|tool|command)\b.{0,80}\bwill\s+be\s+"
+            r"(?:used|run|executed|invoked|called)\b",
+            normalized,
+        )
+        if promised_by_assistant or promised_passively:
+            raise ValidationError(
+                "Conversational response deferred an available skill call; "
+                "select and call the skill now"
+            )
+
     def _build_planning_prompt(
         self,
         text: str,
@@ -529,7 +600,9 @@ class LocalPlanner:
         return (
             f"{self.ROLE}\n"
             "Interpret the user's goal before choosing any action. Do not select a "
-            "skill in this step. Identify explicit requests, implicit needs, missing "
+            "skill in this step. Translate polite, indirect, and outcome-oriented "
+            "wording into the concrete state change the user wants without inventing "
+            "a target or value. Identify explicit requests, implicit needs, missing "
             "information, assumptions, constraints, risk notes, and success criteria. "
             "Ask for clarification when the goal, target, scope, or success criteria "
             "are ambiguous, especially before file changes or other local actions. "
@@ -630,9 +703,15 @@ class LocalPlanner:
             if isinstance(skill_id, str) and skill_id in manifests and skill_id not in skill_ids:
                 skill_ids.append(skill_id)
         selected = [manifests[skill_id] for skill_id in skill_ids[:limit]]
-        if selected:
-            return tuple(selected)
-        return self.retriever.relevant(text, limit=limit)
+        selected_ids = {manifest.skill_id for manifest in selected}
+        for manifest in self.retriever.relevant(text, limit=limit):
+            if manifest.skill_id in selected_ids:
+                continue
+            selected.append(manifest)
+            selected_ids.add(manifest.skill_id)
+            if len(selected) >= limit:
+                break
+        return tuple(selected)
 
     def _skill_directory(self) -> list[dict[str, Any]]:
         return [
@@ -645,9 +724,7 @@ class LocalPlanner:
         ]
 
     @staticmethod
-    def _candidate_skill_details(
-        skills: tuple[SkillManifest, ...]
-    ) -> list[dict[str, Any]]:
+    def _candidate_skill_details(skills: tuple[SkillManifest, ...]) -> list[dict[str, Any]]:
         return [
             {
                 "id": item.skill_id,
@@ -671,13 +748,8 @@ class LocalPlanner:
         return serialized
 
     def _knowledge_references(self, text: str) -> list[dict[str, str]]:
-        knowledge = (
-            self.knowledge_bases.search(text) if self.knowledge_bases else ()
-        )
-        return [
-            {"source": item.name, "content": item.text}
-            for item in knowledge
-        ]
+        knowledge = self.knowledge_bases.search(text) if self.knowledge_bases else ()
+        return [{"source": item.name, "content": item.text} for item in knowledge]
 
     async def _structured_completion(
         self, prompt: str, schema: dict[str, Any] | None = None
@@ -734,16 +806,14 @@ class LocalPlanner:
                 )
             raise ValidationError("Selected skill is not a detailed candidate skill")
         arguments = self._normalize_skill_arguments(manifest, output["arguments"])
-        validate(arguments, manifest.input_schema)
+        self._validate_skill_arguments(manifest, arguments)
         return Intent(
             name=manifest.skill_id,
             arguments=arguments,
             confidence=output["confidence"],
             source="llm",
             ambiguous=bool(output["clarification"]),
-            ambiguity_reasons=(output["clarification"],)
-            if output["clarification"]
-            else (),
+            ambiguity_reasons=(output["clarification"],) if output["clarification"] else (),
         )
 
     def _planned_steps_from_output(
@@ -770,14 +840,10 @@ class LocalPlanner:
             skill_id = raw_step["skill_id"]
             manifest = manifests.get(skill_id)
             if manifest is None:
-                raise ValidationError(
-                    f"Plan step {step_id} selected unavailable skill: {skill_id}"
-                )
-            arguments = self._normalize_skill_arguments(
-                manifest, dict(raw_step["arguments"])
-            )
+                raise ValidationError(f"Plan step {step_id} selected unavailable skill: {skill_id}")
+            arguments = self._normalize_skill_arguments(manifest, dict(raw_step["arguments"]))
             self._reject_placeholder_arguments(arguments)
-            validate(arguments, manifest.input_schema)
+            self._validate_skill_arguments(manifest, arguments)
             seen.add(step_id)
             planned.append(
                 PlannedIntentStep(
@@ -924,6 +990,21 @@ class LocalPlanner:
             return matches[0]
         return None
 
+    def _validate_skill_arguments(
+        self,
+        manifest: SkillManifest,
+        arguments: dict[str, Any],
+    ) -> None:
+        validate(arguments, manifest.input_schema)
+        if self.argument_validator is None:
+            return
+        try:
+            self.argument_validator(manifest.skill_id, arguments)
+        except (KeyError, PydanticValidationError, TypeError, ValueError) as exc:
+            raise ValidationError(
+                f"Invalid arguments for {manifest.skill_id}: {exc}"
+            ) from exc
+
     @staticmethod
     def _normalize_skill_arguments(
         manifest: SkillManifest, arguments: dict[str, Any]
@@ -934,25 +1015,18 @@ class LocalPlanner:
             and isinstance(arguments.get("source"), str)
         ):
             return {"application": arguments["source"]}
-        if (
-            manifest.skill_id == "windows.application_window"
-            and isinstance(arguments.get("process_name"), str)
+        if manifest.skill_id == "windows.application_window" and isinstance(
+            arguments.get("process_name"), str
         ):
             normalized = dict(arguments)
-            normalized["process_name"] = normalize_process_name(
-                normalized["process_name"]
-            )
+            normalized["process_name"] = normalize_process_name(normalized["process_name"])
             return normalized
         if manifest.skill_id == "windows.file_search":
             normalized = {
-                key: arguments[key]
-                for key in ("root", "query", "limit")
-                if key in arguments
+                key: arguments[key] for key in ("root", "query", "limit") if key in arguments
             }
             if isinstance(normalized.get("root"), str):
-                normalized["root"] = LocalPlanner._normalize_file_search_root(
-                    normalized["root"]
-                )
+                normalized["root"] = LocalPlanner._normalize_file_search_root(normalized["root"])
             if "limit" in normalized:
                 try:
                     normalized["limit"] = max(1, min(100, int(normalized["limit"])))

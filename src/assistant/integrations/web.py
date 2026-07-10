@@ -6,8 +6,8 @@ import ipaddress
 import json
 import os
 import re
-import socket
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -17,7 +17,6 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
-
 
 USER_AGENT = "LocalAssistant/0.1"
 
@@ -103,9 +102,7 @@ class WebClient:
             return await self._search_brave(query, api_key, count)
         raise ValueError(f"Unsupported search provider: {provider}")
 
-    async def _search_duckduckgo(
-        self, query: str, count: int
-    ) -> list[dict[str, str]]:
+    async def _search_duckduckgo(self, query: str, count: int) -> list[dict[str, str]]:
         url = "https://api.duckduckgo.com/?" + urlencode(
             {
                 "q": query,
@@ -143,9 +140,7 @@ class WebClient:
         return results[:count]
 
     @staticmethod
-    def _append_duckduckgo_result(
-        results: list[dict[str, str]], item: Any
-    ) -> None:
+    def _append_duckduckgo_result(results: list[dict[str, str]], item: Any) -> None:
         if not isinstance(item, dict):
             return
         url = str(item.get("FirstURL", "")).strip()
@@ -161,9 +156,7 @@ class WebClient:
             }
         )
 
-    async def _search_brave(
-        self, query: str, api_key: str, count: int
-    ) -> list[dict[str, str]]:
+    async def _search_brave(self, query: str, api_key: str, count: int) -> list[dict[str, str]]:
         url = "https://api.search.brave.com/res/v1/web/search?" + urlencode(
             {"q": query, "count": count, "safesearch": "moderate"}
         )
@@ -187,9 +180,7 @@ class WebClient:
         ]
 
     async def fetch(self, url: str, max_characters: int = 12000) -> dict[str, str]:
-        return await asyncio.to_thread(
-            self._fetch_sync, url, max_characters
-        )
+        return await asyncio.to_thread(self._fetch_sync, url, max_characters)
 
     def _fetch_sync(self, url: str, max_characters: int) -> dict[str, str]:
         _validate_public_https(url)
@@ -340,12 +331,11 @@ class CodexExecClient:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                creationflags=(
-                    subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-                ),
+                creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
             )
         except OSError as error:
             raise RuntimeError(f"Could not start codex exec: {error}") from error
+        stdout = stderr = ""
         try:
             deadline = time.monotonic() + self.timeout_seconds
             while process.poll() is None:
@@ -371,10 +361,6 @@ class CodexExecClient:
             process.kill()
             process.communicate()
             raise RuntimeError("codex exec exceeded its timeout") from error
-        try:
-            stdout
-        except UnboundLocalError:
-            stdout, stderr = process.communicate(timeout=0)
         if process.returncode != 0:
             detail = (stderr or stdout).strip()
             raise RuntimeError(
@@ -402,11 +388,7 @@ class CodexExecClient:
         root = Path(local_app_data) / "OpenAI" / "Codex" / "bin"
         if not root.exists():
             return None
-        candidates = [
-            path
-            for path in root.glob("*/codex.exe")
-            if path.is_file()
-        ]
+        candidates = [path for path in root.glob("*/codex.exe") if path.is_file()]
         if not candidates:
             return None
         return max(candidates, key=lambda path: path.stat().st_mtime)

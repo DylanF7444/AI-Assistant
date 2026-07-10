@@ -1,5 +1,4 @@
 from pathlib import Path
-from uuid import uuid4
 
 from assistant.contracts import PermissionContext, PermissionScope, SkillCall
 from assistant.policy.file_access import FileAccessPolicy, FileAccessPolicyStore
@@ -52,17 +51,13 @@ def test_permissions_default_deny_and_folder_scope(tmp_path: Path):
         targets=(str(root),),
     )
     assert manager.authorize(call(str(inside)), required).allowed
-    outside_scope = (
-        required[0].model_copy(update={"targets": (str(outside),)}),
-    )
+    outside_scope = (required[0].model_copy(update={"targets": (str(outside),)}),)
     assert not manager.authorize(call(str(outside)), outside_scope).allowed
 
 
 def test_one_time_permission_is_consumed(tmp_path: Path):
     manager, audit = build(tmp_path)
-    required = (
-        PermissionScope(capability="media.control", reason="test"),
-    )
+    required = (PermissionScope(capability="media.control", reason="test"),)
     skill_call = SkillCall(
         skill_id="test.media",
         permission_context=PermissionContext(session_id="s"),

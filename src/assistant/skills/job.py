@@ -64,9 +64,7 @@ class WindowsJob:
         ):
             self.close()
             raise ctypes.WinError()
-        if not kernel32.AssignProcessToJobObject(
-            self.handle, wintypes.HANDLE(process_handle)
-        ):
+        if not kernel32.AssignProcessToJobObject(self.handle, wintypes.HANDLE(process_handle)):
             self.close()
             raise ctypes.WinError()
 
@@ -74,4 +72,3 @@ class WindowsJob:
         if self.handle:
             ctypes.windll.kernel32.CloseHandle(self.handle)
             self.handle = None
-

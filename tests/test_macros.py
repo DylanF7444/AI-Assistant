@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 from pydantic import BaseModel
 
@@ -42,9 +40,7 @@ class ActionSkill(Skill):
         description="A permission-gated test action.",
         input_model=input_model,
         output_model=output_model,
-        permissions=(
-            PermissionScope(capability="test.action", reason="Run test action"),
-        ),
+        permissions=(PermissionScope(capability="test.action", reason="Run test action"),),
         risk=RiskLevel.HIGH,
     )
 
@@ -68,9 +64,7 @@ def setup(tmp_path):
     store = MacroStore(database)
     macro = MacroSkill(store, registry, permissions, audit)
     registry.register(macro)
-    engine = ExecutionEngine(
-        registry, permissions, ConfirmationManager(), audit, EventBus()
-    )
+    engine = ExecutionEngine(registry, permissions, ConfirmationManager(), audit, EventBus())
     return store, engine, permissions, audit
 
 
@@ -127,9 +121,7 @@ async def test_sensitive_macro_requires_permission_and_full_plan_confirmation(tm
     prepared = await engine.prepare(call)
     assert prepared.confirmation.risk == RiskLevel.HIGH
     assert "Action" in prepared.confirmation.exact_action
-    result = await engine.execute(
-        call, confirmation_id=prepared.confirmation.confirmation_id
-    )
+    result = await engine.execute(call, confirmation_id=prepared.confirmation.confirmation_id)
     assert result.status == ResultStatus.COMPLETED
 
 

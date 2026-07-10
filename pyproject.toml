@@ -23,6 +23,8 @@ stt = ["faster-whisper>=1.1,<2"]
 wakeword = ["openwakeword>=0.6,<1", "onnxruntime>=1.20,<2"]
 integrations = ["paho-mqtt>=2.1,<3"]
 test = ["pytest>=8.3,<9", "pytest-asyncio>=0.24,<1"]
+dev = ["ruff>=0.12,<1"]
+ui-test = ["PySide6>=6.8,<7", "pytest-qt>=4.4,<5"]
 build = ["pyinstaller>=6.11,<7"]
 
 [project.scripts]
@@ -36,3 +38,15 @@ where = ["src"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+markers = ["ui: tests that require PySide6 and pytest-qt"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["build", "dist"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.format]
+line-ending = "lf"

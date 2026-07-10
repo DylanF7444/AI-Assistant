@@ -18,6 +18,21 @@ class SkillExample(BaseModel):
 
 DEFAULT_SKILL_EXAMPLES: tuple[SkillExample, ...] = (
     SkillExample(
+        utterance="I need a fresh calculator window",
+        skill_id="windows.launcher",
+        arguments={"application": "calculator"},
+        notes=(
+            "Outcome-oriented wording requests a new application instance, not focus "
+            "or manipulation of an existing window."
+        ),
+    ),
+    SkillExample(
+        utterance="bring calculator to the front",
+        skill_id="windows.application_window",
+        arguments={"operation": "focus", "process_name": "calculator.exe"},
+        notes="Bringing an existing application forward is a window focus operation.",
+    ),
+    SkillExample(
         utterance="clean up my downloads",
         skill_id="windows.file_operation",
         notes=(

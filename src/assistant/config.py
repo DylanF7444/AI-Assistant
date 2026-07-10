@@ -75,18 +75,19 @@ class Settings(BaseModel):
         return keyword
 
     @model_validator(mode="after")
-    def _keyword_clap_mode_needs_trigger(self) -> "Settings":
+    def _keyword_clap_mode_needs_trigger(self) -> Settings:
         if (
             self.voice_activation_mode == "keyword_clap"
             and not self.voice_activation_keyword_enabled
             and not self.voice_activation_clap_enabled
         ):
-            raise ValueError(
-                "keyword/clap voice activation needs a keyword or clap trigger"
-            )
+            raise ValueError("keyword/clap voice activation needs a keyword or clap trigger")
         return self
 
     @property
+    def database_path(self) -> Path:
+        return self.data_dir / self.database_name
+
+    @property
     def database_url(self) -> str:
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        return f"sqlite:///{(self.data_dir / self.database_name).as_posix()}"
+        return f"sqlite:///{self.database_path.as_posix()}"

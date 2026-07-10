@@ -18,9 +18,7 @@ async def test_text_command_travels_through_the_complete_application(
     )
     container = build_container(settings)
 
-    response, outcome = await container.orchestrator.handle_text(
-        "calculate 9 plus 3"
-    )
+    response, outcome = await container.orchestrator.handle_text("calculate 9 plus 3")
 
     assert outcome.result.status == ResultStatus.COMPLETED
     assert outcome.result.data["value"] == 12

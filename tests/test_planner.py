@@ -1,5 +1,4 @@
 import pytest
-from jsonschema import ValidationError
 
 from assistant.context.snapshot import ContextSnapshot
 from assistant.language.planner import InvalidPlannerResponse, LocalPlanner, SkillRetriever
@@ -12,7 +11,11 @@ from assistant.skills.builtin import (
     LauncherSkill,
     TimerSkill,
 )
-from assistant.skills.windows import ApplicationWindowSkill, FileOperationSkill
+from assistant.skills.windows import (
+    ApplicationWindowSkill,
+    FileOperationSkill,
+    WindowsDeviceControlSkill,
+)
 from assistant.storage.database import Database
 from assistant.storage.knowledge import KnowledgeBaseStore
 
@@ -27,11 +30,7 @@ class FakeProvider:
     async def structured_completion(self, prompt, schema, timeout_seconds):
         self.last_prompt = prompt
         self.last_timeout_seconds = timeout_seconds
-        output = (
-            self.output[self.calls]
-            if isinstance(self.output, list)
-            else self.output
-        )
+        output = self.output[self.calls] if isinstance(self.output, list) else self.output
         self.calls += 1
         return output
 
@@ -83,9 +82,7 @@ async def test_planner_accepts_only_retrieved_schema_valid_call():
     )
     intent = await planner.plan("calculate two plus two")
     assert intent.name == "core.calculator"
-    assert "planning and conversational intelligence for Local Assistant" in (
-        provider.last_prompt
-    )
+    assert "planning and conversational intelligence for Local Assistant" in (provider.last_prompt)
     assert "Registered skills are your only action capabilities" in provider.last_prompt
     assert '"id":"core.calculator"' in provider.last_prompt
     assert '"id":"core.datetime"' in provider.last_prompt
@@ -114,6 +111,101 @@ async def test_planner_uses_configured_timeout():
     await planner.plan("Can you help?")
 
     assert provider.last_timeout_seconds == 45
+
+
+@pytest.mark.asyncio
+async def test_planner_retries_instead_of_promising_to_use_an_available_skill():
+    provider = FakeProvider(
+        [
+            {
+                "disposition": "answer",
+                "skill_id": "",
+                "arguments": {},
+                "answer": (
+                    "I will use the 'Windows Device Control' skill to read your "
+                    "CPU and memory usage information."
+                ),
+                "confidence": 0.95,
+                "clarification": None,
+            },
+            {
+                "disposition": "skill",
+                "skill_id": "windows.device_control",
+                "arguments": {"operation": "performance_status"},
+                "answer": None,
+                "confidence": 0.98,
+                "clarification": None,
+            },
+        ]
+    )
+    device = WindowsDeviceControlSkill(object())
+    planner = LocalPlanner(provider, SkillRetriever((device.manifest,)))
+
+    decision = await planner.plan_decision("What is my CPU and memory usage?")
+
+    assert provider.calls == 2
+    assert decision.intent is not None
+    assert decision.intent.name == "windows.device_control"
+    assert decision.intent.arguments == {"operation": "performance_status"}
+    assert "deferred an available skill call" in provider.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_planner_can_answer_a_question_about_using_an_available_skill():
+    provider = FakeProvider(
+        {
+            "disposition": "answer",
+            "skill_id": "",
+            "arguments": {},
+            "answer": "I can use the Calculator skill for arithmetic.",
+            "confidence": 0.98,
+            "clarification": None,
+        }
+    )
+    planner = LocalPlanner(provider, SkillRetriever((CalculatorSkill.manifest,)))
+
+    decision = await planner.plan_decision("Can you use the calculator skill?")
+
+    assert provider.calls == 1
+    assert decision.intent is not None
+    assert decision.intent.name == "conversation.answer"
+
+
+@pytest.mark.asyncio
+async def test_contextual_follow_up_retrieves_skills_from_the_previous_turn():
+    provider = FakeProvider(
+        {
+            "disposition": "skill",
+            "skill_id": "windows.device_control",
+            "arguments": {"operation": "performance_status"},
+            "answer": None,
+            "confidence": 0.98,
+            "clarification": None,
+        }
+    )
+    device = WindowsDeviceControlSkill(object())
+    planner = LocalPlanner(provider, SkillRetriever((device.manifest,)))
+    recent_context = (
+        {
+            "request": "What's my CPU and memory usage?",
+            "intent": "conversation.answer",
+            "outcome": "answered",
+            "response_type": "answer",
+            "severity": "info",
+            "response": "I can read that with Windows Device Control.",
+        },
+    )
+
+    decision = await planner.plan_decision("go ahead", recent_context)
+
+    assert decision.intent is not None
+    assert decision.intent.name == "windows.device_control"
+    assert decision.intent.arguments == {"operation": "performance_status"}
+    detailed = provider.last_prompt.split(
+        "Detailed candidate skills (the only selectable skills for this request): ",
+        1,
+    )[1].split("\nKnowledge excerpts:", 1)[0]
+    assert '"id":"windows.device_control"' in detailed
 
 
 @pytest.mark.asyncio
@@ -307,9 +399,7 @@ async def test_planner_accepts_empty_reject_answer_with_reason():
             {
                 "disposition": "reject",
                 "skill_id": "",
-                "arguments": {
-                    "reason": "The request cannot be handled by any registered skill."
-                },
+                "arguments": {"reason": "The request cannot be handled by any registered skill."},
                 "answer": "",
                 "confidence": 0.95,
                 "clarification": None,
@@ -321,9 +411,7 @@ async def test_planner_accepts_empty_reject_answer_with_reason():
     intent = await planner.plan("turn off my wifi")
 
     assert intent.name == "conversation.reject"
-    assert intent.arguments["text"] == (
-        "The request cannot be handled by any registered skill."
-    )
+    assert intent.arguments["text"] == ("The request cannot be handled by any registered skill.")
 
 
 @pytest.mark.asyncio
@@ -339,9 +427,7 @@ async def test_planner_infers_missing_skill_id_from_valid_arguments():
                 "clarification": "None",
             }
         ),
-        SkillRetriever(
-            (CalculatorSkill.manifest, DateTimeSkill.manifest, TimerSkill.manifest)
-        ),
+        SkillRetriever((CalculatorSkill.manifest, DateTimeSkill.manifest, TimerSkill.manifest)),
     )
 
     intent = await planner.plan("set a timer for one minute")
@@ -360,8 +446,7 @@ async def test_planner_uses_answer_when_skill_call_has_no_executable_arguments()
                 "skill_id": "",
                 "arguments": {},
                 "answer": (
-                    "I can set a timer for you. A 10-second timer will go off "
-                    "in 10 seconds."
+                    "I can set a timer for you. A 10-second timer will go off in 10 seconds."
                 ),
                 "confidence": 1,
                 "clarification": None,
@@ -552,9 +637,7 @@ async def test_complex_planner_treats_single_action_plan_arguments_as_skill():
         SkillRetriever((FileOperationSkill(object()).manifest,)),
     )
 
-    decision = await planner.plan_decision(
-        "Add a text file to the assistant folder on my desktop"
-    )
+    decision = await planner.plan_decision("Add a text file to the assistant folder on my desktop")
 
     assert decision.intent.name == "windows.file_operation"
     assert decision.intent.arguments == {
@@ -613,6 +696,101 @@ async def test_plan_from_interpretation_uses_retrieved_candidate_skills():
     assert decision.intent.name == "windows.application_window"
     assert "windows.application_window" in provider.last_prompt
     assert "core.calculator" not in provider.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_interpreted_planner_merges_retrieved_and_lexical_skill_candidates():
+    launcher = LauncherSkill(FakeApplications(), resolver=lambda name: "unused.exe")
+    window = ApplicationWindowSkill(FakeApplications())
+    provider = FakeProvider(
+        {
+            "disposition": "skill",
+            "skill_id": "windows.launcher",
+            "arguments": {"application": "notepad"},
+            "answer": None,
+            "confidence": 0.96,
+            "clarification": None,
+        }
+    )
+    planner = LocalPlanner(
+        provider,
+        SkillRetriever((launcher.manifest, window.manifest)),
+    )
+
+    decision = await planner.plan_from_interpretation(
+        "I need a blank Notepad window",
+        interpretation=UserIntentInterpretation(
+            user_goal="Open a new blank Notepad application instance",
+            request_type="local_action",
+            explicit_requests=["I need a blank Notepad window"],
+            success_criteria=["a new blank Notepad window is open"],
+            confidence=0.94,
+        ),
+        context=ContextSnapshot(
+            request_text="I need a blank Notepad window",
+            session_id="s1",
+        ),
+        retrieved=(
+            RetrievedContextItem(
+                namespace="skill",
+                source_id="windows.application_window",
+                text="Change an existing application window",
+                metadata={"skill_id": "windows.application_window"},
+                score=0.91,
+            ),
+        ),
+    )
+
+    assert decision.intent is not None
+    assert decision.intent.name == "windows.launcher"
+    assert decision.intent.arguments == {"application": "notepad"}
+    assert '"id":"windows.application_window"' in provider.last_prompt
+    assert '"id":"windows.launcher"' in provider.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_planner_repairs_arguments_rejected_by_real_skill_validation():
+    launcher = LauncherSkill(FakeApplications(), resolver=lambda name: "unused.exe")
+    window = ApplicationWindowSkill(FakeApplications())
+    skills = {
+        launcher.manifest.skill_id: launcher,
+        window.manifest.skill_id: window,
+    }
+    provider = FakeProvider(
+        [
+            {
+                "disposition": "skill",
+                "skill_id": "windows.application_window",
+                "arguments": {"operation": "focus"},
+                "answer": None,
+                "confidence": 0.8,
+                "clarification": None,
+            },
+            {
+                "disposition": "skill",
+                "skill_id": "windows.launcher",
+                "arguments": {"application": "notepad"},
+                "answer": None,
+                "confidence": 0.96,
+                "clarification": None,
+            },
+        ]
+    )
+    planner = LocalPlanner(
+        provider,
+        SkillRetriever(tuple(skill.manifest for skill in skills.values())),
+        argument_validator=lambda skill_id, arguments: skills[skill_id].validate(
+            arguments
+        ),
+    )
+
+    decision = await planner.plan_decision("I need a blank Notepad window")
+
+    assert provider.calls == 2
+    assert decision.intent is not None
+    assert decision.intent.name == "windows.launcher"
+    assert decision.intent.arguments == {"application": "notepad"}
+    assert "focus requires process_name" in provider.last_prompt
 
 
 @pytest.mark.asyncio
@@ -718,14 +896,9 @@ async def test_complex_planner_uses_clarification_from_invalid_skill_call():
                 "operation": "clean up downloads",
                 "destination": None,
             },
-            "answer": (
-                "I will help you clean up your Downloads folder by organizing "
-                "the files."
-            ),
+            "answer": ("I will help you clean up your Downloads folder by organizing the files."),
             "confidence": 0.95,
-            "clarification": (
-                "Should I organize Downloads by file type, date, or project/name?"
-            ),
+            "clarification": ("Should I organize Downloads by file type, date, or project/name?"),
         }
     )
     planner = LocalPlanner(
@@ -754,9 +927,7 @@ async def test_interpreted_planner_uses_clarification_from_invalid_skill_call():
             },
             "answer": None,
             "confidence": 0.95,
-            "clarification": (
-                "Should I organize Downloads by file type, date, or project/name?"
-            ),
+            "clarification": ("Should I organize Downloads by file type, date, or project/name?"),
         }
     )
     planner = LocalPlanner(

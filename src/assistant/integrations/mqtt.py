@@ -51,9 +51,7 @@ class MQTTDeviceTransport:
         else:
             import paho.mqtt.client as mqtt
 
-            client = mqtt.Client(
-                callback_api_version=mqtt.CallbackAPIVersion.VERSION2
-            )
+            client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
         client.tls_set(
             ca_certs=str(self.ca_certificate),
             certfile=str(self.client_certificate),
@@ -70,9 +68,7 @@ class MQTTDeviceTransport:
 
         def exchange() -> DeviceResult:
             client = self._client()
-            response_topic = (
-                f"{self.topic_prefix}/{command.device_id}/results/{command.command_id}"
-            )
+            response_topic = f"{self.topic_prefix}/{command.device_id}/results/{command.command_id}"
             command_topic = f"{self.topic_prefix}/{command.device_id}/commands"
             completed = threading.Event()
             result: dict[str, Any] = {}
@@ -129,4 +125,3 @@ class MQTTDeviceTransport:
                 online=False,
                 details={"error": str(exc)},
             )
-

@@ -4,7 +4,7 @@ import asyncio
 from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sqlalchemy import select
 
 from assistant.contracts import ResultStatus, SkillCall, SkillResult
@@ -43,9 +43,7 @@ class TaskSkill(Skill):
             if args.operation == "add":
                 if not args.title:
                     raise ValueError("A task title is required")
-                session.add(
-                    ItemRow(kind="task", title=args.title, body="", created_at=now())
-                )
+                session.add(ItemRow(kind="task", title=args.title, body="", created_at=now()))
             elif args.operation in {"complete", "delete"}:
                 if args.item_id is None:
                     raise ValueError("An item ID is required")
@@ -64,8 +62,7 @@ class TaskSkill(Skill):
                 )
             )
             values = [
-                {"id": row.id, "title": row.title, "completed": row.completed}
-                for row in rows
+                {"id": row.id, "title": row.title, "completed": row.completed} for row in rows
             ]
         return SkillResult(
             status=ResultStatus.COMPLETED,
@@ -129,9 +126,7 @@ class NoteSkill(Skill):
                     for row in rows
                     if needle in row.title.casefold() or needle in row.body.casefold()
                 ]
-            values = [
-                {"id": row.id, "title": row.title, "body": row.body} for row in rows
-            ]
+            values = [{"id": row.id, "title": row.title, "body": row.body} for row in rows]
         return SkillResult(
             status=ResultStatus.COMPLETED,
             summary=f"Found {len(values)} local notes.",
@@ -240,4 +235,3 @@ class UnitConversionSkill(Skill):
             summary=f"{args.value:g} {args.from_unit} is {value:g} {args.to_unit}.",
             data=ConvertOutput(value=value, unit=args.to_unit).model_dump(),
         )
-

@@ -44,9 +44,7 @@ class IsolatedSkill(Skill):
     def validate_result(self, result: SkillResult) -> None:
         validate(result.data, self.manifest.output_schema)
 
-    async def execute(
-        self, call: SkillCall, cancel_event: asyncio.Event
-    ) -> SkillResult:
+    async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult:
         self.validate(call.arguments)
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         self._process = await asyncio.create_subprocess_exec(
@@ -62,18 +60,16 @@ class IsolatedSkill(Skill):
             env={**os.environ, "ASSISTANT_OFFLINE": "1"},
         )
         process_handle = getattr(self._process, "_transport", None)
-        process_handle = getattr(
-            getattr(process_handle, "_proc", None), "_handle", None
-        )
+        process_handle = getattr(getattr(process_handle, "_proc", None), "_handle", None)
         if process_handle:
             self._job = WindowsJob(
                 process_handle,
                 memory_mb=self.memory_limit_mb,
                 cpu_seconds=max(1, int(self.timeout_seconds)),
             )
-        request = json.dumps(
-            {"operation": "execute", "call": call.model_dump(mode="json")}
-        ).encode("utf-8")
+        request = json.dumps({"operation": "execute", "call": call.model_dump(mode="json")}).encode(
+            "utf-8"
+        )
         communicate = asyncio.create_task(self._process.communicate(request))
         cancelled = asyncio.create_task(cancel_event.wait())
         try:

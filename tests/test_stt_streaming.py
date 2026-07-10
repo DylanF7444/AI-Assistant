@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
-from pathlib import Path
 import sys
 import types
-from uuid import uuid4
+from pathlib import Path
 
 import pytest
 

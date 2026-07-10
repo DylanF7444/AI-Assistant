@@ -27,7 +27,7 @@ class ScenarioPlanner:
         )
 
     async def plan_from_interpretation(self, text, *, interpretation, context, retrieved):
-        if "usual browser" in text.casefold() and "memory.preferences" in context.keys():
+        if "usual browser" in text.casefold() and "memory.preferences" in context.items_by_key():
             return PlannerDecision(
                 intent=Intent(
                     name="conversation.answer",
@@ -75,7 +75,7 @@ class ScenarioPlanner:
         ),
         (
             "Turn that down.",
-            'What should I turn down?',
+            "What should I turn down?",
         ),
         (
             "Compare these options.",

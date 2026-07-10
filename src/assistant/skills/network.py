@@ -12,7 +12,6 @@ from assistant.integrations.web import CloudModelClient, CodexExecClient, WebCli
 from assistant.skills.base import Skill
 from assistant.skills.builtin import manifest
 
-
 NETWORK_PERMISSION = (
     PermissionScope(
         capability="network",
@@ -203,8 +202,6 @@ class CloudAskSkill(Skill):
             summary=f"{args.provider.title()} answered using {model}.",
             display_text=answer,
             speech_text=answer,
-            data=CloudAskOutput(
-                provider=args.provider, model=model, answer=answer
-            ).model_dump(),
+            data=CloudAskOutput(provider=args.provider, model=model, answer=answer).model_dump(),
             sensitive=True,
         )

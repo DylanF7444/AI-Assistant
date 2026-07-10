@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import TypeAdapter
 
 
 class OllamaProvider:
@@ -69,15 +69,14 @@ class OllamaProvider:
 
         def request() -> dict[str, Any]:
             data = json.dumps(payload).encode("utf-8")
+
             def send() -> dict[str, Any]:
                 req = urllib.request.Request(
                     self.endpoint,
                     data=data,
                     headers={"Content-Type": "application/json"},
                 )
-                with urllib.request.urlopen(
-                    req, timeout=timeout_seconds
-                ) as response:
+                with urllib.request.urlopen(req, timeout=timeout_seconds) as response:
                     return json.load(response)
 
             try:

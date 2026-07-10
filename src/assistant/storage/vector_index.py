@@ -74,9 +74,7 @@ class VectorIndex:
 
     def delete_namespace(self, namespace: str) -> None:
         with self.database.session() as session:
-            session.query(VectorItemRow).filter(
-                VectorItemRow.namespace == namespace
-            ).delete()
+            session.query(VectorItemRow).filter(VectorItemRow.namespace == namespace).delete()
 
     def search(
         self,
@@ -93,9 +91,7 @@ class VectorIndex:
         with self.database.session() as session:
             rows = list(
                 session.scalars(
-                    select(VectorItemRow).where(
-                        VectorItemRow.namespace.in_(sorted(namespaces))
-                    )
+                    select(VectorItemRow).where(VectorItemRow.namespace.in_(sorted(namespaces)))
                 )
             )
         scored: list[VectorSearchResult] = []

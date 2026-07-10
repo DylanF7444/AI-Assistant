@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated July 5, 2026. The product checklist is the specification; this file
+Updated July 10, 2026. The product checklist is the specification; this file
 records implementation evidence and release gates that cannot be honestly
 closed by source code or unit tests alone.
 
@@ -48,7 +48,8 @@ closed by source code or unit tests alone.
   model components, per-user install, startup task, upgrade preservation, and
   data/model uninstall choices. Install, packaged launch, and file-removal
   uninstall behavior were exercised on the target non-administrator account.
-- 324 automated tests pass, including a 1,500-command sustained run, bounded
+- 428 automated regression tests and 29 guided learning tests pass, including
+  offscreen Qt coverage, a 1,500-command sustained run, bounded
   idempotency state, database integrity, isolated outbound-network denial,
   migration, update traversal, permission, confirmation, Windows adapter,
   device, model, audio, planner, and end-to-end text command coverage.
@@ -63,12 +64,14 @@ status, risk level, permissions, and user-facing capability.
 
 - Hardware: Ryzen 5 5600G, 15.8 GB RAM, GTX 1660 Super 6 GB, Windows 11,
   Python 3.12.6.
-- Deterministic command benchmark: 100 iterations, 25.0 ms median, 33.9 ms
-  p95, 43.1 ms maximum, 516,441 Python peak bytes.
+- Deterministic command benchmark: 100 iterations, 25.0 ms median, 28.7 ms
+  p95, 50.9 ms maximum, 603,153 Python peak bytes.
 - Ollama `qwen2.5:3b`: 3/3 initial structured calls correct, 1.71 s median,
   approximately 68-84 generated tokens/second.
 - Packaged artifacts: `dist/LocalAssistant.exe` and
   `dist/LocalAssistant-0.1.0-Setup.exe`.
+- Temporary-profile desktop smoke: startup, all 14 tabs, `calculate 17 times
+  19`, displayed result `323`, and clean shutdown.
 
 ## External Release Gates
 

@@ -31,9 +31,7 @@ def test_user_intent_interpretation_validates_contract():
         missing_information=["preferred organization method"],
         constraints=["preview before moving files"],
         should_ask_clarification=True,
-        clarification_question=(
-            "Should I organize Downloads by file type, date, or project/name?"
-        ),
+        clarification_question=("Should I organize Downloads by file type, date, or project/name?"),
         confidence=0.86,
     )
 

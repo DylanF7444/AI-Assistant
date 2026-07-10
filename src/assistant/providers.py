@@ -45,4 +45,3 @@ class EmbeddingProvider(Protocol):
 
 class Clock(Protocol):
     def monotonic(self) -> float: ...
-

@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from uuid import uuid4
 
 from pydantic import BaseModel
 
 from assistant.contracts import (
-    PermissionContext,
     PermissionScope,
     ResultStatus,
     RiskLevel,
@@ -18,7 +16,7 @@ from assistant.skills.base import Skill
 from assistant.skills.builtin import manifest
 from assistant.skills.registry import SkillRegistry
 from assistant.storage.database import AuditStore
-from assistant.storage.macros import MacroDefinition, MacroStore
+from assistant.storage.macros import MacroStore
 
 
 class MacroInput(BaseModel):
@@ -89,8 +87,7 @@ class MacroSkill(Skill):
 
     def permission_checks(self, call: SkillCall):
         return tuple(
-            (nested, skill.required_permissions(nested))
-            for skill, nested in self._calls(call)
+            (nested, skill.required_permissions(nested)) for skill, nested in self._calls(call)
         )
 
     def risk_for(self, call: SkillCall) -> RiskLevel:
@@ -99,9 +96,7 @@ class MacroSkill(Skill):
 
     async def preview(self, call: SkillCall) -> str:
         definition = self.store.get(self.validate(call.arguments).name)
-        previews = [
-            await skill.preview(nested) for skill, nested in self._calls(call)
-        ]
+        previews = [await skill.preview(nested) for skill, nested in self._calls(call)]
         return f"Run macro {definition.name}: " + " then ".join(previews)
 
     async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult:
@@ -114,9 +109,7 @@ class MacroSkill(Skill):
                     summary=f"Macro {definition.name} was cancelled.",
                     data={"name": definition.name, "results": results},
                 )
-            decision = self.permissions.authorize(
-                nested, skill.required_permissions(nested)
-            )
+            decision = self.permissions.authorize(nested, skill.required_permissions(nested))
             if not decision.allowed:
                 return SkillResult(
                     status=ResultStatus.PARTIAL if results else ResultStatus.DENIED,
@@ -124,9 +117,7 @@ class MacroSkill(Skill):
                     data={"name": definition.name, "results": results},
                 )
             try:
-                result = await asyncio.wait_for(
-                    skill.execute(nested, cancel_event), timeout=30
-                )
+                result = await asyncio.wait_for(skill.execute(nested, cancel_event), timeout=30)
                 skill.validate_result(result)
             except TimeoutError:
                 result = SkillResult(
@@ -152,10 +143,7 @@ class MacroSkill(Skill):
                 event_type="macro_step",
                 skill_id=nested.skill_id,
                 decision=result.status.value,
-                permissions=[
-                    item.capability
-                    for item in skill.required_permissions(nested)
-                ],
+                permissions=[item.capability for item in skill.required_permissions(nested)],
                 details={"macro": definition.name, "result": result.model_dump(mode="json")},
             )
             if result.status != ResultStatus.COMPLETED:

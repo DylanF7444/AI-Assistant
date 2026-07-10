@@ -4,7 +4,6 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-
 VoicePromptKind = Literal[
     "approval",
     "permission_duration",
@@ -37,9 +36,7 @@ def keyword_request(text: str, keyword: str) -> str | None:
     request_text = text.strip()
     if not request_text:
         return None
-    keyword_pattern = r"\s+".join(
-        re.escape(part) for part in normalized_keyword.split()
-    )
+    keyword_pattern = r"\s+".join(re.escape(part) for part in normalized_keyword.split())
     pattern = re.compile(rf"\b{keyword_pattern}\b[,:-]?\s*", re.IGNORECASE)
     match = pattern.search(request_text)
     if not match:

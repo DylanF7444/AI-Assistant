@@ -81,9 +81,7 @@ async def test_launcher_uses_registered_path_only(tmp_path: Path):
 async def test_registered_applications_skill_lists_assistant_registrations(tmp_path: Path):
     brave = tmp_path / "brave.exe"
     notepad = tmp_path / "notepad.exe"
-    skill = RegisteredApplicationsSkill(
-        lambda: {"brave": str(brave), "notepad": str(notepad)}
-    )
+    skill = RegisteredApplicationsSkill(lambda: {"brave": str(brave), "notepad": str(notepad)})
 
     result = await skill.execute(registered_call(), asyncio.Event())
 
@@ -169,9 +167,12 @@ async def test_launcher_prefers_registered_application_over_website_fallback(
 
     assert adapter.launched == str(approved)
     assert adapter.opened_url is None
-    assert skill.required_permissions(
-        call({"application": "youtube", "fallback_url": "https://www.youtube.com"})
-    )[0].capability == "process.launch"
+    assert (
+        skill.required_permissions(
+            call({"application": "youtube", "fallback_url": "https://www.youtube.com"})
+        )[0].capability
+        == "process.launch"
+    )
 
 
 @pytest.mark.asyncio

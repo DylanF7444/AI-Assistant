@@ -12,8 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
-from pydantic import field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from assistant.contracts import (
     PermissionScope,
@@ -24,15 +23,14 @@ from assistant.contracts import (
     SkillResult,
 )
 from assistant.policy.file_access import FileAccessPolicyStore
-from assistant.skills.base import Skill
-from assistant.skills.base import ApplicationRegistrationRequired
-from assistant.windows.paths import resolve_user_path
+from assistant.skills.base import ApplicationRegistrationRequired, Skill
 from assistant.windows.adapters import (
     ApplicationAdapter,
     ClipboardAdapter,
     FileSystemAdapter,
     MediaAdapter,
 )
+from assistant.windows.paths import resolve_user_path
 
 
 class EmptyOutput(BaseModel):
@@ -127,7 +125,9 @@ class DateTimeSkill(Skill):
         now = datetime.now().astimezone()
         text = {
             "date": now.strftime("%A, %B %d, %Y"),
-            "time": now.strftime("%-I:%M %p") if platform.system() != "Windows" else now.strftime("%I:%M %p").lstrip("0"),
+            "time": now.strftime("%-I:%M %p")
+            if platform.system() != "Windows"
+            else now.strftime("%I:%M %p").lstrip("0"),
             "both": now.strftime("%A, %B %d, %Y at %I:%M %p").replace(" at 0", " at "),
         }[args.query]
         return SkillResult(
@@ -235,9 +235,7 @@ class FileSearchSkill(Skill):
         values = [str(path) for path in paths]
         display = f"Found {len(values)} matching item{'s' if len(values) != 1 else ''}."
         if values:
-            display += "\n" + "\n".join(
-                f"{index}. {path}" for index, path in enumerate(values, 1)
-            )
+            display += "\n" + "\n".join(f"{index}. {path}" for index, path in enumerate(values, 1))
         return SkillResult(
             status=ResultStatus.COMPLETED,
             summary=f"Found {len(values)} matching item{'s' if len(values) != 1 else ''}.",
@@ -423,8 +421,7 @@ class RegisteredApplicationsSkill(Skill):
         args = self.validate(call.arguments)
         registrations = self._registrations()
         applications = [
-            {"name": name, "path": path}
-            for name, path in sorted(registrations.items())
+            {"name": name, "path": path} for name, path in sorted(registrations.items())
         ]
         if not applications:
             return SkillResult(
@@ -444,9 +441,7 @@ class RegisteredApplicationsSkill(Skill):
         count = len(applications)
         return SkillResult(
             status=ResultStatus.COMPLETED,
-            summary=(
-                f"{count} application{'s are' if count != 1 else ' is'} registered."
-            ),
+            summary=(f"{count} application{'s are' if count != 1 else ' is'} registered."),
             display_text="Registered applications:\n" + "\n".join(lines),
             data=RegisteredApplicationsOutput(applications=applications).model_dump(),
             sensitive=args.include_paths,
@@ -477,7 +472,11 @@ class LauncherSkill(Skill):
         self.manifest = manifest(
             skill_id="windows.launcher",
             display_name="Launcher",
-            description="Launch an approved registered application path.",
+            description=(
+                "Start or open a new, fresh, or blank window/instance of an approved "
+                "registered application. This creates an application instance; it does "
+                "not focus or change an existing window."
+            ),
             input_model=self.input_model,
             output_model=self.output_model,
             permissions=(
@@ -532,8 +531,7 @@ class LauncherSkill(Skill):
                 capability="process.launch",
                 targets=(str(Path(path).resolve()),),
                 reason=(
-                    "Start this registered application path with the requested "
-                    "browser arguments."
+                    "Start this registered application path with the requested browser arguments."
                     if args.url or args.private
                     else "Start this registered application path."
                 ),
@@ -608,9 +606,7 @@ class MediaSkill(Skill):
             input_model=self.input_model,
             output_model=self.output_model,
             permissions=(
-                PermissionScope(
-                    capability="media.control", reason="Send a media control key."
-                ),
+                PermissionScope(capability="media.control", reason="Send a media control key."),
             ),
         )
 

@@ -23,22 +23,21 @@ class MemoryInput(BaseModel):
     confirm_sensitive: bool = False
 
     @model_validator(mode="after")
-    def _operation_has_required_fields(self) -> "MemoryInput":
-        if self.operation == "remember":
-            if not self.type or not self.key or not self.value:
-                raise ValueError("remember requires type, key, and value")
-        if self.operation == "inspect" and not any(
-            (self.memory_id, self.key, self.query)
-        ):
+    def _operation_has_required_fields(self) -> MemoryInput:
+        if self.operation == "remember" and (not self.type or not self.key or not self.value):
+            raise ValueError("remember requires type, key, and value")
+        if self.operation == "inspect" and not any((self.memory_id, self.key, self.query)):
             raise ValueError("inspect requires memory_id, key, or query")
-        if self.operation == "edit":
-            if not any((self.memory_id, self.key)):
-                raise ValueError("edit requires memory_id or key")
-            if self.type is None and self.value is None and self.confidence is None:
-                raise ValueError("edit requires type, value, or confidence")
-        if self.operation == "forget" and not any(
-            (self.memory_id, self.key, self.query)
+        if self.operation == "edit" and not any((self.memory_id, self.key)):
+            raise ValueError("edit requires memory_id or key")
+        if (
+            self.operation == "edit"
+            and self.type is None
+            and self.value is None
+            and self.confidence is None
         ):
+            raise ValueError("edit requires type, value, or confidence")
+        if self.operation == "forget" and not any((self.memory_id, self.key, self.query)):
             raise ValueError("forget requires memory_id, key, or query")
         if self.operation == "delete" and not any((self.memory_id, self.key)):
             raise ValueError("delete requires memory_id or key")
@@ -124,9 +123,7 @@ class MemorySkill(Skill):
             item = self.store.get(args.memory_id)
             return (item,) if item is not None and item.enabled else ()
         if args.key:
-            return tuple(
-                item for item in self.store.list() if item.key == _clean_key(args.key)
-            )
+            return tuple(item for item in self.store.list() if item.key == _clean_key(args.key))
         return self.store.search(args.query or "", type=args.type)
 
 
@@ -148,9 +145,7 @@ def _looks_sensitive(value: str) -> bool:
         return True
     if re.search(r"\b\d{3}-\d{2}-\d{4}\b", value):
         return True
-    if re.search(r"\b(?:\d[ -]*?){13,19}\b", value):
-        return True
-    return False
+    return bool(re.search(r"\b(?:\d[ -]*?){13,19}\b", value))
 
 
 def _sensitive_denied() -> SkillResult:

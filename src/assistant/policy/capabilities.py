@@ -4,7 +4,6 @@ from collections.abc import Iterable
 
 from assistant.contracts import PermissionScope
 
-
 BUILT_IN_CAPABILITIES = (
     "clipboard.read",
     "clipboard.write",
@@ -33,8 +32,5 @@ def available_capabilities(
     declared_permissions: Iterable[PermissionScope] = (),
 ) -> tuple[str, ...]:
     return tuple(
-        sorted(
-            set(BUILT_IN_CAPABILITIES)
-            | {scope.capability for scope in declared_permissions}
-        )
+        sorted(set(BUILT_IN_CAPABILITIES) | {scope.capability for scope in declared_permissions})
     )

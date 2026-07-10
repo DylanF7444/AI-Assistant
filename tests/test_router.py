@@ -55,6 +55,25 @@ def test_unknown_request_needs_local_planner():
 
 
 @pytest.mark.parametrize(
+    ("text", "expected_intent", "needs_llm"),
+    [
+        ("help me calculate 2 plus 3", "planner.goal", True),
+        ("what time is my timer", "conversation.question", True),
+        ("open brave and search for vlr.gg", "windows.launcher", False),
+        ("find my resume on my desktop", "windows.file_search", False),
+        ("delete the resume in my desktop", "windows.file_operation", False),
+        ("use my usual browser", "planner.goal", True),
+        ("remember that I prefer Brave", "core.memory", False),
+    ],
+)
+def test_route_precedence_is_characterized(text, expected_intent, needs_llm):
+    result = DeterministicRouter().route(text)
+
+    assert result.intent.name == expected_intent
+    assert result.needs_llm is needs_llm
+
+
+@pytest.mark.parametrize(
     ("text", "arguments"),
     [
         (
@@ -102,8 +121,26 @@ def test_broad_goal_requests_route_to_planner_goal(text):
     assert result.intent.arguments == {"text": text}
     assert result.intent.source == "classifier"
     assert result.intent.ambiguous
+    assert result.intent.ambiguity_reasons == ("Broad goal request requires interpretation",)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I need a blank Notepad window",
+        "Could you bring Calculator to the front?",
+        "I want the volume a little lower",
+        "Please find the latest report in my files",
+    ],
+)
+def test_naturally_framed_requests_use_goal_interpretation(text):
+    result = DeterministicRouter().route(text)
+
+    assert result.needs_llm
+    assert result.intent.name == "planner.goal"
+    assert result.intent.arguments == {"text": text}
     assert result.intent.ambiguity_reasons == (
-        "Broad goal request requires interpretation",
+        "Natural-language request requires goal interpretation",
     )
 
 
@@ -211,9 +248,7 @@ def test_launch_command_uses_registered_app_prefix_before_follow_up():
         ),
     ],
 )
-def test_website_names_route_to_launcher_with_default_browser_fallback(
-    text, arguments
-):
+def test_website_names_route_to_launcher_with_default_browser_fallback(text, arguments):
     result = DeterministicRouter().route(text)
     assert not result.needs_llm
     assert result.intent.name == "windows.browser_navigate"
@@ -368,9 +403,7 @@ def test_notepad_file_wording_routes_to_notepad_launcher(text):
 
 
 def test_create_text_file_in_assistant_folder_routes_without_planner():
-    result = DeterministicRouter().route(
-        "Add a text file to the assistant folder in my desktop"
-    )
+    result = DeterministicRouter().route("Add a text file to the assistant folder in my desktop")
 
     assert not result.needs_llm
     assert result.intent.name == "windows.file_operation"
@@ -413,7 +446,10 @@ def test_contextual_ordinal_file_actions_route_without_planner():
 @pytest.mark.parametrize(
     ("text", "url"),
     [
-        ("Open brave and go to vlr.gg/matches?status=upcoming", "https://vlr.gg/matches?status=upcoming"),
+        (
+            "Open brave and go to vlr.gg/matches?status=upcoming",
+            "https://vlr.gg/matches?status=upcoming",
+        ),
         ("Open brave vlr.gg", "https://vlr.gg"),
         ("Open brave and open https://example.com/docs", "https://example.com/docs"),
         ("Open brave and go to vlr dot gg", "https://vlr.gg"),
@@ -475,9 +511,7 @@ def test_assistant_window_routes_to_packaged_process_name():
         ("Switch chrome on display 3", "chrome.exe", 3),
     ],
 )
-def test_switch_window_monitor_movement_routes_without_local_planner(
-    text, process_name, monitor
-):
+def test_switch_window_monitor_movement_routes_without_local_planner(text, process_name, monitor):
     result = DeterministicRouter().route(text)
     assert not result.needs_llm
     assert result.intent.name == "windows.application_window"
@@ -556,6 +590,14 @@ def test_window_coordinate_move_and_resize_route():
         ("shutdown computer", {"operation": "shutdown_device"}),
         ("what's my battery level", {"operation": "battery_status"}),
         ("battery status", {"operation": "battery_status"}),
+        (
+            "Whats my cpu and memory usage?",
+            {"operation": "performance_status"},
+        ),
+        (
+            "How much CPU and memory am I using?",
+            {"operation": "performance_status"},
+        ),
         (
             "disable connected device USB\\VID_1",
             {"operation": "disable_connected_device", "instance_id": "usb\\vid_1"},

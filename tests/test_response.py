@@ -63,9 +63,7 @@ def test_detailed_mode_and_sensitive_display_privacy():
         summary="Result ready.",
         data={"value": 42},
     )
-    assert '"value": 42' in response_from_result(
-        result, detail="detailed"
-    ).display_text
+    assert '"value": 42' in response_from_result(result, detail="detailed").display_text
     hidden = response_from_result(
         result.model_copy(update={"sensitive": True}),
         detail="detailed",

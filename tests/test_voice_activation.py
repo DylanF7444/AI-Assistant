@@ -42,13 +42,9 @@ def test_voice_prompt_response_approves_and_denies():
 
 
 def test_voice_prompt_response_selects_permission_duration():
+    assert parse_voice_prompt_response("grant just once", "permission_duration").action == "once"
     assert (
-        parse_voice_prompt_response("grant just once", "permission_duration").action
-        == "once"
-    )
-    assert (
-        parse_voice_prompt_response("for this session", "permission_duration").action
-        == "session"
+        parse_voice_prompt_response("for this session", "permission_duration").action == "session"
     )
     assert (
         parse_voice_prompt_response("always remember this", "permission_duration").action
@@ -62,8 +58,7 @@ def test_voice_prompt_response_selects_permission_targets():
         == "requested_targets"
     )
     assert (
-        parse_voice_prompt_response("allow any target", "permission_targets").action
-        == "any_target"
+        parse_voice_prompt_response("allow any target", "permission_targets").action == "any_target"
     )
 
 

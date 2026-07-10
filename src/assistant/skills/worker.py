@@ -8,8 +8,8 @@ import sys
 from pathlib import Path
 
 from assistant.contracts import SkillCall, SkillResult
-from assistant.skills.base import Skill
 from assistant.policy.network import offline_lock
+from assistant.skills.base import Skill
 
 
 async def run(package_dir: Path, entry_point: str) -> dict:

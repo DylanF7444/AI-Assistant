@@ -32,10 +32,7 @@ class MacroStore:
         if not definition.steps:
             raise ValueError("Macro must contain at least one step")
         payload = json.dumps(
-            [
-                {"skill_id": step.skill_id, "arguments": step.arguments}
-                for step in definition.steps
-            ]
+            [{"skill_id": step.skill_id, "arguments": step.arguments} for step in definition.steps]
         )
         with self.database.session() as session:
             row = session.get(MacroRow, definition.name.casefold())
@@ -72,9 +69,7 @@ class MacroStore:
                 MacroDefinition(
                     name=row.name,
                     description=row.description,
-                    steps=tuple(
-                        MacroStep(**item) for item in json.loads(row.steps_json)
-                    ),
+                    steps=tuple(MacroStep(**item) for item in json.loads(row.steps_json)),
                 )
                 for row in rows
             )
@@ -86,4 +81,3 @@ class MacroStore:
                 return False
             session.delete(row)
             return True
-

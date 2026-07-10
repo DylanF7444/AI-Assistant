@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
-import re
 from typing import Protocol
 
-from assistant.contracts import RiskLevel, SkillManifest
 from assistant.context.budget import ContextBudget
 from assistant.context.snapshot import ContextItem, ContextSnapshot
+from assistant.contracts import RiskLevel, SkillManifest
 from assistant.policy.file_access import FileAccessPolicyStore
 from assistant.policy.permissions import PermissionManager
 from assistant.skills.registry import SkillRegistry
@@ -24,8 +24,7 @@ class ContextProvider(Protocol):
         *,
         session_id: str,
         budget: ContextBudget,
-    ) -> list[ContextItem]:
-        ...
+    ) -> list[ContextItem]: ...
 
 
 class SessionContextProvider:
@@ -212,9 +211,7 @@ class PermissionContextProvider:
                 "targets": grant["targets"],
                 "session_scoped": bool(grant["session_id"]),
                 "expires_at": (
-                    grant["expires_at"].isoformat()
-                    if grant["expires_at"] is not None
-                    else None
+                    grant["expires_at"].isoformat() if grant["expires_at"] is not None else None
                 ),
             }
             for grant in self.permissions.list_grants()
@@ -717,16 +714,14 @@ def _connected_device_summary(item: Mapping) -> dict[str, object]:
 
 def _unique_known_folders(folders: Mapping[str, str]) -> dict[str, Path]:
     values: dict[str, Path] = {}
-    for name, folder in folders.items():
+    for _name, folder in folders.items():
         canonical = folder.casefold()
         if canonical in values:
             continue
         try:
             raw_path = Path(folder).expanduser()
             values[canonical] = (
-                raw_path.resolve()
-                if raw_path.is_absolute()
-                else resolve_user_path(folder)
+                raw_path.resolve() if raw_path.is_absolute() else resolve_user_path(folder)
             )
         except ValueError:
             continue

@@ -1,9 +1,9 @@
 import asyncio
+from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from jsonschema import ValidationError
-from pathlib import Path
-from uuid import uuid4
 
 from assistant.bootstrap import build_container
 from assistant.contracts import (
@@ -18,8 +18,8 @@ from assistant.contracts import (
 from assistant.language.planner import (
     InvalidPlannerResponse,
     PlannedIntentStep,
-    PlanRevision,
     PlannerDecision,
+    PlanRevision,
 )
 from assistant.language.retrieval import RetrievedContextItem
 from assistant.language.understanding import UserIntentInterpretation
@@ -331,6 +331,38 @@ class ReplanningPlanner:
         pass
 
 
+class InterpretingLaunchPlanner:
+    async def interpret(self, text, *, context, retrieved):
+        return UserIntentInterpretation(
+            user_goal="Open a new blank Notepad application instance",
+            request_type="local_action",
+            explicit_requests=[text],
+            success_criteria=["a new blank Notepad window is open"],
+            confidence=0.95,
+        )
+
+    async def plan_from_interpretation(self, text, *, interpretation, context, retrieved):
+        return PlannerDecision(
+            intent=Intent(
+                name="windows.launcher",
+                arguments={"application": "notepad"},
+                confidence=0.97,
+                source="llm",
+            )
+        )
+
+    async def revise_plan(self, text, *, interpretation, context, retrieved, observations):
+        return PlanRevision(
+            disposition="stop",
+            rationale="The requested application instance was launched.",
+            response="Opened Notepad.",
+            confidence=0.98,
+        )
+
+    async def cancel(self):
+        pass
+
+
 class FakeSemanticRetriever:
     def __init__(self):
         self.calls = []
@@ -372,6 +404,41 @@ async def test_text_to_command_to_response(settings):
     assert response.response_type == ResponseType.SKILL
     assert "20" in response.display_text
     assert "Request breakdown:" not in response.display_text
+
+
+@pytest.mark.asyncio
+async def test_naturally_worded_launch_goal_executes_selected_skill(settings, tmp_path):
+    settings.confirmation_overrides = {"skill:windows.launcher": False}
+    container = build_container(settings)
+    target = tmp_path / "notepad.exe"
+    target.write_bytes(b"")
+    container.aliases.set("application", "notepad", str(target))
+    launched = []
+
+    async def record_launch(path):
+        launched.append(path)
+
+    container.registry.get("windows.launcher").adapter.launch = record_launch
+    container.permissions.grant(
+        user_id="local-user",
+        skill_id="windows.launcher",
+        capability="process.launch",
+        grant_type=GrantType.ALWAYS,
+        targets=(str(target.resolve()),),
+    )
+    container.orchestrator.planner = InterpretingLaunchPlanner()
+
+    response, outcome = await container.orchestrator.handle_text(
+        "I need a blank Notepad window"
+    )
+
+    assert outcome.result is not None
+    assert outcome.result.status == ResultStatus.COMPLETED
+    assert outcome.call is not None
+    assert outcome.call.skill_id == "windows.launcher"
+    assert outcome.call.arguments == {"application": "notepad"}
+    assert launched == [str(target)]
+    assert response.severity == "success"
 
 
 @pytest.mark.asyncio
@@ -456,9 +523,7 @@ async def test_file_search_select_and_contextual_copy_preview(settings, tmp_path
         targets=(str(documents.resolve()),),
     )
 
-    response, outcome = await container.orchestrator.handle_text(
-        f"find resume in {documents}"
-    )
+    response, outcome = await container.orchestrator.handle_text(f"find resume in {documents}")
     assert outcome.result.status == ResultStatus.COMPLETED
     assert "1." in response.display_text
     assert str(source.resolve()) in response.display_text
@@ -466,9 +531,7 @@ async def test_file_search_select_and_contextual_copy_preview(settings, tmp_path
     response, _ = await container.orchestrator.handle_text("select 1")
     assert str(source.resolve()) in response.display_text
 
-    response, outcome = await container.orchestrator.handle_text(
-        f"copy it to {destination_folder}"
-    )
+    response, outcome = await container.orchestrator.handle_text(f"copy it to {destination_folder}")
     assert response.response_type == ResponseType.PERMISSION
     assert len(outcome.permission_requests) == 2
     assert [request.scope.capability for request in outcome.permission_requests] == [
@@ -476,9 +539,7 @@ async def test_file_search_select_and_contextual_copy_preview(settings, tmp_path
         "filesystem.write",
     ]
     assert outcome.permission_requests[0].scope.targets == (str(source.resolve()),)
-    assert outcome.permission_requests[1].scope.targets == (
-        str(destination.resolve()),
-    )
+    assert outcome.permission_requests[1].scope.targets == (str(destination.resolve()),)
 
     for request in outcome.permission_requests:
         container.permissions.grant(
@@ -497,9 +558,7 @@ async def test_file_search_select_and_contextual_copy_preview(settings, tmp_path
 
 
 @pytest.mark.asyncio
-async def test_file_search_result_ordinal_copy_uses_named_documents_folder(
-    settings, tmp_path
-):
+async def test_file_search_result_ordinal_copy_uses_named_documents_folder(settings, tmp_path):
     container = build_container(settings)
     search_root = tmp_path / "search"
     search_root.mkdir()
@@ -514,9 +573,7 @@ async def test_file_search_result_ordinal_copy_uses_named_documents_folder(
         targets=(str(search_root.resolve()),),
     )
 
-    response, outcome = await container.orchestrator.handle_text(
-        f"find resume in {search_root}"
-    )
+    response, outcome = await container.orchestrator.handle_text(f"find resume in {search_root}")
     assert outcome.result.status == ResultStatus.COMPLETED
     assert str(source.resolve()) in response.display_text
 
@@ -527,31 +584,27 @@ async def test_file_search_result_ordinal_copy_uses_named_documents_folder(
     assert response.response_type == ResponseType.PERMISSION
     assert outcome.call.skill_id == "windows.file_operation"
     assert outcome.call.arguments["source"] == str(source.resolve())
-    assert outcome.call.arguments["destination"] == str(
-        expected_destination.resolve()
+    assert (
+        outcome.call.arguments["destination"].casefold()
+        == str(expected_destination.resolve()).casefold()
     )
     assert outcome.permission_requests[0].scope.targets == (str(source.resolve()),)
-    assert outcome.permission_requests[1].scope.targets == (
-        str(expected_destination.resolve()),
+    assert (
+        outcome.permission_requests[1].scope.targets[0].casefold()
+        == str(expected_destination.resolve()).casefold()
     )
 
 
 @pytest.mark.asyncio
-async def test_file_search_result_ordinal_open_uses_matching_candidate(
-    settings, tmp_path
-):
+async def test_file_search_result_ordinal_open_uses_matching_candidate(settings, tmp_path):
     container = build_container(settings)
     first = tmp_path / "first.txt"
     second = tmp_path / "second.txt"
     first.write_text("one")
     second.write_text("two")
-    container.orchestrator.remember_file_candidates(
-        [str(first.resolve()), str(second.resolve())]
-    )
+    container.orchestrator.remember_file_candidates([str(first.resolve()), str(second.resolve())])
 
-    response, outcome = await container.orchestrator.handle_text(
-        "Open the second one"
-    )
+    response, outcome = await container.orchestrator.handle_text("Open the second one")
 
     assert response.response_type == ResponseType.PERMISSION
     assert outcome.call.skill_id == "windows.file_operation"
@@ -560,6 +613,53 @@ async def test_file_search_result_ordinal_open_uses_matching_candidate(
         "source": str(second.resolve()),
     }
     assert outcome.permission_requests[0].scope.targets == (str(second.resolve()),)
+
+
+@pytest.mark.asyncio
+async def test_file_search_named_delete_prefers_exact_candidate_stem(settings, tmp_path):
+    container = build_container(settings)
+    desktop = tmp_path / "Desktop"
+    archive = desktop / "CodeArchive" / "Assistant" / ".venv"
+    starspace = desktop / "PROJECTS" / "Starspace" / "node_modules"
+    archive.mkdir(parents=True)
+    starspace.mkdir(parents=True)
+    resume = desktop / "Resume.txt"
+    resume.write_text("resume")
+    noisy_python = archive / "resume_execution.py"
+    noisy_python.write_text("code")
+    noisy_js = starspace / "GeneratorResume.js"
+    noisy_js.write_text("code")
+    container.orchestrator.remember_file_candidates(
+        [
+            str(resume.resolve()),
+            str(noisy_python.resolve()),
+            str(noisy_js.resolve()),
+        ]
+    )
+
+    response, outcome = await container.orchestrator.handle_text("Delete the resume in my desktop")
+
+    assert response.response_type == ResponseType.PERMISSION
+    assert outcome.call.skill_id == "windows.file_operation"
+    assert outcome.call.arguments == {
+        "operation": "delete",
+        "source": str(resume.resolve()),
+    }
+    assert len(outcome.permission_requests) == 1
+    assert outcome.permission_requests[0].scope.targets == (str(resume.resolve()),)
+
+
+@pytest.mark.asyncio
+async def test_unresolved_file_operation_source_asks_for_exact_file(settings):
+    container = build_container(settings)
+
+    response, outcome = await container.orchestrator.handle_text("Delete the resume in my desktop")
+
+    assert response.response_type == ResponseType.CLARIFICATION
+    assert "could not resolve" in response.display_text
+    assert "select 1" in response.display_text
+    assert "System32" not in response.display_text
+    assert outcome.call is None
 
 
 @pytest.mark.asyncio
@@ -665,14 +765,10 @@ async def test_router_clarification_follow_up_completes_previous_conversion_requ
 async def test_new_request_clears_pending_clarification(settings):
     container = build_container(settings)
 
-    first, _ = await container.orchestrator.handle_text(
-        "convert a few miles to kilometers"
-    )
+    first, _ = await container.orchestrator.handle_text("convert a few miles to kilometers")
     assert first.response_type == ResponseType.CLARIFICATION
 
-    response, outcome = await container.orchestrator.handle_text(
-        "new request calculate 2 plus 3"
-    )
+    response, outcome = await container.orchestrator.handle_text("new request calculate 2 plus 3")
 
     assert response.response_type == ResponseType.SKILL
     assert outcome.call.skill_id == "core.calculator"
@@ -684,9 +780,7 @@ async def test_new_request_clears_pending_clarification(settings):
 async def test_cancel_clears_pending_clarification(settings):
     container = build_container(settings)
 
-    first, _ = await container.orchestrator.handle_text(
-        "convert a few miles to kilometers"
-    )
+    first, _ = await container.orchestrator.handle_text("convert a few miles to kilometers")
     assert first.response_type == ResponseType.CLARIFICATION
 
     response, outcome = await container.orchestrator.handle_text("cancel")
@@ -813,9 +907,7 @@ async def test_listen_once_routes_final_transcript_not_partial_filler(settings):
     async def audio():
         yield b"\x01\x00" * 400
 
-    response, outcome = await container.orchestrator.listen_once(
-        PartialThenFinalSTT(), audio()
-    )
+    response, outcome = await container.orchestrator.listen_once(PartialThenFinalSTT(), audio())
 
     assert "2" in response.display_text
     assert outcome.result is not None
@@ -844,9 +936,7 @@ async def test_session_context_is_bounded_correctable_and_forgettable(settings):
     await container.orchestrator.handle_text("calculate 1 plus 1")
     await container.orchestrator.handle_text("calculate 2 plus 2")
     assert len(container.orchestrator._session_context) == 2
-    corrected, _ = await container.orchestrator.handle_text(
-        "correct that to calculate 3 plus 4"
-    )
+    corrected, _ = await container.orchestrator.handle_text("correct that to calculate 3 plus 4")
     assert "7" in corrected.display_text
     assert len(container.orchestrator._session_context) == 2
     await container.orchestrator.handle_text("forget this session")
@@ -911,9 +1001,7 @@ async def test_low_confidence_sensitive_target_prints_voice_debug(settings, caps
 async def test_unavailable_planner_keeps_deterministic_commands_available(settings):
     container = build_container(settings)
     container.orchestrator.planner = BrokenPlanner()
-    response, outcome = await container.orchestrator.handle_text(
-        "do something unmatched"
-    )
+    response, outcome = await container.orchestrator.handle_text("do something unmatched")
     assert response.severity == "warning"
     assert "Deterministic commands still work" in response.display_text
     assert outcome.result is None
@@ -959,13 +1047,32 @@ async def test_turn_off_my_wifi_does_not_use_local_planner(settings):
 
 
 @pytest.mark.asyncio
-async def test_set_my_device_volume_does_not_use_local_planner(settings):
+async def test_cpu_and_memory_question_uses_device_skill_without_local_planner(settings):
     container = build_container(settings)
     container.orchestrator.planner = BrokenPlanner()
 
     response, outcome = await container.orchestrator.handle_text(
-        "Set my device volume to 80"
+        "Whats my cpu and memory usage?"
     )
+
+    assert response.response_type == ResponseType.PERMISSION
+    assert "local planner" not in response.display_text
+    assert len(outcome.permission_requests) == 1
+    request = outcome.permission_requests[0]
+    assert request.call.skill_id == "windows.device_control"
+    assert request.call.arguments == {"operation": "performance_status"}
+    assert request.scope.capability == "device.read"
+    assert container.orchestrator._session_context[-1]["intent"] == (
+        "windows.device_control"
+    )
+
+
+@pytest.mark.asyncio
+async def test_set_my_device_volume_does_not_use_local_planner(settings):
+    container = build_container(settings)
+    container.orchestrator.planner = BrokenPlanner()
+
+    response, outcome = await container.orchestrator.handle_text("Set my device volume to 80")
 
     assert response.response_type == ResponseType.PERMISSION
     assert "local planner" not in response.display_text
@@ -1000,9 +1107,7 @@ async def test_invalid_planner_output_does_not_claim_ollama_is_stopped(settings)
     container = build_container(settings)
     container.orchestrator.planner = InvalidPlanner()
 
-    response, outcome = await container.orchestrator.handle_text(
-        "do something unmatched"
-    )
+    response, outcome = await container.orchestrator.handle_text("do something unmatched")
 
     assert "invalid planner response" in response.display_text
     assert "Start Ollama" not in response.display_text
@@ -1014,9 +1119,7 @@ async def test_invalid_planner_output_includes_debug_response(settings):
     container = build_container(settings)
     container.orchestrator.planner = InvalidPlannerWithResponse()
 
-    response, outcome = await container.orchestrator.handle_text(
-        "do something unmatched"
-    )
+    response, outcome = await container.orchestrator.handle_text("do something unmatched")
 
     assert "invalid planner response" in response.display_text
     assert "Debug invalid planner response" in response.display_text
@@ -1030,9 +1133,7 @@ async def test_planner_timeout_does_not_claim_ollama_is_stopped(settings):
     container = build_container(settings)
     container.orchestrator.planner = SlowPlanner()
 
-    response, outcome = await container.orchestrator.handle_text(
-        "do something unmatched"
-    )
+    response, outcome = await container.orchestrator.handle_text("do something unmatched")
 
     assert "did not respond before the planner timeout" in response.display_text
     assert "Start Ollama" not in response.display_text
@@ -1061,14 +1162,10 @@ async def test_explicit_memory_command_is_stored_and_listed(settings):
     )
 
     assert remembered.response_type == ResponseType.SKILL
-    assert remember_outcome.result.data["memories"][0]["key"] == (
-        "i_prefer_brave_for_browsing"
-    )
+    assert remember_outcome.result.data["memories"][0]["key"] == ("i_prefer_brave_for_browsing")
     assert listed.response_type == ResponseType.SKILL
     assert "1 enabled memories" in listed.display_text
-    assert list_outcome.result.data["memories"][0]["value"] == (
-        "I prefer Brave for browsing"
-    )
+    assert list_outcome.result.data["memories"][0]["value"] == ("I prefer Brave for browsing")
 
 
 @pytest.mark.asyncio
@@ -1107,9 +1204,7 @@ async def test_broad_goal_interpretation_can_ask_clarification(settings):
     planner = InterpretingClarifyingPlanner()
     container.orchestrator.planner = planner
 
-    response, outcome = await container.orchestrator.handle_text(
-        "Clean up my downloads."
-    )
+    response, outcome = await container.orchestrator.handle_text("Clean up my downloads.")
 
     assert response.response_type == ResponseType.CLARIFICATION
     assert response.display_text == (
@@ -1127,8 +1222,7 @@ async def test_broad_goal_interpretation_can_ask_clarification(settings):
         "permissions.confirmation_required",
     }.issubset(set(planner.calls[0][1].keys()))
     assert any(
-        item.namespace == "skill_example"
-        and item.metadata["skill_id"] == "windows.file_operation"
+        item.namespace == "skill_example" and item.metadata["skill_id"] == "windows.file_operation"
         for item in planner.calls[0][2]
     )
 
@@ -1139,9 +1233,7 @@ async def test_broad_goal_interpretation_plans_from_interpretation(settings):
     planner = InterpretingThenAnswerPlanner()
     container.orchestrator.planner = planner
 
-    response, outcome = await container.orchestrator.handle_text(
-        "Help me think through this."
-    )
+    response, outcome = await container.orchestrator.handle_text("Help me think through this.")
 
     assert response.response_type == ResponseType.ANSWER
     assert response.display_text == "Handled by the interpreted planner path."
@@ -1162,9 +1254,7 @@ async def test_broad_goal_interpretation_receives_semantic_retrieval(settings):
     container.orchestrator.skill_semantic_indexer = indexer
     container.orchestrator.memory_semantic_indexer = memory_indexer
 
-    response, outcome = await container.orchestrator.handle_text(
-        "Clean up my downloads."
-    )
+    response, outcome = await container.orchestrator.handle_text("Clean up my downloads.")
 
     assert response.response_type == ResponseType.CLARIFICATION
     assert outcome.result is None
@@ -1200,20 +1290,16 @@ async def test_broad_goal_interpretation_receives_memory_context_and_retrieval(s
         confidence=1,
     )
 
-    response, outcome = await container.orchestrator.handle_text(
-        "Use my usual browser."
-    )
+    response, outcome = await container.orchestrator.handle_text("Use my usual browser.")
 
     assert response.response_type == ResponseType.ANSWER
     assert outcome.result is None
     context = planner.interpret_calls[0][1]
     retrieved = planner.interpret_calls[0][2]
-    assert "memory.preferences" in context.keys()
+    assert "memory.preferences" in context.items_by_key()
     assert context.items_by_key()["memory.preferences"].value[0]["key"] == "browser"
     assert any(
-        item.namespace == "memory"
-        and item.metadata["key"] == "browser"
-        and "Brave" in item.text
+        item.namespace == "memory" and item.metadata["key"] == "browser" and "Brave" in item.text
         for item in retrieved
     )
 
@@ -1294,9 +1380,7 @@ async def test_broad_goal_replanning_stops_at_loop_limit(settings):
     )
     container.orchestrator.planner = planner
 
-    response, outcome = await container.orchestrator.handle_text(
-        "Help me keep calculating."
-    )
+    response, outcome = await container.orchestrator.handle_text("Help me keep calculating.")
 
     assert response.response_type == ResponseType.ERROR
     assert "replanning limit" in response.display_text
@@ -1325,9 +1409,7 @@ async def test_request_breakdown_includes_interpretation_without_retrieved_text(
 
     container.orchestrator.semantic_retriever = SensitiveRetriever()
 
-    response, outcome = await container.orchestrator.handle_text(
-        "Use my usual browser."
-    )
+    response, outcome = await container.orchestrator.handle_text("Use my usual browser.")
 
     assert response.response_type == ResponseType.ANSWER
     assert outcome.result is None
@@ -1385,9 +1467,7 @@ async def test_file_search_limit_follow_up_completes_original_desktop_search(set
 @pytest.mark.asyncio
 async def test_skill_preparation_error_is_returned_as_response(settings):
     container = build_container(settings)
-    response, outcome = await container.orchestrator.handle_text(
-        "open application not-registered"
-    )
+    response, outcome = await container.orchestrator.handle_text("open application not-registered")
     assert response.severity == "warning"
     assert response.response_type == ResponseType.CLARIFICATION
     assert "registered" in response.display_text
@@ -1404,9 +1484,7 @@ async def test_preparation_error_is_remembered_for_follow_up(settings):
 
     planner = CapturingPlanner()
     container.orchestrator.planner = planner
-    follow_up, _ = await container.orchestrator.handle_text(
-        "how do I register an application?"
-    )
+    follow_up, _ = await container.orchestrator.handle_text("how do I register an application?")
 
     assert "Applications tab" in follow_up.display_text
     assert not planner.calls
@@ -1502,9 +1580,7 @@ async def test_browser_website_launch_keeps_url_in_permission_call(settings, tmp
     target.write_bytes(b"")
     container.aliases.set("application", "brave", str(target))
 
-    response, outcome = await container.orchestrator.handle_text(
-        "open brave and go to vlr.gg"
-    )
+    response, outcome = await container.orchestrator.handle_text("open brave and go to vlr.gg")
 
     assert response.response_type == ResponseType.PERMISSION
     assert len(outcome.permission_requests) == 1
@@ -1522,9 +1598,7 @@ async def test_private_browser_launch_keeps_private_in_permission_call(settings,
     target.write_bytes(b"")
     container.aliases.set("application", "brave", str(target))
 
-    response, outcome = await container.orchestrator.handle_text(
-        "open private tab in brave"
-    )
+    response, outcome = await container.orchestrator.handle_text("open private tab in brave")
 
     assert response.response_type == ResponseType.PERMISSION
     assert len(outcome.permission_requests) == 1
@@ -1576,9 +1650,7 @@ async def test_default_browser_registration_handles_generic_private_tab(
 
 
 @pytest.mark.asyncio
-async def test_default_browser_registration_handles_generic_tab(
-    settings, tmp_path, monkeypatch
-):
+async def test_default_browser_registration_handles_generic_tab(settings, tmp_path, monkeypatch):
     target = tmp_path / "default-browser.exe"
     target.write_bytes(b"")
     monkeypatch.setattr(
@@ -1604,9 +1676,7 @@ async def test_browser_website_on_browser_phrase_keeps_url(settings, tmp_path):
     target.write_bytes(b"")
     container.aliases.set("application", "brave", str(target))
 
-    response, outcome = await container.orchestrator.handle_text(
-        "open twitch.tv on brave"
-    )
+    response, outcome = await container.orchestrator.handle_text("open twitch.tv on brave")
 
     assert response.response_type == ResponseType.PERMISSION
     assert len(outcome.permission_requests) == 1
@@ -1623,9 +1693,7 @@ async def test_browser_launch_strips_monitor_phrase_from_registration(settings, 
     target.write_bytes(b"")
     container.aliases.set("application", "brave", str(target))
 
-    response, outcome = await container.orchestrator.handle_text(
-        "open brave on my first monitor"
-    )
+    response, outcome = await container.orchestrator.handle_text("open brave on my first monitor")
 
     assert response.response_type == ResponseType.PERMISSION
     assert len(outcome.permission_requests) == 2
@@ -1648,9 +1716,7 @@ async def test_browser_launch_strips_monitor_phrase_from_registration(settings, 
 async def test_compound_launch_reports_registration_before_follow_up_permission(settings):
     container = build_container(settings)
 
-    response, outcome = await container.orchestrator.handle_text(
-        "open brave and search for vlr.gg"
-    )
+    response, outcome = await container.orchestrator.handle_text("open brave and search for vlr.gg")
 
     assert response.response_type == ResponseType.CLARIFICATION
     assert outcome.registration_requests

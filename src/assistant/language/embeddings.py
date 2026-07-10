@@ -7,12 +7,8 @@ import math
 import re
 import urllib.error
 import urllib.request
-from typing import Protocol
 
-
-class EmbeddingProvider(Protocol):
-    async def embed(self, texts: list[str]) -> list[list[float]]:
-        ...
+from assistant.providers import EmbeddingProvider
 
 
 class FallbackEmbeddingProvider:
@@ -51,9 +47,7 @@ class OllamaEmbeddingProvider:
     def _embed_sync(self, texts: list[str]) -> list[list[float]]:
         embeddings: list[list[float]] = []
         for text in texts:
-            payload = json.dumps(
-                {"model": self.model, "prompt": text}
-            ).encode("utf-8")
+            payload = json.dumps({"model": self.model, "prompt": text}).encode("utf-8")
             request = urllib.request.Request(
                 self.endpoint,
                 data=payload,
@@ -94,10 +88,22 @@ class LexicalFallbackEmbeddingProvider:
         "compute": ("calculator", "arithmetic", "math"),
         "launch": ("open", "application", "start"),
         "open": ("launch", "application", "start"),
+        "start": ("launch", "open", "application"),
+        "run": ("launch", "open", "application"),
+        "blank": ("new", "launch", "open"),
+        "fresh": ("new", "launch", "open"),
         "browser": ("web", "navigate"),
         "find": ("search", "locate"),
+        "locate": ("find", "search"),
         "move": ("relocate", "transfer"),
         "minimize": ("hide", "dismiss"),
+        "hide": ("minimize", "dismiss"),
+        "focus": ("bring", "foreground"),
+        "bring": ("focus", "foreground"),
+        "maximize": ("enlarge", "window"),
+        "enlarge": ("maximize", "window"),
+        "quit": ("close", "application"),
+        "exit": ("close", "application"),
         "summarize": ("summary", "condense"),
     }
 

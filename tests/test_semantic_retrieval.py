@@ -1,6 +1,9 @@
 import pytest
 
 from assistant.language.embeddings import (
+    EmbeddingProvider as LanguageEmbeddingProvider,
+)
+from assistant.language.embeddings import (
     FallbackEmbeddingProvider,
     LexicalFallbackEmbeddingProvider,
 )
@@ -11,6 +14,7 @@ from assistant.language.retrieval import (
     SkillSemanticIndexer,
     WorkflowTemplateSemanticIndexer,
 )
+from assistant.providers import EmbeddingProvider
 from assistant.skills.builtin import CalculatorSkill
 from assistant.skills.examples import SkillExample
 from assistant.skills.registry import SkillRegistry
@@ -19,6 +23,10 @@ from assistant.storage.database import Database, VectorItemRow
 from assistant.storage.knowledge import KnowledgeBaseStore
 from assistant.storage.memory import MemoryStore
 from assistant.storage.vector_index import VectorIndex
+
+
+def test_language_embedding_protocol_reexports_canonical_provider_contract():
+    assert LanguageEmbeddingProvider is EmbeddingProvider
 
 
 class FakeEmbeddingProvider:
@@ -104,9 +112,7 @@ def test_vector_index_upserts_and_searches_by_cosine(tmp_path):
         embedding_model="test",
     )
 
-    assert index.search([1.0, 0.0], namespaces={"skill"}, limit=1)[0].metadata == {
-        "updated": True
-    }
+    assert index.search([1.0, 0.0], namespaces={"skill"}, limit=1)[0].metadata == {"updated": True}
 
 
 @pytest.mark.asyncio
@@ -197,10 +203,7 @@ async def test_skill_semantic_indexer_indexes_enabled_skills_and_examples(tmp_pa
 
     assert results[0].namespace == "skill_example"
     assert results[0].metadata["skill_id"] == "windows.application_window"
-    assert {
-        (item.namespace, item.metadata["skill_id"])
-        for item in results
-    } == {
+    assert {(item.namespace, item.metadata["skill_id"]) for item in results} == {
         ("skill", "windows.application_window"),
         ("skill_example", "windows.application_window"),
     }
