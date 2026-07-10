@@ -9,7 +9,6 @@ import time
 import urllib.error
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -53,6 +52,14 @@ from assistant.language.retrieval import (
     SkillSemanticIndexer,
     WorkflowTemplateSemanticIndexer,
 )
+from assistant.orchestration import (
+    ConversationState,
+    FileReferenceResolver,
+    InteractionRecorder,
+    PendingClarificationFollowUp,
+    PlannerCoordinator,
+    evaluate_voice_gate,
+)
 from assistant.policy.permissions import GrantType
 from assistant.providers import STTProvider, TTSProvider
 from assistant.response import response_from_result
@@ -68,15 +75,6 @@ from assistant.windows.paths import (
 )
 
 logger = logging.getLogger("assistant.orchestrator")
-
-
-@dataclass(frozen=True)
-class PendingClarificationFollowUp:
-    original_text: str
-    clarification: str
-    folder_name: str | None
-    session_id: str
-    kind: str = "generic"
 
 
 class AssistantOrchestrator:
@@ -127,15 +125,44 @@ class AssistantOrchestrator:
         self.context_providers = context_providers
         self._active_correlation: UUID | None = None
         self._active_stt: STTProvider | None = None
-        self._session_context: deque[dict[str, str]] = deque(maxlen=6)
-        self._file_candidates: tuple[str, ...] = ()
-        self._selected_file: str | None = None
-        self._pending_clarification_follow_up: PendingClarificationFollowUp | None = None
+        self.state = ConversationState()
+        self.interactions = InteractionRecorder(history, self.state)
+        self.file_resolver = FileReferenceResolver(self._resolve_file_placeholders)
+        self.planner_flow = PlannerCoordinator()
+
+    @property
+    def _session_context(self) -> deque[dict[str, str]]:
+        return self.state.session_context
+
+    @property
+    def _file_candidates(self) -> tuple[str, ...]:
+        return self.state.file_candidates
+
+    @_file_candidates.setter
+    def _file_candidates(self, value: tuple[str, ...]) -> None:
+        self.state.file_candidates = value
+
+    @property
+    def _selected_file(self) -> str | None:
+        return self.state.selected_file
+
+    @_selected_file.setter
+    def _selected_file(self, value: str | None) -> None:
+        self.state.selected_file = value
+
+    @property
+    def _pending_clarification_follow_up(self) -> PendingClarificationFollowUp | None:
+        return self.state.pending_clarification
+
+    @_pending_clarification_follow_up.setter
+    def _pending_clarification_follow_up(
+        self,
+        value: PendingClarificationFollowUp | None,
+    ) -> None:
+        self.state.pending_clarification = value
 
     def remember_file_candidates(self, paths: tuple[str, ...] | list[str]) -> None:
-        self._file_candidates = tuple(str(path) for path in paths)
-        if len(self._file_candidates) == 1:
-            self._selected_file = self._file_candidates[0]
+        self.state.remember_file_candidates(paths)
 
     def _remember_interaction(
         self,
@@ -147,24 +174,13 @@ class AssistantOrchestrator:
         outcome: str,
         add_session_context: bool = True,
     ) -> None:
-        self.history.add(
+        self.interactions.record(
             correlation_id,
-            response.display_text,
-            raw_transcript=request_text,
-            normalized_transcript=request_text.casefold(),
+            request_text,
+            response,
             intent_name=intent_name,
-        )
-        if not add_session_context:
-            return
-        self._session_context.append(
-            {
-                "request": request_text,
-                "intent": intent_name,
-                "outcome": outcome,
-                "response_type": response.response_type.value,
-                "severity": response.severity,
-                "response": response.display_text[:1000],
-            }
+            outcome=outcome,
+            add_session_context=add_session_context,
         )
 
     async def _finish_interaction(
@@ -1427,7 +1443,17 @@ class AssistantOrchestrator:
                 invoked_by_voice=invoked_by_voice,
             )
         if route.needs_llm:
-            if self.planner is None:
+            planner_resolution = await self.planner_flow.resolve(
+                self.planner,
+                text,
+                intent,
+                tuple(self._session_context),
+                interpret_goal=lambda: self._interpret_planner_goal(
+                    text,
+                    session_id=session_id,
+                ),
+            )
+            if planner_resolution.unavailable:
                 response = self._planner_unavailable_response()
                 response = self._with_reasoning_steps(
                     response,
@@ -1443,35 +1469,8 @@ class AssistantOrchestrator:
                     outcome_label="failed",
                     invoked_by_voice=invoked_by_voice,
                 )
-            try:
-                if (
-                    intent is not None
-                    and intent.name == "planner.goal"
-                    and hasattr(self.planner, "interpret")
-                ):
-                    decision = await self._interpret_planner_goal(
-                        text,
-                        session_id=session_id,
-                    )
-                    if decision is not None:
-                        return await self._handle_planner_decision(
-                            correlation_id,
-                            text,
-                            decision,
-                            session_id=session_id,
-                            invoked_by_voice=invoked_by_voice,
-                        )
-                if hasattr(self.planner, "plan_decision"):
-                    decision = await self.planner.plan_decision(text, tuple(self._session_context))
-                    return await self._handle_planner_decision(
-                        correlation_id,
-                        text,
-                        decision,
-                        session_id=session_id,
-                        invoked_by_voice=invoked_by_voice,
-                    )
-                intent = await self.planner.plan(text, tuple(self._session_context))
-            except Exception as exc:
+            if planner_resolution.error is not None:
+                exc = planner_resolution.error
                 logger.warning("Local planner failed", exc_info=exc)
                 response = self._planner_failed_response(exc)
                 response = self._with_reasoning_steps(
@@ -1488,6 +1487,15 @@ class AssistantOrchestrator:
                     outcome_label="failed",
                     invoked_by_voice=invoked_by_voice,
                 )
+            if planner_resolution.decision is not None:
+                return await self._handle_planner_decision(
+                    correlation_id,
+                    text,
+                    planner_resolution.decision,
+                    session_id=session_id,
+                    invoked_by_voice=invoked_by_voice,
+                )
+            intent = planner_resolution.intent
         assert intent is not None
         if route.intents:
             return await self._handle_intent_plan(
@@ -1609,14 +1617,14 @@ class AssistantOrchestrator:
                 outcome_label="selected",
                 invoked_by_voice=invoked_by_voice,
             )
-        resolved_intent = self._resolve_file_placeholders(
+        file_resolution = self.file_resolver.resolve(
             intent,
             session_id=session_id,
             request_text=text,
         )
-        if isinstance(resolved_intent, Response):
+        if file_resolution.clarification is not None:
             response = self._with_reasoning_steps(
-                resolved_intent,
+                file_resolution.clarification,
                 request_text=text,
                 intent=intent,
                 outcome_label="needs_clarification",
@@ -1629,7 +1637,8 @@ class AssistantOrchestrator:
                 outcome_label="needs_clarification",
                 invoked_by_voice=invoked_by_voice,
             )
-        intent = resolved_intent
+        assert file_resolution.intent is not None
+        intent = file_resolution.intent
         call = SkillCall(
             skill_id=intent.name,
             arguments=intent.arguments,
@@ -2228,50 +2237,15 @@ class AssistantOrchestrator:
             return await self._finish(response, ExecutionOutcome(), invoked_by_voice=True)
         route = self.router.route(transcript.normalized_text)
         intent = route.intent
-        low_word = any(
-            word.confidence is not None and word.confidence < 0.65 for word in transcript.words
-        )
-        low_words = tuple(
-            word
-            for word in transcript.words
-            if word.confidence is not None and word.confidence < 0.65
-        )
-        sensitive_keys = {
-            "path",
-            "source",
-            "destination",
-            "recipient",
-            "amount",
-            "device_id",
-            "pid",
-            "process_name",
-            "entity_id",
-        }
-        uncertain = (transcript.confidence is not None and transcript.confidence < 0.75) or low_word
-        sensitive = bool(
-            intent
-            and (
-                sensitive_keys.intersection(intent.arguments)
-                or intent.name
-                in {
-                    "windows.file_operation",
-                    "windows.process",
-                    "windows.input_automation",
-                    "integration.device_control",
-                    "integration.home_assistant",
-                }
-            )
-        )
-        if uncertain and sensitive:
+        voice_gate = evaluate_voice_gate(transcript, intent)
+        if voice_gate.should_clarify:
             self._print_voice_gate_debug(
                 transcript,
                 intent,
-                uncertain=uncertain,
-                sensitive=sensitive,
-                low_words=low_words,
-                sensitive_argument_keys=tuple(
-                    sorted(sensitive_keys.intersection(intent.arguments)) if intent else ()
-                ),
+                uncertain=voice_gate.uncertain,
+                sensitive=voice_gate.sensitive,
+                low_words=voice_gate.low_confidence_words,
+                sensitive_argument_keys=voice_gate.sensitive_argument_keys,
             )
             response = Response(
                 display_text=(
