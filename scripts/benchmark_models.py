@@ -8,12 +8,10 @@ import time
 import urllib.request
 import wave
 from pathlib import Path
-from uuid import uuid4
 
 from assistant.contracts import AudioSession, Response
 from assistant.stt.faster_whisper import FasterWhisperProvider
 from assistant.tts.piper import PiperProvider
-
 
 TOOL_SCHEMA = {
     "type": "object",
@@ -84,8 +82,7 @@ def benchmark_llm(model: str) -> dict:
         arguments = output.get("arguments", {})
         matched = output.get("skill_id") == expected_skill and all(
             (
-                str(arguments.get(key, "")).replace(" ", "")
-                == str(value).replace(" ", "")
+                str(arguments.get(key, "")).replace(" ", "") == str(value).replace(" ", "")
                 if key == "expression"
                 else arguments.get(key) == value
             )
@@ -110,9 +107,7 @@ def benchmark_llm(model: str) -> dict:
     return {
         "model": model,
         "tool_call_accuracy": correct / len(samples),
-        "median_latency_seconds": statistics.median(
-            item["seconds"] for item in samples
-        ),
+        "median_latency_seconds": statistics.median(item["seconds"] for item in samples),
         "samples": samples,
     }
 
@@ -134,8 +129,7 @@ def word_error_rate(reference: str, hypothesis: str) -> float:
                 min(
                     next_distances[-1] + 1,
                     distances[offset] + 1,
-                    distances[offset - 1]
-                    + (reference_word != hypothesis_word),
+                    distances[offset - 1] + (reference_word != hypothesis_word),
                 )
             )
         distances = next_distances
@@ -156,34 +150,21 @@ async def benchmark_stt(model: str, corpus: Path) -> dict:
             )
             duration = audio.getnframes() / audio.getframerate()
         started = time.perf_counter()
-        transcripts = [
-            item
-            async for item in provider.transcribe(
-                session, bytes_from_file(path)
-            )
-        ]
+        transcripts = [item async for item in provider.transcribe(session, bytes_from_file(path))]
         elapsed = time.perf_counter() - started
         hypothesis = transcripts[-1].raw_text if transcripts else ""
         samples.append(
             {
                 "audio": case["audio"],
                 "real_time_factor": elapsed / duration,
-                "word_error_rate": word_error_rate(
-                    case["reference"], hypothesis
-                ),
-                "confidence": (
-                    transcripts[-1].confidence if transcripts else None
-                ),
+                "word_error_rate": word_error_rate(case["reference"], hypothesis),
+                "confidence": (transcripts[-1].confidence if transcripts else None),
             }
         )
     return {
         "model": model,
-        "mean_real_time_factor": statistics.mean(
-            item["real_time_factor"] for item in samples
-        ),
-        "mean_word_error_rate": statistics.mean(
-            item["word_error_rate"] for item in samples
-        ),
+        "mean_real_time_factor": statistics.mean(item["real_time_factor"] for item in samples),
+        "mean_word_error_rate": statistics.mean(item["word_error_rate"] for item in samples),
         "samples": samples,
     }
 
@@ -213,17 +194,11 @@ async def main() -> int:
     args = parser.parse_args()
     report = {"generated_at": time.time(), "results": {}}
     if args.llm_model:
-        report["results"]["llm"] = await asyncio.to_thread(
-            benchmark_llm, args.llm_model
-        )
+        report["results"]["llm"] = await asyncio.to_thread(benchmark_llm, args.llm_model)
     if args.stt_model and args.audio_corpus:
-        report["results"]["stt"] = await benchmark_stt(
-            args.stt_model, args.audio_corpus
-        )
+        report["results"]["stt"] = await benchmark_stt(args.stt_model, args.audio_corpus)
     if args.piper_executable and args.piper_model:
-        report["results"]["tts"] = await benchmark_tts(
-            args.piper_executable, args.piper_model
-        )
+        report["results"]["tts"] = await benchmark_tts(args.piper_executable, args.piper_model)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(args.output)

@@ -47,4 +47,3 @@ if __name__ == "__main__":
     destination.parent.mkdir(exist_ok=True)
     destination.write_text(json.dumps(output, indent=2), encoding="utf-8")
     print(destination)
-

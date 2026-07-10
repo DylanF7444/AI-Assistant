@@ -266,6 +266,33 @@ async def test_missing_permission_publishes_approval_event(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_single_call_and_one_step_plan_share_permission_evaluation(tmp_path):
+    (tmp_path / "single").mkdir()
+    single_skill = CountingSkill(risk=RiskLevel.LOW)
+    single_engine, _, _ = engine_for(tmp_path / "single", single_skill)
+    single_call = make_call("test.count", {"target": "item"}, key="single")
+
+    (tmp_path / "plan").mkdir()
+    plan_skill = CountingSkill(risk=RiskLevel.LOW)
+    plan_engine, _, _ = engine_for(tmp_path / "plan", plan_skill)
+    plan_call = make_call("test.count", {"target": "item"}, key="plan")
+    plan = ExecutionPlan(steps=(PlanStep(step_id="only", call=plan_call),))
+
+    single_outcome = await single_engine.prepare(single_call)
+    plan_outcome = await plan_engine.prepare_plan(plan)
+
+    assert single_outcome.result.error.code == plan_outcome.result.error.code
+    assert single_outcome.result.error.code == "permission_denied"
+    assert tuple(request.scope for request in single_outcome.permission_requests) == tuple(
+        request.scope for request in plan_outcome.permission_requests
+    )
+    assert (
+        single_engine.events.history(single_call.correlation_id)[-1].data["permissions"]
+        == plan_engine.events.history(plan_call.correlation_id)[-1].data["permissions"]
+    )
+
+
+@pytest.mark.asyncio
 async def test_one_time_permission_survives_prepare_until_execution(tmp_path):
     skill = CountingSkill(risk=RiskLevel.LOW)
     engine, permissions, _ = engine_for(tmp_path, skill)
