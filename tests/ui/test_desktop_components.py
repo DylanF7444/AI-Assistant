@@ -8,6 +8,7 @@ pytest.importorskip("PySide6")
 pytest.importorskip("pytestqt")
 
 from assistant.bootstrap import build_container
+from assistant.ui.desktop.app import run_desktop
 from assistant.ui.desktop.controller import DesktopController
 from assistant.ui.desktop.tabs import TAB_GROUPS, TAB_LABELS
 from assistant.ui.desktop.workers import AsyncWorker
@@ -28,6 +29,22 @@ def test_async_worker_reports_completion(qtbot):
 
     assert signal.args == ["done"]
     assert worker.wait(2000)
+
+
+@pytest.mark.ui
+def test_desktop_defers_first_run_dialog_until_event_loop(settings, monkeypatch):
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    messages: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "information",
+        lambda *args: messages.append(str(args[1])),
+    )
+    monkeypatch.setattr(QApplication, "exec", lambda self: 0)
+
+    assert run_desktop(build_container(settings)) == 0
+    assert messages == []
 
 
 @pytest.mark.ui

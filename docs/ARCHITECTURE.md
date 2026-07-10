@@ -24,11 +24,11 @@ The UI depends on the orchestrator and event bus, not model or OS
 implementations. STT, LLM, TTS, wake-word, embedding, Windows, storage, clock,
 and device implementations are injected behind typed interfaces.
 
-Planned work to make routing and planning more context-aware is tracked in
-`docs/SMART_ASSISTANT_IMPLEMENTATION_PLAN.md`. That plan covers semantic
-retrieval, context snapshots, richer intent interpretation, preference memory,
-and adaptive replanning while preserving the permission-gated execution model
-described above.
+The implemented context-aware routing and planning roadmap is documented in
+`docs/SMART_ASSISTANT_IMPLEMENTATION_PLAN.md`. It records the design history
+for semantic retrieval, context snapshots, intent interpretation, preference
+memory, and adaptive replanning while preserving the permission-gated
+execution model described above.
 
 ## Compatibility
 
@@ -36,3 +36,23 @@ Core contracts and skill manifests use API version `1.0`. Minor core releases
 must preserve existing fields and meanings. A breaking contract change requires
 a new major API version and side-by-side loader support or a documented
 migration. Stable skill IDs are never inferred from display names.
+
+## Module boundaries
+
+- `assistant.router.handlers` owns ordered deterministic command families;
+  `DeterministicRouter` remains the precedence coordinator and public facade.
+- `assistant.orchestration` owns conversation state, file resolution, planner
+  coordination, interaction recording, and voice confidence gating.
+- `assistant.execution.evaluation` provides the shared typed evaluation used
+  by actions, plans, and final execution reauthorization.
+- `assistant.windows.interfaces` contains platform protocols. Capability
+  modules contain implementations, while the former adapter and skill modules
+  preserve legacy imports.
+- `assistant.ui.main` lazily loads the optional desktop package, whose workers,
+  controller, tab metadata, and application startup are independently testable.
+- `assistant.bootstrap` is the composition root and uses named builders for
+  storage, retrieval, registry, context, and audio services.
+
+The dependency direction remains contracts/interfaces -> policy and domain
+services -> orchestration -> UI/composition. Model output never calls platform
+adapters directly.

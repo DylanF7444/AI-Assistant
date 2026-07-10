@@ -264,7 +264,7 @@ def run_desktop(container: Container) -> int:
             if container.wakeword:
                 self._start_wakeword()
             self._start_passive_voice()
-            self._first_run()
+            QTimer.singleShot(0, self._first_run)
 
         def _active_scripts_tab(self) -> QWidget:
             page = QWidget()
@@ -2721,7 +2721,7 @@ def run_desktop(container: Container) -> int:
                 asyncio.run(container.wakeword.cancel())
             event.accept()
 
-    app = QApplication(sys.argv)
+    app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("Local Assistant")
     app.setStyle("Fusion")
     app.setStyleSheet(

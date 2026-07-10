@@ -2,11 +2,22 @@
 
 Updated July 7, 2026.
 
-This document describes the planned architecture and execution phases for
-making Local Assistant feel more context-aware, adaptive, and intent-driven.
-It should be used as the reference plan when implementing semantic retrieval,
-context snapshots, richer intent interpretation, preference memory, and
-adaptive replanning.
+## Implementation status
+
+The core roadmap below is implemented. Broad-goal routing, structured intent
+interpretation, budgeted context, semantic retrieval with lexical fallback,
+skill examples, two-pass planning, bounded replanning, explicit preference
+memory, and orchestrator integration are present and covered by regression
+tests.
+
+The phase descriptions remain as design history and acceptance rationale. The
+remaining backlog is limited to the open design questions, external hardware
+and model benchmarking, and integrations explicitly listed as non-goals.
+
+This document records the architecture and execution phases used to make Local
+Assistant more context-aware, adaptive, and intent-driven. It remains the
+reference rationale for semantic retrieval, context snapshots, richer intent
+interpretation, preference memory, and adaptive replanning.
 
 ## Goal
 

@@ -12,6 +12,18 @@ python -m pytest
 python -m assistant.app
 ```
 
+Development and release checks:
+
+```powershell
+python -m pip install -e ".[test,dev,ui-test]"
+python -m ruff format --check .
+python -m ruff check .
+python -m pytest
+python -m pytest learning_tests -q
+python -m pytest -m ui tests/ui -q
+powershell -ExecutionPolicy Bypass -File scripts/build.ps1
+```
+
 The core and test suite do not need network access. Desktop, audio, STT, local
 LLM, and TTS providers are optional and loaded only when configured.
 
