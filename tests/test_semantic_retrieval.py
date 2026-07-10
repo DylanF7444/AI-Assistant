@@ -1,6 +1,9 @@
 import pytest
 
 from assistant.language.embeddings import (
+    EmbeddingProvider as LanguageEmbeddingProvider,
+)
+from assistant.language.embeddings import (
     FallbackEmbeddingProvider,
     LexicalFallbackEmbeddingProvider,
 )
@@ -11,6 +14,7 @@ from assistant.language.retrieval import (
     SkillSemanticIndexer,
     WorkflowTemplateSemanticIndexer,
 )
+from assistant.providers import EmbeddingProvider
 from assistant.skills.builtin import CalculatorSkill
 from assistant.skills.examples import SkillExample
 from assistant.skills.registry import SkillRegistry
@@ -19,6 +23,10 @@ from assistant.storage.database import Database, VectorItemRow
 from assistant.storage.knowledge import KnowledgeBaseStore
 from assistant.storage.memory import MemoryStore
 from assistant.storage.vector_index import VectorIndex
+
+
+def test_language_embedding_protocol_reexports_canonical_provider_contract():
+    assert LanguageEmbeddingProvider is EmbeddingProvider
 
 
 class FakeEmbeddingProvider:

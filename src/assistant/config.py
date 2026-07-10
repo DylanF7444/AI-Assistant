@@ -85,6 +85,9 @@ class Settings(BaseModel):
         return self
 
     @property
+    def database_path(self) -> Path:
+        return self.data_dir / self.database_name
+
+    @property
     def database_url(self) -> str:
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        return f"sqlite:///{(self.data_dir / self.database_name).as_posix()}"
+        return f"sqlite:///{self.database_path.as_posix()}"

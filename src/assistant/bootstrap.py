@@ -218,126 +218,128 @@ def _register_network_skills(
     )
 
 
-def build_container(settings: Settings | None = None) -> Container:
-    settings = settings or Settings()
-    database = Database(settings.database_url)
-    database.migrate()
-    settings = _settings_with_persisted_values(settings, database)
-    configure_logging(
-        settings.data_dir,
-        developer_mode=settings.profile == "development",
-    )
+@dataclass
+class _StorageServices:
+    audit: AuditStore
+    metrics: MetricsStore
+    file_access_policy: FileAccessPolicyStore
+    permissions: PermissionManager
+    aliases: AliasStore
+    knowledge_bases: KnowledgeBaseStore
+    memory_store: MemoryStore
+    vector_index: VectorIndex
+    secret_vault: SecretVault
+
+
+@dataclass
+class _RetrievalServices:
+    semantic_retriever: SemanticRetriever
+    skill_indexer: SkillSemanticIndexer
+    knowledge_indexer: KnowledgeSemanticIndexer
+    memory_indexer: MemorySemanticIndexer
+    workflow_indexer: WorkflowTemplateSemanticIndexer
+
+
+@dataclass
+class _AudioServices:
+    capture: AudioCapture
+    stt: FasterWhisperProvider
+    wakeword: OpenWakeWordProvider | None
+    model_manager: ModelManager
+    tts: PiperProvider | None
+
+
+def _build_storage_services(settings: Settings, database: Database) -> _StorageServices:
     audit = AuditStore(database)
     metrics = MetricsStore(database)
     file_access_policy = FileAccessPolicyStore(SettingsStore(database))
-    permissions = PermissionManager(database, audit, file_access_policy)
-    aliases = AliasStore(database)
-    knowledge_bases = KnowledgeBaseStore(database)
-    memory_store = MemoryStore(database)
-    vector_index = VectorIndex(database)
-    lexical_embedding_provider = LexicalFallbackEmbeddingProvider()
+    return _StorageServices(
+        audit=audit,
+        metrics=metrics,
+        file_access_policy=file_access_policy,
+        permissions=PermissionManager(database, audit, file_access_policy),
+        aliases=AliasStore(database),
+        knowledge_bases=KnowledgeBaseStore(database),
+        memory_store=MemoryStore(database),
+        vector_index=VectorIndex(database),
+        secret_vault=SecretVault(settings.data_dir / "secrets"),
+    )
+
+
+def _build_retrieval_services(
+    settings: Settings,
+    storage: _StorageServices,
+) -> _RetrievalServices:
+    lexical = LexicalFallbackEmbeddingProvider()
     embedding_provider = (
         FallbackEmbeddingProvider(
             OllamaEmbeddingProvider(
                 settings.embedding_model,
                 timeout_seconds=settings.embedding_timeout_seconds,
             ),
-            lexical_embedding_provider,
+            lexical,
         )
         if settings.embedding_provider == "ollama"
-        else lexical_embedding_provider
+        else lexical
     )
-    semantic_retriever = SemanticRetriever(vector_index, embedding_provider)
-    skill_semantic_indexer = SkillSemanticIndexer(vector_index, embedding_provider)
-    knowledge_semantic_indexer = KnowledgeSemanticIndexer(
-        vector_index,
-        embedding_provider,
+    return _RetrievalServices(
+        semantic_retriever=SemanticRetriever(storage.vector_index, embedding_provider),
+        skill_indexer=SkillSemanticIndexer(storage.vector_index, embedding_provider),
+        knowledge_indexer=KnowledgeSemanticIndexer(storage.vector_index, embedding_provider),
+        memory_indexer=MemorySemanticIndexer(storage.vector_index, embedding_provider),
+        workflow_indexer=WorkflowTemplateSemanticIndexer(
+            storage.vector_index,
+            embedding_provider,
+        ),
     )
-    memory_semantic_indexer = MemorySemanticIndexer(vector_index, embedding_provider)
-    workflow_template_indexer = WorkflowTemplateSemanticIndexer(
-        vector_index,
-        embedding_provider,
-    )
-    secret_vault = SecretVault(settings.data_dir / "secrets")
+
+
+def _build_registry(
+    settings: Settings,
+    database: Database,
+    storage: _StorageServices,
+) -> tuple[SkillRegistry, MacroStore]:
     registry = SkillRegistry(
         settings.data_dir / "skills",
         trusted_signing_keys=_decode_trusted_keys(settings.trusted_skill_keys),
     )
-    _register_core_skills(registry, file_access_policy)
-    _register_windows_skills(registry, aliases)
-    _register_productivity_skills(registry, database, memory_store)
-    _register_network_skills(registry, settings, secret_vault)
-    desktop_adapter = WindowsApplicationAdapter()
-    process_adapter = WindowsProcessAdapter()
-    device_adapter = LocalWindowsDeviceAdapter()
-    file_adapter = LocalFileSystemAdapter()
-    context_providers = (
+    _register_core_skills(registry, storage.file_access_policy)
+    _register_windows_skills(registry, storage.aliases)
+    _register_productivity_skills(registry, database, storage.memory_store)
+    _register_network_skills(registry, settings, storage.secret_vault)
+    macro_store = MacroStore(database)
+    registry.register(MacroSkill(macro_store, registry, storage.permissions, storage.audit))
+    registry.register(HelpSkill(registry.list))
+    return registry, macro_store
+
+
+def _build_context_providers(
+    settings: Settings,
+    storage: _StorageServices,
+):
+    return (
         DesktopContextProvider(
-            desktop_adapter,
+            WindowsApplicationAdapter(),
             include_open_applications=settings.context_include_open_applications,
         ),
         ProcessContextProvider(
-            process_adapter,
+            WindowsProcessAdapter(),
             include_open_applications=settings.context_include_open_applications,
         ),
         DeviceContextProvider(
-            device_adapter,
+            LocalWindowsDeviceAdapter(),
             include_connected_devices=settings.context_include_connected_devices,
         ),
         FileContextProvider(
-            file_adapter,
-            file_policy_store=file_access_policy,
+            LocalFileSystemAdapter(),
+            file_policy_store=storage.file_access_policy,
             allow_file_contents=settings.context_allow_file_contents,
         ),
     )
-    macro_store = MacroStore(database)
-    registry.register(MacroSkill(macro_store, registry, permissions, audit))
-    registry.register(HelpSkill(registry.list))
-    events = EventBus()
-    confirmations = ConfirmationManager()
-    engine = ExecutionEngine(
-        registry,
-        permissions,
-        confirmations,
-        audit,
-        events,
-        metrics,
-        confirmation_overrides=settings.confirmation_overrides,
-    )
-    history = HistoryStore(database, settings.retain_transcripts_days)
-    llm = OllamaProvider(settings.llm_model) if settings.llm_provider == "ollama" else None
-    planner = (
-        LocalPlanner(
-            llm,
-            SkillRetriever(registry.list),
-            knowledge_bases,
-            timeout_seconds=settings.planner_timeout_seconds,
-        )
-        if llm
-        else None
-    )
-    orchestrator = AssistantOrchestrator(
-        DeterministicRouter(application_names=lambda: aliases.all("application")),
-        engine,
-        events,
-        history,
-        planner=planner,
-        metrics=metrics,
-        response_detail=settings.response_detail,
-        show_reasoning_steps=settings.show_reasoning_steps,
-        terminal_debug=settings.terminal_debug,
-        allow_sensitive_speech=settings.allow_sensitive_speech,
-        hide_sensitive_display=settings.hide_sensitive_display,
-        semantic_retriever=semantic_retriever,
-        skill_semantic_indexer=skill_semantic_indexer,
-        knowledge_bases=knowledge_bases,
-        knowledge_semantic_indexer=knowledge_semantic_indexer,
-        memory_store=memory_store,
-        memory_semantic_indexer=memory_semantic_indexer,
-        workflow_template_indexer=workflow_template_indexer,
-        context_providers=context_providers,
-    )
-    audio_capture = AudioCapture(
+
+
+def _build_audio_services(settings: Settings) -> _AudioServices:
+    capture = AudioCapture(
         device=settings.audio_input_device,
         silence_seconds=settings.silence_timeout_seconds,
         max_seconds=settings.max_utterance_seconds,
@@ -374,34 +376,101 @@ def build_container(settings: Settings | None = None) -> Container:
             speed=settings.tts_speed,
             volume=settings.tts_volume,
             cache_dir=settings.data_dir / "tts-cache",
-            playback_state=audio_capture.set_playback_active,
+            playback_state=capture.set_playback_active,
         )
-    orchestrator.tts = tts
+    return _AudioServices(capture, stt, wakeword, model_manager, tts)
+
+
+def build_container(settings: Settings | None = None) -> Container:
+    settings = settings or Settings()
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    database = Database(settings.database_url)
+    database.migrate()
+    settings = _settings_with_persisted_values(settings, database)
+    configure_logging(
+        settings.data_dir,
+        developer_mode=settings.profile == "development",
+    )
+
+    storage = _build_storage_services(settings, database)
+    retrieval = _build_retrieval_services(settings, storage)
+    registry, macro_store = _build_registry(settings, database, storage)
+    context_providers = _build_context_providers(settings, storage)
+    events = EventBus()
+    confirmations = ConfirmationManager()
+    engine = ExecutionEngine(
+        registry,
+        storage.permissions,
+        confirmations,
+        storage.audit,
+        events,
+        storage.metrics,
+        confirmation_overrides=settings.confirmation_overrides,
+    )
+    llm = OllamaProvider(settings.llm_model) if settings.llm_provider == "ollama" else None
+    planner = (
+        LocalPlanner(
+            llm,
+            SkillRetriever(registry.list),
+            storage.knowledge_bases,
+            timeout_seconds=settings.planner_timeout_seconds,
+        )
+        if llm
+        else None
+    )
+    orchestrator = AssistantOrchestrator(
+        DeterministicRouter(application_names=lambda: storage.aliases.all("application")),
+        engine,
+        events,
+        HistoryStore(database, settings.retain_transcripts_days),
+        planner=planner,
+        metrics=storage.metrics,
+        response_detail=settings.response_detail,
+        show_reasoning_steps=settings.show_reasoning_steps,
+        terminal_debug=settings.terminal_debug,
+        allow_sensitive_speech=settings.allow_sensitive_speech,
+        hide_sensitive_display=settings.hide_sensitive_display,
+        semantic_retriever=retrieval.semantic_retriever,
+        skill_semantic_indexer=retrieval.skill_indexer,
+        knowledge_bases=storage.knowledge_bases,
+        knowledge_semantic_indexer=retrieval.knowledge_indexer,
+        memory_store=storage.memory_store,
+        memory_semantic_indexer=retrieval.memory_indexer,
+        workflow_template_indexer=retrieval.workflow_indexer,
+        context_providers=context_providers,
+    )
+    audio = _build_audio_services(settings)
+    orchestrator.tts = audio.tts
     orchestrator.speech_mode = settings.speech_mode
-    registry.register(DiagnosticSkill(registry, {"stt": stt, "llm": llm, "tts": tts}))
+    registry.register(
+        DiagnosticSkill(
+            registry,
+            {"stt": audio.stt, "llm": llm, "tts": audio.tts},
+        )
+    )
     return Container(
         settings=settings,
         database=database,
-        audit=audit,
-        permissions=permissions,
+        audit=storage.audit,
+        permissions=storage.permissions,
         confirmations=confirmations,
         registry=registry,
         events=events,
         engine=engine,
         orchestrator=orchestrator,
-        audio_capture=audio_capture,
-        stt=stt,
+        audio_capture=audio.capture,
+        stt=audio.stt,
         macro_store=macro_store,
-        wakeword=wakeword,
-        model_manager=model_manager,
-        metrics=metrics,
-        aliases=aliases,
-        knowledge_bases=knowledge_bases,
-        file_access_policy=file_access_policy,
-        vector_index=vector_index,
-        semantic_retriever=semantic_retriever,
-        knowledge_semantic_indexer=knowledge_semantic_indexer,
-        memory_semantic_indexer=memory_semantic_indexer,
-        workflow_template_indexer=workflow_template_indexer,
-        memory_store=memory_store,
+        wakeword=audio.wakeword,
+        model_manager=audio.model_manager,
+        metrics=storage.metrics,
+        aliases=storage.aliases,
+        knowledge_bases=storage.knowledge_bases,
+        file_access_policy=storage.file_access_policy,
+        vector_index=storage.vector_index,
+        semantic_retriever=retrieval.semantic_retriever,
+        knowledge_semantic_indexer=retrieval.knowledge_indexer,
+        memory_semantic_indexer=retrieval.memory_indexer,
+        workflow_template_indexer=retrieval.workflow_indexer,
+        memory_store=storage.memory_store,
     )

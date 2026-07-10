@@ -3,6 +3,15 @@ from assistant.storage.aliases import AliasStore
 from assistant.storage.database import SettingsStore
 
 
+def test_database_path_and_url_are_pure(settings, tmp_path):
+    data_dir = tmp_path / "not-created"
+    isolated = settings.model_copy(update={"data_dir": data_dir})
+
+    assert isolated.database_path == data_dir / isolated.database_name
+    assert isolated.database_url.endswith("/not-created/assistant.db")
+    assert not data_dir.exists()
+
+
 def test_persisted_settings_load_on_restart(settings):
     first = build_container(settings)
     SettingsStore(first.database).set(

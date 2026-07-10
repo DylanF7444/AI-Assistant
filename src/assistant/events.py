@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import defaultdict
 from collections.abc import AsyncIterator, Callable
 from uuid import UUID
 
 from assistant.contracts import PipelineEvent
+
+logger = logging.getLogger("assistant.events")
 
 
 class EventBus:
@@ -22,7 +25,7 @@ class EventBus:
             try:
                 listener(event)
             except Exception:
-                continue
+                logger.exception("Pipeline event listener failed")
 
     async def subscribe(self) -> AsyncIterator[PipelineEvent]:
         queue: asyncio.Queue[PipelineEvent] = asyncio.Queue()
