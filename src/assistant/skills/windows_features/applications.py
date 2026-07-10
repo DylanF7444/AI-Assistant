@@ -33,8 +33,18 @@ class WindowInput(BaseModel):
         "move_to_monitor",
         "move",
         "resize",
-    ]
-    process_name: str | None = Field(default=None, pattern=r"^[^\\/:*?\"<>|]+\.exe$")
+    ] = Field(
+        description=(
+            "Change an existing visible application window. focus, minimize, maximize, "
+            "close, move_to_monitor, move, and resize require process_name. "
+            "minimize_focused and maximize_focused act on the currently focused window."
+        )
+    )
+    process_name: str | None = Field(
+        default=None,
+        pattern=r"^[^\\/:*?\"<>|]+\.exe$",
+        description="Executable name of the existing window to change, such as notepad.exe.",
+    )
     monitor: int | None = Field(default=None, ge=1)
     x: int | None = None
     y: int | None = None
@@ -92,7 +102,11 @@ class ApplicationWindowSkill(Skill):
         self.manifest = manifest(
             skill_id="windows.application_window",
             display_name="Application Window",
-            description="Focus, minimize, maximize, close, move, or resize an approved application window.",
+            description=(
+                "Focus, bring forward, hide/minimize, maximize, close, move, or resize "
+                "an existing approved application window. This changes a window that "
+                "already exists; it does not launch a new application instance."
+            ),
             input_model=self.input_model,
             output_model=self.output_model,
             permissions=(),

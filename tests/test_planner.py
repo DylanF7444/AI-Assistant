@@ -699,6 +699,101 @@ async def test_plan_from_interpretation_uses_retrieved_candidate_skills():
 
 
 @pytest.mark.asyncio
+async def test_interpreted_planner_merges_retrieved_and_lexical_skill_candidates():
+    launcher = LauncherSkill(FakeApplications(), resolver=lambda name: "unused.exe")
+    window = ApplicationWindowSkill(FakeApplications())
+    provider = FakeProvider(
+        {
+            "disposition": "skill",
+            "skill_id": "windows.launcher",
+            "arguments": {"application": "notepad"},
+            "answer": None,
+            "confidence": 0.96,
+            "clarification": None,
+        }
+    )
+    planner = LocalPlanner(
+        provider,
+        SkillRetriever((launcher.manifest, window.manifest)),
+    )
+
+    decision = await planner.plan_from_interpretation(
+        "I need a blank Notepad window",
+        interpretation=UserIntentInterpretation(
+            user_goal="Open a new blank Notepad application instance",
+            request_type="local_action",
+            explicit_requests=["I need a blank Notepad window"],
+            success_criteria=["a new blank Notepad window is open"],
+            confidence=0.94,
+        ),
+        context=ContextSnapshot(
+            request_text="I need a blank Notepad window",
+            session_id="s1",
+        ),
+        retrieved=(
+            RetrievedContextItem(
+                namespace="skill",
+                source_id="windows.application_window",
+                text="Change an existing application window",
+                metadata={"skill_id": "windows.application_window"},
+                score=0.91,
+            ),
+        ),
+    )
+
+    assert decision.intent is not None
+    assert decision.intent.name == "windows.launcher"
+    assert decision.intent.arguments == {"application": "notepad"}
+    assert '"id":"windows.application_window"' in provider.last_prompt
+    assert '"id":"windows.launcher"' in provider.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_planner_repairs_arguments_rejected_by_real_skill_validation():
+    launcher = LauncherSkill(FakeApplications(), resolver=lambda name: "unused.exe")
+    window = ApplicationWindowSkill(FakeApplications())
+    skills = {
+        launcher.manifest.skill_id: launcher,
+        window.manifest.skill_id: window,
+    }
+    provider = FakeProvider(
+        [
+            {
+                "disposition": "skill",
+                "skill_id": "windows.application_window",
+                "arguments": {"operation": "focus"},
+                "answer": None,
+                "confidence": 0.8,
+                "clarification": None,
+            },
+            {
+                "disposition": "skill",
+                "skill_id": "windows.launcher",
+                "arguments": {"application": "notepad"},
+                "answer": None,
+                "confidence": 0.96,
+                "clarification": None,
+            },
+        ]
+    )
+    planner = LocalPlanner(
+        provider,
+        SkillRetriever(tuple(skill.manifest for skill in skills.values())),
+        argument_validator=lambda skill_id, arguments: skills[skill_id].validate(
+            arguments
+        ),
+    )
+
+    decision = await planner.plan_decision("I need a blank Notepad window")
+
+    assert provider.calls == 2
+    assert decision.intent is not None
+    assert decision.intent.name == "windows.launcher"
+    assert decision.intent.arguments == {"application": "notepad"}
+    assert "focus requires process_name" in provider.last_prompt
+
+
+@pytest.mark.asyncio
 async def test_plan_revision_rejects_unavailable_next_step_skill():
     provider = FakeProvider(
         {

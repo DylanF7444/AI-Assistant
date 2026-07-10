@@ -411,9 +411,18 @@ def build_container(settings: Settings | None = None) -> Container:
     planner = (
         LocalPlanner(
             llm,
-            SkillRetriever(registry.list),
+            SkillRetriever(
+                lambda: tuple(
+                    manifest
+                    for manifest in registry.list()
+                    if registry.is_enabled(manifest.skill_id)
+                )
+            ),
             storage.knowledge_bases,
             timeout_seconds=settings.planner_timeout_seconds,
+            argument_validator=lambda skill_id, arguments: registry.get(
+                skill_id
+            ).validate(arguments),
         )
         if llm
         else None

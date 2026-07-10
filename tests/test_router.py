@@ -124,6 +124,26 @@ def test_broad_goal_requests_route_to_planner_goal(text):
     assert result.intent.ambiguity_reasons == ("Broad goal request requires interpretation",)
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I need a blank Notepad window",
+        "Could you bring Calculator to the front?",
+        "I want the volume a little lower",
+        "Please find the latest report in my files",
+    ],
+)
+def test_naturally_framed_requests_use_goal_interpretation(text):
+    result = DeterministicRouter().route(text)
+
+    assert result.needs_llm
+    assert result.intent.name == "planner.goal"
+    assert result.intent.arguments == {"text": text}
+    assert result.intent.ambiguity_reasons == (
+        "Natural-language request requires goal interpretation",
+    )
+
+
 def test_file_search_on_desktop_routes_without_local_planner():
     result = DeterministicRouter().route("Find my resume on my desktop")
 

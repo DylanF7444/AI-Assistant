@@ -472,7 +472,11 @@ class LauncherSkill(Skill):
         self.manifest = manifest(
             skill_id="windows.launcher",
             display_name="Launcher",
-            description="Launch an approved registered application path.",
+            description=(
+                "Start or open a new, fresh, or blank window/instance of an approved "
+                "registered application. This creates an application instance; it does "
+                "not focus or change an existing window."
+            ),
             input_model=self.input_model,
             output_model=self.output_model,
             permissions=(

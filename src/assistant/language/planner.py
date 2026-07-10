@@ -43,7 +43,18 @@ class SkillRetriever:
         "compute": {"calculator", "arithmetic", "math"},
         "launch": {"open", "application"},
         "open": {"launch", "launcher", "application"},
+        "start": {"launch", "open", "application"},
+        "run": {"launch", "open", "application"},
+        "blank": {"new", "launch", "open"},
+        "fresh": {"new", "launch", "open"},
+        "bring": {"focus", "window"},
+        "foreground": {"focus", "window"},
+        "hide": {"minimize", "window"},
+        "enlarge": {"maximize", "window"},
+        "quit": {"close", "application"},
+        "exit": {"close", "application"},
         "find": {"search", "file"},
+        "locate": {"find", "search", "file"},
         "copy": {"clipboard", "file"},
         "navigate": {"navigation", "browser"},
         "play": {"media", "music"},
@@ -130,6 +141,10 @@ class LocalPlanner:
         "Registered skills are your only action capabilities. Skill results are executed "
         "later by a separate policy and execution layer, so never claim that an action "
         "has already completed and never answer with a promise to use a skill later. "
+        "Infer the requested state change from the user's whole goal, including polite, "
+        "indirect, and outcome-oriented wording. Choose capabilities by their described "
+        "effect rather than by a shared noun or keyword: distinguish creating or starting "
+        "something from reading, changing, moving, or closing something that already exists. "
         "Select the skill now when it can perform the request. Never invent skills, "
         "arguments, shell commands, access, or abilities. Permissions and confirmations "
         "are enforced outside this planning step; do not bypass them or imply that they "
@@ -215,11 +230,13 @@ class LocalPlanner:
         retriever: SkillRetriever,
         knowledge_bases: KnowledgeBaseStore | None = None,
         timeout_seconds: float = 60.0,
+        argument_validator: Callable[[str, dict[str, Any]], Any] | None = None,
     ) -> None:
         self.provider = provider
         self.retriever = retriever
         self.knowledge_bases = knowledge_bases
         self.timeout_seconds = timeout_seconds
+        self.argument_validator = argument_validator
 
     async def interpret(
         self,
@@ -276,7 +293,7 @@ class LocalPlanner:
                         )
                     return await self._repair_conversational_response(text, recent_context)
                 output["arguments"] = self._normalize_skill_arguments(manifest, output["arguments"])
-                validate(output["arguments"], manifest.input_schema)
+                self._validate_skill_arguments(manifest, output["arguments"])
                 return Intent(
                     name=manifest.skill_id,
                     arguments=output["arguments"],
@@ -583,7 +600,9 @@ class LocalPlanner:
         return (
             f"{self.ROLE}\n"
             "Interpret the user's goal before choosing any action. Do not select a "
-            "skill in this step. Identify explicit requests, implicit needs, missing "
+            "skill in this step. Translate polite, indirect, and outcome-oriented "
+            "wording into the concrete state change the user wants without inventing "
+            "a target or value. Identify explicit requests, implicit needs, missing "
             "information, assumptions, constraints, risk notes, and success criteria. "
             "Ask for clarification when the goal, target, scope, or success criteria "
             "are ambiguous, especially before file changes or other local actions. "
@@ -684,9 +703,15 @@ class LocalPlanner:
             if isinstance(skill_id, str) and skill_id in manifests and skill_id not in skill_ids:
                 skill_ids.append(skill_id)
         selected = [manifests[skill_id] for skill_id in skill_ids[:limit]]
-        if selected:
-            return tuple(selected)
-        return self.retriever.relevant(text, limit=limit)
+        selected_ids = {manifest.skill_id for manifest in selected}
+        for manifest in self.retriever.relevant(text, limit=limit):
+            if manifest.skill_id in selected_ids:
+                continue
+            selected.append(manifest)
+            selected_ids.add(manifest.skill_id)
+            if len(selected) >= limit:
+                break
+        return tuple(selected)
 
     def _skill_directory(self) -> list[dict[str, Any]]:
         return [
@@ -781,7 +806,7 @@ class LocalPlanner:
                 )
             raise ValidationError("Selected skill is not a detailed candidate skill")
         arguments = self._normalize_skill_arguments(manifest, output["arguments"])
-        validate(arguments, manifest.input_schema)
+        self._validate_skill_arguments(manifest, arguments)
         return Intent(
             name=manifest.skill_id,
             arguments=arguments,
@@ -818,7 +843,7 @@ class LocalPlanner:
                 raise ValidationError(f"Plan step {step_id} selected unavailable skill: {skill_id}")
             arguments = self._normalize_skill_arguments(manifest, dict(raw_step["arguments"]))
             self._reject_placeholder_arguments(arguments)
-            validate(arguments, manifest.input_schema)
+            self._validate_skill_arguments(manifest, arguments)
             seen.add(step_id)
             planned.append(
                 PlannedIntentStep(
@@ -964,6 +989,21 @@ class LocalPlanner:
         if len(matches) == 1:
             return matches[0]
         return None
+
+    def _validate_skill_arguments(
+        self,
+        manifest: SkillManifest,
+        arguments: dict[str, Any],
+    ) -> None:
+        validate(arguments, manifest.input_schema)
+        if self.argument_validator is None:
+            return
+        try:
+            self.argument_validator(manifest.skill_id, arguments)
+        except (KeyError, PydanticValidationError, TypeError, ValueError) as exc:
+            raise ValidationError(
+                f"Invalid arguments for {manifest.skill_id}: {exc}"
+            ) from exc
 
     @staticmethod
     def _normalize_skill_arguments(

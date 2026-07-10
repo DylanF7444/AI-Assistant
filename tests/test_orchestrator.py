@@ -331,6 +331,38 @@ class ReplanningPlanner:
         pass
 
 
+class InterpretingLaunchPlanner:
+    async def interpret(self, text, *, context, retrieved):
+        return UserIntentInterpretation(
+            user_goal="Open a new blank Notepad application instance",
+            request_type="local_action",
+            explicit_requests=[text],
+            success_criteria=["a new blank Notepad window is open"],
+            confidence=0.95,
+        )
+
+    async def plan_from_interpretation(self, text, *, interpretation, context, retrieved):
+        return PlannerDecision(
+            intent=Intent(
+                name="windows.launcher",
+                arguments={"application": "notepad"},
+                confidence=0.97,
+                source="llm",
+            )
+        )
+
+    async def revise_plan(self, text, *, interpretation, context, retrieved, observations):
+        return PlanRevision(
+            disposition="stop",
+            rationale="The requested application instance was launched.",
+            response="Opened Notepad.",
+            confidence=0.98,
+        )
+
+    async def cancel(self):
+        pass
+
+
 class FakeSemanticRetriever:
     def __init__(self):
         self.calls = []
@@ -372,6 +404,41 @@ async def test_text_to_command_to_response(settings):
     assert response.response_type == ResponseType.SKILL
     assert "20" in response.display_text
     assert "Request breakdown:" not in response.display_text
+
+
+@pytest.mark.asyncio
+async def test_naturally_worded_launch_goal_executes_selected_skill(settings, tmp_path):
+    settings.confirmation_overrides = {"skill:windows.launcher": False}
+    container = build_container(settings)
+    target = tmp_path / "notepad.exe"
+    target.write_bytes(b"")
+    container.aliases.set("application", "notepad", str(target))
+    launched = []
+
+    async def record_launch(path):
+        launched.append(path)
+
+    container.registry.get("windows.launcher").adapter.launch = record_launch
+    container.permissions.grant(
+        user_id="local-user",
+        skill_id="windows.launcher",
+        capability="process.launch",
+        grant_type=GrantType.ALWAYS,
+        targets=(str(target.resolve()),),
+    )
+    container.orchestrator.planner = InterpretingLaunchPlanner()
+
+    response, outcome = await container.orchestrator.handle_text(
+        "I need a blank Notepad window"
+    )
+
+    assert outcome.result is not None
+    assert outcome.result.status == ResultStatus.COMPLETED
+    assert outcome.call is not None
+    assert outcome.call.skill_id == "windows.launcher"
+    assert outcome.call.arguments == {"application": "notepad"}
+    assert launched == [str(target)]
+    assert response.severity == "success"
 
 
 @pytest.mark.asyncio

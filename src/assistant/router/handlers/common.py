@@ -18,6 +18,20 @@ def looks_like_goal_request(text: str) -> bool:
     )
 
 
+def looks_like_natural_request(text: str) -> bool:
+    """Recognize request framing without guessing the requested capability."""
+    normalized = " ".join(text.casefold().replace("’", "'").split())
+    return bool(
+        re.match(
+            r"^(?:please\b|"
+            r"i\s+(?:need|want|would like|wish)\b|"
+            r"i[' ]d\s+like\b|"
+            r"(?:can|could|would|will)\s+you\b)",
+            normalized,
+        )
+    )
+
+
 def memory_key(value: str) -> str:
     return "_".join(re.findall(r"[a-z0-9]+", value.casefold()))[:200]
 
