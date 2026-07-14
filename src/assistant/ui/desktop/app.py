@@ -5,6 +5,7 @@ import json
 import shutil
 import sys
 import time
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from assistant.storage.history import HistoryStore
 from assistant.storage.macros import MacroDefinition, MacroStep
 from assistant.storage.secrets import SecretVault
 from assistant.ui.desktop.controller import DesktopController
+from assistant.ui.desktop.state import DesktopWindowState, WindowGeometry
 from assistant.ui.desktop.tabs import TAB_LABELS
 from assistant.windows.adapters import LocalWindowsDeviceAdapter
 
@@ -113,7 +115,7 @@ def run_desktop(container: Container) -> int:
     )
 
     try:
-        from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
+        from PySide6.QtCore import QObject, QRect, QSize, Qt, QTimer, Signal
         from PySide6.QtGui import (
             QAction,
             QIcon,
@@ -128,6 +130,7 @@ def run_desktop(container: Container) -> int:
             QFileDialog,
             QFormLayout,
             QFrame,
+            QHeaderView,
             QHBoxLayout,
             QInputDialog,
             QLabel,
@@ -140,6 +143,7 @@ def run_desktop(container: Container) -> int:
             QPushButton,
             QScrollArea,
             QSizePolicy,
+            QStackedWidget,
             QStyle,
             QStyleOptionTab,
             QStylePainter,
@@ -184,8 +188,12 @@ def run_desktop(container: Container) -> int:
 
     class HorizontalTabBar(QTabBar):
         def tabSizeHint(self, index: int) -> QSize:
+            # The labels are painted horizontally even though the bar is on the
+            # west edge.  Keep the normal horizontal size hint too; swapping it
+            # makes every tab tall and only a few characters wide.
             size = super().tabSizeHint(index)
-            return QSize(size.height(), size.width())
+            text_width = self.fontMetrics().horizontalAdvance(self.tabText(index))
+            return QSize(max(size.width(), text_width + 24), size.height())
 
         def paintEvent(self, event) -> None:
             painter = QStylePainter(self)
@@ -195,7 +203,200 @@ def run_desktop(container: Container) -> int:
                 option.shape = QTabBar.Shape.RoundedNorth
                 painter.drawControl(QStyle.ControlElement.CE_TabBarTab, option)
 
+    class CompactAssistantPanel(QWidget):
+        submitted = Signal(str)
+        listen_requested = Signal()
+        cancel_requested = Signal()
+        expand_requested = Signal()
+        pinned_changed = Signal(bool)
+        activation_mode_changed = Signal(str)
+
+        def __init__(self, *, activation_mode: str, pinned: bool, wakeword_active: bool) -> None:
+            super().__init__()
+            self.setObjectName("compactAssistantPage")
+            self.setAccessibleName("Compact assistant companion")
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(16, 14, 16, 16)
+            layout.setSpacing(10)
+
+            header = QHBoxLayout()
+            self.status_dot = QLabel("")
+            self.status_dot.setObjectName("compactStatusDot")
+            self.status_dot.setFixedSize(10, 10)
+            self.status = QLabel("Ready")
+            self.status.setObjectName("compactStatus")
+            self.status.setAccessibleName("Compact assistant status")
+            self.pin_button = QPushButton()
+            self.pin_button.setObjectName("compactHeaderButton")
+            self.pin_button.setCheckable(True)
+            self.pin_button.setChecked(pinned)
+            self.pin_button.setAccessibleName("Keep compact assistant on top")
+            self.pin_button.toggled.connect(self._pin_toggled)
+            self._update_pin_label(pinned)
+            self.expand_button = QPushButton("Expand")
+            self.expand_button.setObjectName("compactHeaderButton")
+            self.expand_button.setAccessibleName("Open full assistant")
+            self.expand_button.clicked.connect(self.expand_requested.emit)
+            header.addWidget(self.status_dot)
+            header.addWidget(self.status, 1)
+            header.addWidget(self.pin_button)
+            header.addWidget(self.expand_button)
+            layout.addLayout(header)
+
+            self.status_detail = QLabel("Waiting for your request")
+            self.status_detail.setObjectName("compactStatusDetail")
+            self.status_detail.setWordWrap(True)
+            self.status_transcript = QLabel("")
+            self.status_transcript.setObjectName("compactTranscript")
+            self.status_transcript.setWordWrap(True)
+            self.status_transcript.setAccessibleName("Compact live speech transcript")
+            layout.addWidget(self.status_detail)
+            layout.addWidget(self.status_transcript)
+
+            self.pipeline_progress = QProgressBar()
+            self.pipeline_progress.setObjectName("compactPipelineProgress")
+            self.pipeline_progress.setTextVisible(False)
+            self.pipeline_progress.setFixedHeight(4)
+            self.pipeline_progress.hide()
+            layout.addWidget(self.pipeline_progress)
+
+            voice_row = QHBoxLayout()
+            self.activation_mode = QComboBox()
+            self.activation_mode.setObjectName("compactActivationMode")
+            self.activation_mode.setAccessibleName("Voice activation mode")
+            self.activation_mode.addItem("Hotkey", "hotkey")
+            self.activation_mode.addItem("Keyword / clap", "keyword_clap")
+            self.activation_mode.addItem("Persistent", "persistent")
+            selected = self.activation_mode.findData(activation_mode)
+            self.activation_mode.setCurrentIndex(max(0, selected))
+            self.activation_mode.currentIndexChanged.connect(self._activation_changed)
+            self.wakeword_badge = QLabel("WAKE WORD ON" if wakeword_active else "WAKE WORD OFF")
+            self.wakeword_badge.setObjectName("wakewordBadge")
+            self.wakeword_badge.setProperty("active", wakeword_active)
+            self.wakeword_badge.setToolTip(
+                "Model-based wake-word monitoring is active."
+                if wakeword_active
+                else "Configure a wake-word ONNX model in full Settings."
+            )
+            voice_row.addWidget(self.activation_mode, 1)
+            voice_row.addWidget(self.wakeword_badge)
+            layout.addLayout(voice_row)
+
+            mic_row = QHBoxLayout()
+            mic_label = QLabel("MIC")
+            mic_label.setObjectName("sectionLabel")
+            self.mic_level = QProgressBar()
+            self.mic_level.setObjectName("compactMicLevel")
+            self.mic_level.setAccessibleName("Compact microphone input level")
+            self.mic_level.setRange(0, 100)
+            self.mic_level.setTextVisible(False)
+            self.mic_level.setFixedHeight(7)
+            self.mic_level_value = QLabel("0%")
+            self.mic_level_value.setObjectName("micLevelValue")
+            mic_row.addWidget(mic_label)
+            mic_row.addWidget(self.mic_level, 1)
+            mic_row.addWidget(self.mic_level_value)
+            layout.addLayout(mic_row)
+
+            request_label = QLabel("LATEST REQUEST")
+            request_label.setObjectName("sectionLabel")
+            self.latest_request = QLabel("No request yet.")
+            self.latest_request.setObjectName("compactLatestRequest")
+            self.latest_request.setWordWrap(True)
+            self.latest_request.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            layout.addWidget(request_label)
+            layout.addWidget(self.latest_request)
+
+            response_header = QHBoxLayout()
+            response_label = QLabel("ASSISTANT")
+            response_label.setObjectName("sectionLabel")
+            self.response_type = QLabel("READY")
+            self.response_type.setObjectName("responseBadge")
+            response_header.addWidget(response_label)
+            response_header.addStretch()
+            response_header.addWidget(self.response_type)
+            layout.addLayout(response_header)
+            self.response = QTextEdit()
+            self.response.setObjectName("compactAssistantResponse")
+            self.response.setReadOnly(True)
+            self.response.setPlaceholderText("The latest response will appear here.")
+            self.response.setAccessibleName("Compact assistant response")
+            self.response.setMinimumHeight(110)
+            layout.addWidget(self.response, 1)
+
+            compose_label = QLabel("NEW REQUEST")
+            compose_label.setObjectName("sectionLabel")
+            self.composer = RequestTextEdit()
+            self.composer.setObjectName("compactCommandInput")
+            self.composer.setAccessibleName("Compact command input")
+            self.composer.setPlaceholderText("Ask the assistant...")
+            self.composer.setMinimumHeight(58)
+            self.composer.setMaximumHeight(86)
+            self.composer.submitted.connect(self._submit)
+            layout.addWidget(compose_label)
+            layout.addWidget(self.composer)
+
+            controls = QHBoxLayout()
+            self.listen_button = QPushButton("Listen")
+            self.listen_button.setObjectName("secondaryButton")
+            self.listen_button.clicked.connect(self.listen_requested.emit)
+            self.cancel_button = QPushButton("Stop")
+            self.cancel_button.setObjectName("dangerButton")
+            self.cancel_button.setEnabled(False)
+            self.cancel_button.clicked.connect(self.cancel_requested.emit)
+            self.send_button = QPushButton("Send  >")
+            self.send_button.setObjectName("primaryButton")
+            self.send_button.clicked.connect(self._submit)
+            controls.addWidget(self.listen_button)
+            controls.addStretch()
+            controls.addWidget(self.cancel_button)
+            controls.addWidget(self.send_button)
+            layout.addLayout(controls)
+
+        def _submit(self) -> None:
+            text = self.composer.toPlainText().strip()
+            if not text:
+                self.composer.setFocus()
+                return
+            self.submitted.emit(text)
+
+        def _pin_toggled(self, pinned: bool) -> None:
+            self._update_pin_label(pinned)
+            self.pinned_changed.emit(pinned)
+
+        def _update_pin_label(self, pinned: bool) -> None:
+            self.pin_button.setText("Pinned" if pinned else "Pin")
+
+        def _activation_changed(self, _index: int) -> None:
+            mode = self.activation_mode.currentData()
+            if mode:
+                self.activation_mode_changed.emit(str(mode))
+
+        def set_pipeline_busy(self, *, blocked: bool, cancellable: bool) -> None:
+            self.composer.setEnabled(not blocked)
+            self.send_button.setEnabled(not blocked)
+            self.listen_button.setEnabled(not blocked)
+            self.activation_mode.setEnabled(not blocked)
+            self.expand_button.setEnabled(not blocked)
+            self.cancel_button.setEnabled(cancellable)
+
+        def set_request(self, text: str) -> None:
+            text = " ".join(text.split())
+            self.latest_request.setText(text or "No request yet.")
+
+        def set_response(self, text: str) -> None:
+            self.response.setPlainText(text)
+
+        def set_response_type(self, label: str) -> None:
+            self.response_type.setText(label)
+
     class MainWindow(QMainWindow):
+        COMPACT_MINIMUM_SIZE = (380, 500)
+        COMPACT_DEFAULT_SIZE = (400, 520)
+        COMPACT_MAXIMUM_SIZE = (520, 680)
+        UNBOUNDED_WIDGET_SIZE = 16_777_215
         ACTIVE_PIPELINE_STATES = {
             PipelineState.LISTENING,
             PipelineState.TRANSCRIBING,
@@ -204,11 +405,34 @@ def run_desktop(container: Container) -> int:
             PipelineState.SPEAKING,
         }
 
+        @staticmethod
+        def _info_label(text: str) -> QLabel:
+            label = QLabel(text)
+            label.setWordWrap(True)
+            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            return label
+
+        @staticmethod
+        def _configure_data_table(table: QTableWidget) -> None:
+            table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            table.setAlternatingRowColors(True)
+            table.setWordWrap(False)
+            header = table.horizontalHeader()
+            header.setStretchLastSection(False)
+            for column in range(table.columnCount()):
+                header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+
+        @staticmethod
+        def _table_item(value: Any) -> QTableWidgetItem:
+            text = str(value)
+            item = QTableWidgetItem(text)
+            item.setToolTip(text)
+            return item
+
         def __init__(self) -> None:
             super().__init__()
-            self.setWindowTitle("Local Assistant")
-            self.resize(1080, 760)
-            self.setMinimumSize(820, 600)
+            self.setObjectName("localAssistantWindow")
             self.setAccessibleName("Local Assistant command window")
             self._workers: list[AsyncWorker] = []
             self._hotkeys: list[int] = []
@@ -216,16 +440,26 @@ def run_desktop(container: Container) -> int:
             self._passive_voice_worker: PassiveVoiceWorker | None = None
             self._passive_voice_restart_enabled = False
             self._voice_prompt_active = False
+            self._shutdown_started = False
             self._activity_started = time.perf_counter()
             self._status_frame = 0
             self._active_state = PipelineState.IDLE
+            self._desktop_state_store = SettingsStore(container.database)
+            try:
+                self._desktop_state = DesktopWindowState.model_validate(
+                    self._desktop_state_store.get("desktop_window_state", {})
+                )
+            except Exception:
+                self._desktop_state = DesktopWindowState()
+            self._window_mode = self._desktop_state.mode
             self.hotkey_bridge = HotkeyBridge()
             self.hotkey_bridge.push_to_talk.connect(self.listen)
             self.hotkey_bridge.cancel.connect(self.cancel)
             self.hotkey_bridge.pipeline_event.connect(self._handle_pipeline_event)
             container.events.add_listener(self.hotkey_bridge.pipeline_event.emit)
-            tabs = QTabWidget()
-            tabs.setTabBar(HorizontalTabBar())
+            self.tabs = QTabWidget()
+            self.tabs.setObjectName("fullAssistantTabs")
+            self.tabs.setTabBar(HorizontalTabBar())
             tab_factories = (
                 self._command_tab,
                 self._active_scripts_tab,
@@ -243,10 +477,25 @@ def run_desktop(container: Container) -> int:
                 self._applications_tab,
             )
             for factory, label in zip(tab_factories, TAB_LABELS, strict=True):
-                tabs.addTab(factory(), label)
-            tabs.setTabPosition(QTabWidget.TabPosition.West)
-            tabs.setDocumentMode(True)
-            self.setCentralWidget(tabs)
+                self.tabs.addTab(factory(), label)
+            self.tabs.setTabPosition(QTabWidget.TabPosition.West)
+            self.tabs.setDocumentMode(True)
+            self.compact_panel = CompactAssistantPanel(
+                activation_mode=container.settings.voice_activation_mode,
+                pinned=self._desktop_state.compact_pinned,
+                wakeword_active=container.wakeword is not None,
+            )
+            self.compact_panel.submitted.connect(self._run_compact_command)
+            self.compact_panel.listen_requested.connect(self.listen)
+            self.compact_panel.cancel_requested.connect(self.cancel)
+            self.compact_panel.expand_requested.connect(lambda: self._switch_window_mode("full"))
+            self.compact_panel.pinned_changed.connect(self._set_compact_pinned)
+            self.compact_panel.activation_mode_changed.connect(self._set_voice_activation_mode)
+            self.view_stack = QStackedWidget()
+            self.view_stack.setObjectName("assistantViewStack")
+            self.view_stack.addWidget(self.compact_panel)
+            self.view_stack.addWidget(self.tabs)
+            self.setCentralWidget(self.view_stack)
             self._status_timer = QTimer(self)
             self._status_timer.setInterval(420)
             self._status_timer.timeout.connect(self._animate_status)
@@ -259,12 +508,200 @@ def run_desktop(container: Container) -> int:
             self._scripts_timer.start()
             self._add_shortcut(container.settings.push_to_talk_hotkey, self.listen)
             self._add_shortcut(container.settings.cancel_hotkey, self.cancel)
-            self._add_shortcut("Ctrl+Return", self.run_command)
+            self._add_shortcut("Ctrl+Return", self._submit_current_view)
             self._register_global_hotkeys()
+            self._apply_window_mode(self._window_mode, initial=True)
             if container.wakeword:
                 self._start_wakeword()
             self._start_passive_voice()
             QTimer.singleShot(0, self._first_run)
+
+        def _application_settings_payload(self, settings: Any) -> dict[str, Any]:
+            return settings.model_dump(
+                mode="json",
+                exclude={
+                    "data_dir",
+                    "database_name",
+                    "profile",
+                    "trusted_model_keys",
+                    "trusted_skill_keys",
+                },
+            )
+
+        def _persist_application_settings(self, settings: Any) -> None:
+            SettingsStore(container.database).set(
+                "application_settings",
+                self._application_settings_payload(settings),
+            )
+            container.settings = settings
+
+        def _save_current_geometry(self) -> None:
+            geometry = self.geometry()
+            saved = WindowGeometry(
+                x=geometry.x(),
+                y=geometry.y(),
+                width=geometry.width(),
+                height=geometry.height(),
+            )
+            field = "compact_geometry" if self._window_mode == "compact" else "full_geometry"
+            self._desktop_state = self._desktop_state.model_copy(update={field: saved})
+
+        def _persist_window_state(self) -> None:
+            self._desktop_state_store.set(
+                "desktop_window_state",
+                self._desktop_state.model_dump(mode="json"),
+            )
+
+        @staticmethod
+        def _available_screen_geometry(target: QRect) -> QRect:
+            for screen in QApplication.screens():
+                available = screen.availableGeometry()
+                if available.intersects(target):
+                    return available
+            primary = QApplication.primaryScreen()
+            return primary.availableGeometry() if primary is not None else QRect(0, 0, 1920, 1080)
+
+        def _bounded_window_geometry(
+            self,
+            saved: WindowGeometry | None,
+            *,
+            default_width: int,
+            default_height: int,
+            minimum_width: int = 1,
+            minimum_height: int = 1,
+            maximum_width: int | None = None,
+            maximum_height: int | None = None,
+        ) -> QRect:
+            def bounded_size(width: int, height: int, available: QRect) -> tuple[int, int]:
+                width_limit = maximum_width or available.width()
+                height_limit = maximum_height or available.height()
+                bounded_width = max(minimum_width, min(width, width_limit))
+                bounded_height = max(minimum_height, min(height, height_limit))
+                return (
+                    min(bounded_width, available.width()),
+                    min(bounded_height, available.height()),
+                )
+
+            if saved is None:
+                primary = QApplication.primaryScreen()
+                available = (
+                    primary.availableGeometry() if primary is not None else QRect(0, 0, 1920, 1080)
+                )
+                width, height = bounded_size(default_width, default_height, available)
+                return QRect(
+                    max(available.left(), available.right() - width - 24),
+                    max(available.top(), available.top() + 48),
+                    width,
+                    height,
+                )
+            target = QRect(saved.x, saved.y, saved.width, saved.height)
+            available = self._available_screen_geometry(target)
+            if not available.intersects(target):
+                width, height = bounded_size(default_width, default_height, available)
+                return QRect(
+                    max(available.left(), available.right() - width - 24),
+                    max(available.top(), available.top() + 48),
+                    width,
+                    height,
+                )
+            width, height = bounded_size(saved.width, saved.height, available)
+            x = min(max(saved.x, available.left()), available.right() - width + 1)
+            y = min(max(saved.y, available.top()), available.bottom() - height + 1)
+            return QRect(x, y, width, height)
+
+        def _apply_window_mode(self, mode: str, *, initial: bool = False) -> None:
+            was_visible = self.isVisible()
+            self._window_mode = mode
+            compact = mode == "compact"
+            self.view_stack.setCurrentWidget(self.compact_panel if compact else self.tabs)
+            self.setWindowTitle("Local Assistant - Compact" if compact else "Local Assistant")
+            self.setMinimumSize(0, 0)
+            self.setMaximumSize(self.UNBOUNDED_WIDGET_SIZE, self.UNBOUNDED_WIDGET_SIZE)
+            self.setWindowFlag(
+                Qt.WindowType.WindowStaysOnTopHint,
+                compact and self._desktop_state.compact_pinned,
+            )
+            if compact:
+                minimum_width, minimum_height = self.COMPACT_MINIMUM_SIZE
+                default_width, default_height = self.COMPACT_DEFAULT_SIZE
+                maximum_width, maximum_height = self.COMPACT_MAXIMUM_SIZE
+                self.setMinimumSize(minimum_width, minimum_height)
+                self.setMaximumSize(maximum_width, maximum_height)
+                geometry = self._bounded_window_geometry(
+                    self._desktop_state.compact_geometry,
+                    default_width=default_width,
+                    default_height=default_height,
+                    minimum_width=minimum_width,
+                    minimum_height=minimum_height,
+                    maximum_width=maximum_width,
+                    maximum_height=maximum_height,
+                )
+            else:
+                self.setMinimumSize(820, 600)
+                geometry = self._bounded_window_geometry(
+                    self._desktop_state.full_geometry,
+                    default_width=1080,
+                    default_height=760,
+                )
+            self.setGeometry(geometry)
+            if was_visible and not initial:
+                self.show()
+                self.raise_()
+                self.activateWindow()
+            if compact:
+                QTimer.singleShot(0, self.compact_panel.composer.setFocus)
+
+        def _switch_window_mode(self, mode: str) -> None:
+            if mode == self._window_mode:
+                return
+            if self._pipeline_is_busy() or self._voice_prompt_active:
+                self.statusBar().showMessage(
+                    "Wait for the current assistant interaction to finish.", 1800
+                )
+                return
+            self._save_current_geometry()
+            self._desktop_state = self._desktop_state.model_copy(update={"mode": mode})
+            self._apply_window_mode(mode)
+            self._persist_window_state()
+
+        def _set_compact_pinned(self, pinned: bool) -> None:
+            self._desktop_state = self._desktop_state.model_copy(update={"compact_pinned": pinned})
+            self._persist_window_state()
+            if self._window_mode == "compact":
+                self._apply_window_mode("compact")
+
+        def _submit_current_view(self) -> None:
+            if self._window_mode == "compact":
+                self.compact_panel._submit()
+            else:
+                self.run_command()
+
+        def _set_voice_activation_mode(self, mode: str) -> None:
+            if mode == container.settings.voice_activation_mode:
+                return
+            try:
+                updated = container.settings.model_copy(update={"voice_activation_mode": mode})
+                updated = type(container.settings).model_validate(updated.model_dump())
+            except Exception as error:
+                QMessageBox.critical(self, "Invalid Voice Activation Mode", str(error))
+                return
+            self._persist_application_settings(updated)
+            self._start_passive_voice()
+            self._set_pipeline_state(PipelineState.IDLE, self._passive_voice_status())
+            self._apply_passive_voice_indicators()
+
+        def show_from_tray(self) -> None:
+            if self.isMinimized():
+                self.showNormal()
+            else:
+                self.show()
+            self.raise_()
+            self.activateWindow()
+
+        def open_full_from_tray(self) -> None:
+            if self._window_mode != "full":
+                self._switch_window_mode("full")
+            self.show_from_tray()
 
         def _active_scripts_tab(self) -> QWidget:
             page = QWidget()
@@ -448,8 +885,15 @@ def run_desktop(container: Container) -> int:
             layout.setContentsMargins(32, 28, 32, 28)
             layout.setSpacing(18)
 
+            heading_row = QHBoxLayout()
             eyebrow = QLabel("PRIVATE  |  LOCAL  |  READY")
             eyebrow.setObjectName("eyebrow")
+            self.compact_view_button = QPushButton("Compact view")
+            self.compact_view_button.setObjectName("secondaryButton")
+            self.compact_view_button.setAccessibleName("Open compact assistant")
+            self.compact_view_button.clicked.connect(lambda: self._switch_window_mode("compact"))
+            heading_row.addWidget(eyebrow, 1)
+            heading_row.addWidget(self.compact_view_button)
             title = QLabel("What can I help with?")
             title.setObjectName("pageTitle")
             subtitle = QLabel(
@@ -458,7 +902,7 @@ def run_desktop(container: Container) -> int:
             )
             subtitle.setObjectName("pageSubtitle")
             subtitle.setWordWrap(True)
-            layout.addWidget(eyebrow)
+            layout.addLayout(heading_row)
             layout.addWidget(title)
             layout.addWidget(subtitle)
 
@@ -563,12 +1007,12 @@ def run_desktop(container: Container) -> int:
             response_header.addWidget(response_label)
             response_header.addStretch()
             response_header.addWidget(self.response_type)
+            compose_layout.addLayout(response_header)
+            compose_layout.addWidget(self.response)
+            compose_layout.addSpacing(4)
             compose_layout.addWidget(input_label)
             compose_layout.addWidget(self.transcript)
             compose_layout.addLayout(controls)
-            compose_layout.addSpacing(4)
-            compose_layout.addLayout(response_header)
-            compose_layout.addWidget(self.response)
 
             activity_card = QFrame()
             activity_card.setObjectName("activityCard")
@@ -628,20 +1072,21 @@ def run_desktop(container: Container) -> int:
             self._active_state = state
             self._status_frame = 0
             self.status.setText(labels[state])
-            self.status_detail.setText(
-                message
-                or {
-                    PipelineState.IDLE: "Waiting for your request",
-                    PipelineState.THINKING: "Understanding what you asked",
-                    PipelineState.EXECUTING: "A local skill is running",
-                }.get(state, labels[state])
-            )
+            detail = message or {
+                PipelineState.IDLE: "Waiting for your request",
+                PipelineState.THINKING: "Understanding what you asked",
+                PipelineState.EXECUTING: "A local skill is running",
+            }.get(state, labels[state])
+            self.status_detail.setText(detail)
+            self.compact_panel.status.setText(labels[state])
+            self.compact_panel.status_detail.setText(detail)
             self.status_dot.setProperty("state", state.value)
             self.status_dot.style().unpolish(self.status_dot)
             self.status_dot.style().polish(self.status_dot)
-            self.run_button.setEnabled(not active)
-            self.listen_button.setEnabled(not active)
-            self.cancel_button.setEnabled(active)
+            self.compact_panel.status_dot.setProperty("state", state.value)
+            self.compact_panel.status_dot.style().unpolish(self.compact_panel.status_dot)
+            self.compact_panel.status_dot.style().polish(self.compact_panel.status_dot)
+            self._update_command_controls()
             if state in {PipelineState.LISTENING, PipelineState.TRANSCRIBING}:
                 self._mic_level_timer.start()
             else:
@@ -653,20 +1098,34 @@ def run_desktop(container: Container) -> int:
                 elapsed = time.perf_counter() - self._activity_started
                 self.elapsed_status.setText(f"{elapsed:.1f}s")
                 self.pipeline_progress.show()
+                self.compact_panel.pipeline_progress.show()
                 if progress is None:
                     self.pipeline_progress.setRange(0, 0)
+                    self.compact_panel.pipeline_progress.setRange(0, 0)
                 else:
                     self.pipeline_progress.setRange(0, 100)
                     self.pipeline_progress.setValue(round(progress * 100))
+                    self.compact_panel.pipeline_progress.setRange(0, 100)
+                    self.compact_panel.pipeline_progress.setValue(round(progress * 100))
                 self._status_timer.start()
             else:
                 self._status_timer.stop()
                 self.elapsed_status.setText("")
                 self.pipeline_progress.hide()
+                self.compact_panel.pipeline_progress.hide()
             self._append_activity(labels[state], message)
 
         def _pipeline_is_busy(self) -> bool:
             return self._active_state in self.ACTIVE_PIPELINE_STATES
+
+        def _update_command_controls(self) -> None:
+            active = self._pipeline_is_busy()
+            blocked = active or self._voice_prompt_active
+            self.run_button.setEnabled(not blocked)
+            self.listen_button.setEnabled(not blocked)
+            self.cancel_button.setEnabled(active)
+            self.compact_view_button.setEnabled(not blocked)
+            self.compact_panel.set_pipeline_busy(blocked=blocked, cancellable=active)
 
         def _add_shortcut(self, sequence: str, callback: Any) -> None:
             shortcut = QShortcut(QKeySequence(sequence), self)
@@ -684,7 +1143,9 @@ def run_desktop(container: Container) -> int:
                 PipelineState.SPEAKING: "Speaking",
             }.get(self._active_state)
             if base:
-                self.status.setText(base + "." * self._status_frame)
+                animated = base + "." * self._status_frame
+                self.status.setText(animated)
+                self.compact_panel.status.setText(animated)
                 elapsed = time.perf_counter() - self._activity_started
                 self.elapsed_status.setText(f"{elapsed:.1f}s")
 
@@ -697,6 +1158,8 @@ def run_desktop(container: Container) -> int:
             value = max(0, min(100, value))
             self.mic_level.setValue(value)
             self.mic_level_value.setText(f"{value}%")
+            self.compact_panel.mic_level.setValue(value)
+            self.compact_panel.mic_level_value.setText(f"{value}%")
 
         def _register_global_hotkeys(self) -> None:
             try:
@@ -776,11 +1239,18 @@ def run_desktop(container: Container) -> int:
         def _apply_passive_voice_indicators(self) -> None:
             if self._passive_voice_worker and self._passive_voice_worker.isRunning():
                 self.status.setText("Listening")
+                self.compact_panel.status.setText("Listening")
                 self.status_dot.setProperty("state", PipelineState.LISTENING.value)
                 self.status_dot.style().unpolish(self.status_dot)
                 self.status_dot.style().polish(self.status_dot)
-                self.status_detail.setText(self._passive_voice_status())
+                self.compact_panel.status_dot.setProperty("state", PipelineState.LISTENING.value)
+                self.compact_panel.status_dot.style().unpolish(self.compact_panel.status_dot)
+                self.compact_panel.status_dot.style().polish(self.compact_panel.status_dot)
+                detail = self._passive_voice_status()
+                self.status_detail.setText(detail)
+                self.compact_panel.status_detail.setText(detail)
                 self.listen_button.setEnabled(False)
+                self.compact_panel.listen_button.setEnabled(False)
                 self._mic_level_timer.start()
 
         def _passive_voice_status(self) -> str:
@@ -813,16 +1283,20 @@ def run_desktop(container: Container) -> int:
             self._set_pipeline_state(event.state, event.message, event.progress)
             if event.state == PipelineState.TRANSCRIBING and event.message:
                 self.transcript.setPlainText(event.message)
+                self.compact_panel.set_request(event.message)
                 self._set_status_transcript(event.message)
 
         def _show_voice_transcript(self, text: str) -> None:
             self.transcript.setPlainText(text)
             self.transcript.moveCursor(QTextCursor.MoveOperation.End)
+            self.compact_panel.set_request(text)
             self._set_status_transcript(text)
 
         def _set_status_transcript(self, text: str) -> None:
             text = " ".join(text.split())
-            self.status_transcript.setText(f"Heard: {text}" if text else "")
+            display = f"Heard: {text}" if text else ""
+            self.status_transcript.setText(display)
+            self.compact_panel.status_transcript.setText(display)
 
         def _voice_prompt_choice(
             self,
@@ -838,6 +1312,8 @@ def run_desktop(container: Container) -> int:
             restart_passive = container.settings.voice_activation_mode != "hotkey"
             self._voice_prompt_active = True
             self._stop_passive_voice()
+            self._update_command_controls()
+            self.show_from_tray()
             choice = {"value": default_choice}
             button_choices: dict[Any, str] = {}
             dialog = QMessageBox(self)
@@ -901,6 +1377,7 @@ def run_desktop(container: Container) -> int:
             worker.wait(1500)
             self._discard_worker(worker)
             self._voice_prompt_active = False
+            self._update_command_controls()
             if restart_passive:
                 QTimer.singleShot(250, self._start_passive_voice)
             return choice["value"]
@@ -1040,7 +1517,7 @@ def run_desktop(container: Container) -> int:
             page = QWidget()
             layout = QVBoxLayout(page)
             layout.addWidget(
-                QLabel(
+                self._info_label(
                     "Skills start with no sensitive permissions. Grants can be one-time, "
                     "session-only, always, or deny, and may be target-scoped. "
                     "File access grants are managed in the File Access tab."
@@ -1050,7 +1527,7 @@ def run_desktop(container: Container) -> int:
             self.permission_table.setHorizontalHeaderLabels(
                 ["Skill", "Capability", "Mode", "Targets", "Effect"]
             )
-            self.permission_table.horizontalHeader().setStretchLastSection(True)
+            self._configure_data_table(self.permission_table)
             self._reload_permissions()
             controls = QHBoxLayout()
             grant = QPushButton("Grant Permission")
@@ -1082,7 +1559,7 @@ def run_desktop(container: Container) -> int:
                     value["effect"],
                 ]
                 for column, field in enumerate(fields):
-                    item = QTableWidgetItem(str(field))
+                    item = self._table_item(field)
                     if column == 0:
                         item.setData(Qt.ItemDataRole.UserRole, value["skill_id"])
                     elif column == 1:
@@ -1201,7 +1678,7 @@ def run_desktop(container: Container) -> int:
             page = QWidget()
             layout = QVBoxLayout(page)
             layout.addWidget(
-                QLabel(
+                self._info_label(
                     "File access is controlled by skill grants plus global path "
                     "allow/block rules. Block rules take precedence over grants."
                 )
@@ -1214,7 +1691,7 @@ def run_desktop(container: Container) -> int:
             self.file_access_grants_table.setHorizontalHeaderLabels(
                 ["Skill", "Access", "Mode", "Targets", "Effect"]
             )
-            self.file_access_grants_table.horizontalHeader().setStretchLastSection(True)
+            self._configure_data_table(self.file_access_grants_table)
             layout.addWidget(self.file_access_grants_table)
 
             grant_controls = QHBoxLayout()
@@ -1234,7 +1711,7 @@ def run_desktop(container: Container) -> int:
             layout.addWidget(policy_title)
             self.file_access_policy_table = QTableWidget(0, 3)
             self.file_access_policy_table.setHorizontalHeaderLabels(["Access", "Rule", "Path"])
-            self.file_access_policy_table.horizontalHeader().setStretchLastSection(True)
+            self._configure_data_table(self.file_access_policy_table)
             layout.addWidget(self.file_access_policy_table)
 
             policy_controls = QHBoxLayout()
@@ -1271,7 +1748,7 @@ def run_desktop(container: Container) -> int:
                     value["effect"],
                 ]
                 for column, field in enumerate(fields):
-                    item = QTableWidgetItem(str(field))
+                    item = self._table_item(field)
                     if column == 0:
                         item.setData(Qt.ItemDataRole.UserRole, value["skill_id"])
                     elif column == 1:
@@ -1292,7 +1769,7 @@ def run_desktop(container: Container) -> int:
                     self.file_access_policy_table.insertRow(row)
                     fields = [access, rule, path]
                     for column, value in enumerate(fields):
-                        item = QTableWidgetItem(str(value))
+                        item = self._table_item(value)
                         if column == 0:
                             item.setData(Qt.ItemDataRole.UserRole, field)
                         elif column == 2:
@@ -1452,7 +1929,13 @@ def run_desktop(container: Container) -> int:
             page = QWidget()
             layout = QVBoxLayout(page)
             table = QTableWidget(0, 4)
+            table.setObjectName("auditTable")
+            table.setAccessibleName("Audit log entries")
             table.setHorizontalHeaderLabels(["Time", "Event", "Skill", "Decision"])
+            table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            table.setAlternatingRowColors(True)
+            table.setWordWrap(False)
             for row_data in container.audit.query():
                 row = table.rowCount()
                 table.insertRow(row)
@@ -1465,6 +1948,10 @@ def run_desktop(container: Container) -> int:
                     ]
                 ):
                     table.setItem(row, column, QTableWidgetItem(str(value or "")))
+            header = table.horizontalHeader()
+            for column in range(table.columnCount()):
+                header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+            self.audit_table = table
             layout.addWidget(table)
             return page
 
@@ -1522,6 +2009,24 @@ def run_desktop(container: Container) -> int:
                 container.settings.voice_activation_mode
             )
             self.setting_voice_activation_mode.setCurrentIndex(max(0, selected))
+            self.setting_wake_word_enabled = QCheckBox()
+            self.setting_wake_word_enabled.setChecked(container.settings.wake_word_enabled)
+            self.setting_wake_word_enabled_label = QLabel("Enable model wake word")
+            self.setting_wake_word_model = QLineEdit(str(container.settings.wake_word_model or ""))
+            self.setting_wake_word_model.setPlaceholderText("Select an openWakeWord ONNX model")
+            self.setting_wake_word_model_label = QLabel("Wake-word ONNX model")
+            wake_word_model_row = QWidget()
+            wake_word_model_layout = QHBoxLayout(wake_word_model_row)
+            wake_word_model_layout.setContentsMargins(0, 0, 0, 0)
+            wake_word_model_layout.addWidget(self.setting_wake_word_model, 1)
+            wake_word_browse = QPushButton("Browse")
+            wake_word_browse.clicked.connect(self._select_wake_word_model)
+            wake_word_model_layout.addWidget(wake_word_browse)
+            self.setting_wake_word_model_row = wake_word_model_row
+            self.setting_wake_word_threshold = QLineEdit(
+                str(container.settings.wake_word_threshold)
+            )
+            self.setting_wake_word_threshold_label = QLabel("Wake-word sensitivity threshold")
             self.setting_voice_keyword_enabled = QCheckBox()
             self.setting_voice_keyword_enabled.setChecked(
                 container.settings.voice_activation_keyword_enabled
@@ -1596,6 +2101,15 @@ def run_desktop(container: Container) -> int:
             form.addRow("Speech mode", self.setting_speech)
             form.addRow("Voice activation", self.setting_voice_activation_mode)
             form.addRow(
+                self.setting_wake_word_enabled_label,
+                self.setting_wake_word_enabled,
+            )
+            form.addRow(self.setting_wake_word_model_label, self.setting_wake_word_model_row)
+            form.addRow(
+                self.setting_wake_word_threshold_label,
+                self.setting_wake_word_threshold,
+            )
+            form.addRow(
                 self.setting_voice_keyword_enabled_label,
                 self.setting_voice_keyword_enabled,
             )
@@ -1625,6 +2139,9 @@ def run_desktop(container: Container) -> int:
             )
             self.setting_voice_activation_mode.currentIndexChanged.connect(
                 lambda _index: self._update_voice_settings_visibility()
+            )
+            self.setting_wake_word_enabled.toggled.connect(
+                lambda _checked: self._update_voice_settings_visibility()
             )
             self.setting_voice_keyword_enabled.toggled.connect(
                 lambda _checked: self._update_voice_settings_visibility()
@@ -1657,8 +2174,31 @@ def run_desktop(container: Container) -> int:
             self.setting_voice_clap_threshold_label.setVisible(clap_active)
             self.setting_voice_clap_threshold.setVisible(clap_active)
 
+            wake_word_active = self.setting_wake_word_enabled.isChecked()
+            self.setting_wake_word_model_label.setVisible(wake_word_active)
+            self.setting_wake_word_model_row.setVisible(wake_word_active)
+            self.setting_wake_word_threshold_label.setVisible(wake_word_active)
+            self.setting_wake_word_threshold.setVisible(wake_word_active)
+
+        def _select_wake_word_model(self) -> None:
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Select Wake-word ONNX Model",
+                str(container.settings.wake_word_model or container.settings.data_dir),
+                "ONNX models (*.onnx)",
+            )
+            if path:
+                self.setting_wake_word_model.setText(path)
+
         def _save_settings(self) -> None:
             try:
+                wake_word_text = self.setting_wake_word_model.text().strip()
+                wake_word_model = Path(wake_word_text).expanduser() if wake_word_text else None
+                if self.setting_wake_word_enabled.isChecked():
+                    if wake_word_model is None or not wake_word_model.is_file():
+                        raise ValueError("Select an existing wake-word ONNX model file")
+                    if wake_word_model.suffix.casefold() != ".onnx":
+                        raise ValueError("Wake-word model must be an .onnx file")
                 confirmation_overrides = {
                     key: checkbox.isChecked()
                     for key, default, checkbox in self.setting_confirmation_prompt_rows
@@ -1677,6 +2217,9 @@ def run_desktop(container: Container) -> int:
                     "piper_model": self.setting_piper_model.text().strip() or None,
                     "speech_mode": self.setting_speech.currentText(),
                     "voice_activation_mode": (self.setting_voice_activation_mode.currentData()),
+                    "wake_word_enabled": self.setting_wake_word_enabled.isChecked(),
+                    "wake_word_model": wake_word_model,
+                    "wake_word_threshold": float(self.setting_wake_word_threshold.text().strip()),
                     "voice_activation_keyword_enabled": (
                         self.setting_voice_keyword_enabled.isChecked()
                     ),
@@ -1702,17 +2245,7 @@ def run_desktop(container: Container) -> int:
             except Exception as error:
                 QMessageBox.critical(self, "Invalid Settings", str(error))
                 return
-            persisted = validated.model_dump(
-                mode="json",
-                exclude={
-                    "data_dir",
-                    "database_name",
-                    "profile",
-                    "trusted_model_keys",
-                    "trusted_skill_keys",
-                },
-            )
-            SettingsStore(container.database).set("application_settings", persisted)
+            self._persist_application_settings(validated)
             vault = SecretVault(validated.data_dir / "secrets")
             for name, field in (
                 ("openai", self.setting_openai_key),
@@ -1723,7 +2256,6 @@ def run_desktop(container: Container) -> int:
                     vault.set(name, field.text())
                     field.clear()
                     field.setPlaceholderText("Stored; enter a new key to replace")
-            container.settings = validated
             container.orchestrator.speech_mode = validated.speech_mode
             container.orchestrator.response_detail = validated.response_detail
             container.orchestrator.show_reasoning_steps = validated.show_reasoning_steps
@@ -1735,11 +2267,17 @@ def run_desktop(container: Container) -> int:
             container.audio_capture.clap_detector.threshold = (
                 validated.voice_activation_clap_threshold
             )
+            compact_mode_index = self.compact_panel.activation_mode.findData(
+                validated.voice_activation_mode
+            )
+            self.compact_panel.activation_mode.blockSignals(True)
+            self.compact_panel.activation_mode.setCurrentIndex(max(0, compact_mode_index))
+            self.compact_panel.activation_mode.blockSignals(False)
             self._start_passive_voice()
             QMessageBox.information(
                 self,
                 "Settings Saved",
-                "Settings were saved. Model, device, and global hotkey changes "
+                "Settings were saved. Model, wake-word, device, and global hotkey changes "
                 "take full effect after restart.",
             )
 
@@ -1796,7 +2334,7 @@ def run_desktop(container: Container) -> int:
             controls.addWidget(add)
             controls.addWidget(delete)
             layout.addWidget(
-                QLabel(
+                self._info_label(
                     "Macro steps use registered skill IDs and JSON arguments. "
                     "Every step keeps its own permissions and validation."
                 )
@@ -2011,10 +2549,7 @@ def run_desktop(container: Container) -> int:
             self.memory_table.setHorizontalHeaderLabels(
                 ["Status", "Type", "Key", "Memory", "Source", "Confidence"]
             )
-            self.memory_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-            self.memory_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-            self.memory_table.setAlternatingRowColors(True)
-            self.memory_table.horizontalHeader().setStretchLastSection(True)
+            self._configure_data_table(self.memory_table)
             self._reload_memories()
             controls = QHBoxLayout()
             refresh = QPushButton("Refresh")
@@ -2046,7 +2581,7 @@ def run_desktop(container: Container) -> int:
                     f"{item.confidence:.2f}",
                 ]
                 for column, field in enumerate(fields):
-                    table_item = QTableWidgetItem(field)
+                    table_item = self._table_item(field)
                     if column == 0:
                         table_item.setData(Qt.ItemDataRole.UserRole, item.id)
                     self.memory_table.setItem(row, column, table_item)
@@ -2386,6 +2921,18 @@ def run_desktop(container: Container) -> int:
             if not text:
                 self.transcript.setFocus()
                 return
+            self._run_text_command(text)
+
+        def _run_compact_command(self, text: str) -> None:
+            if self._run_text_command(text):
+                self.compact_panel.composer.clear()
+
+        def _run_text_command(self, text: str) -> bool:
+            text = text.strip()
+            if not text or self._pipeline_is_busy() or self._voice_prompt_active:
+                return False
+            self.transcript.setPlainText(text)
+            self.compact_panel.set_request(text)
             self.activity_log.clear()
             self._activity_started = time.perf_counter()
             self._set_pipeline_state(PipelineState.THINKING, "Interpreting your request")
@@ -2396,6 +2943,7 @@ def run_desktop(container: Container) -> int:
             worker.finished.connect(lambda: self._workers.remove(worker))
             self._workers.append(worker)
             worker.start()
+            return True
 
         def _show_result(self, payload: Any) -> None:
             response, outcome = payload
@@ -2559,6 +3107,7 @@ def run_desktop(container: Container) -> int:
             if outcome.registration_requests:
                 message = "The command still needs an application registered."
                 self.response.setPlainText(message)
+                self.compact_panel.set_response(message)
                 self._print_to_terminal(message)
                 self._set_response_type(ResponseType.CLARIFICATION)
                 self._set_pipeline_state(
@@ -2569,6 +3118,7 @@ def run_desktop(container: Container) -> int:
             elif outcome.permission_requests:
                 message = "The command still needs permission for another capability."
                 self.response.setPlainText(message)
+                self.compact_panel.set_response(message)
                 self._print_to_terminal(message)
                 self._set_response_type(ResponseType.PERMISSION)
                 self._set_pipeline_state(
@@ -2662,6 +3212,7 @@ def run_desktop(container: Container) -> int:
 
         def _display_response(self, response: Any) -> None:
             self.response.setPlainText(response.display_text)
+            self.compact_panel.set_response(response.display_text)
             error = response.response_type == ResponseType.ERROR or response.severity == "error"
             self._print_to_terminal(response.display_text, error=error)
             self._set_response_type(response.response_type)
@@ -2681,13 +3232,19 @@ def run_desktop(container: Container) -> int:
                 ResponseType.STATUS: "Status",
                 ResponseType.ERROR: "Error",
             }
-            self.response_type.setText(labels[response_type].upper())
+            label = labels[response_type].upper()
+            self.response_type.setText(label)
+            self.compact_panel.set_response_type(label)
 
         def _show_error(self, error: str) -> None:
             self._print_to_terminal(f"Assistant error: {error}", error=True)
+            message = f"Assistant error: {error}"
+            self.response.setPlainText(message)
+            self.compact_panel.set_response(message)
             self._set_response_type(ResponseType.ERROR)
             self._set_pipeline_state(PipelineState.ERROR, error)
-            QMessageBox.critical(self, "Assistant Error", error)
+            if self.isVisible():
+                QMessageBox.critical(self, "Assistant Error", error)
 
         def _show_cancelled(self) -> None:
             if self._passive_voice_worker and self._passive_voice_worker.isRunning():
@@ -2708,6 +3265,17 @@ def run_desktop(container: Container) -> int:
             worker.start()
 
         def closeEvent(self, event) -> None:
+            self._save_current_geometry()
+            self._persist_window_state()
+            event.ignore()
+            self.hide()
+
+        def shutdown(self) -> None:
+            if self._shutdown_started:
+                return
+            self._shutdown_started = True
+            self._save_current_geometry()
+            self._persist_window_state()
             container.events.remove_listener(self.hotkey_bridge.pipeline_event.emit)
             try:
                 import keyboard
@@ -2716,13 +3284,16 @@ def run_desktop(container: Container) -> int:
                     keyboard.remove_hotkey(hotkey)
             except Exception:
                 pass
+            self._hotkeys.clear()
             self._stop_passive_voice()
             if container.wakeword:
                 asyncio.run(container.wakeword.cancel())
-            event.accept()
+            with suppress(Exception):
+                asyncio.run(controller.cancel())
 
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("Local Assistant")
+    app.setQuitOnLastWindowClosed(False)
     app.setStyle("Fusion")
     app.setStyleSheet(
         """
@@ -2769,6 +3340,9 @@ def run_desktop(container: Container) -> int:
         #assistantPage {
             background: #0c1626;
         }
+        #compactAssistantPage {
+            background: #0c1626;
+        }
         #eyebrow, #sectionLabel {
             color: #6f92c9;
             font-size: 8pt;
@@ -2792,32 +3366,37 @@ def run_desktop(container: Container) -> int:
         #statusCard {
             background: #0f2032;
         }
-        #statusDot {
+        #statusDot, #compactStatusDot {
             background: #41d6a3;
             border-radius: 5px;
             margin-right: 4px;
         }
-        #statusDot[state="thinking"], #statusDot[state="transcribing"] {
+        #statusDot[state="thinking"], #statusDot[state="transcribing"],
+        #compactStatusDot[state="thinking"], #compactStatusDot[state="transcribing"] {
             background: #73a5ff;
         }
-        #statusDot[state="executing"], #statusDot[state="speaking"] {
+        #statusDot[state="executing"], #statusDot[state="speaking"],
+        #compactStatusDot[state="executing"], #compactStatusDot[state="speaking"] {
             background: #b996ff;
         }
-        #statusDot[state="listening"] {
+        #statusDot[state="listening"], #compactStatusDot[state="listening"] {
             background: #4fd7ef;
         }
-        #statusDot[state="awaiting_approval"] {
+        #statusDot[state="awaiting_approval"],
+        #compactStatusDot[state="awaiting_approval"] {
             background: #ffbf69;
         }
-        #statusDot[state="error"], #statusDot[state="cancelled"] {
+        #statusDot[state="error"], #statusDot[state="cancelled"],
+        #compactStatusDot[state="error"], #compactStatusDot[state="cancelled"] {
             background: #ff6f82;
         }
-        #assistantStatus {
+        #assistantStatus, #compactStatus {
             color: #f7fbff;
             font-size: 12pt;
             font-weight: 650;
         }
-        #statusDetail, #statusTranscript, #elapsedStatus, #activityHint {
+        #statusDetail, #statusTranscript, #elapsedStatus, #activityHint,
+        #compactStatusDetail, #compactTranscript {
             color: #8496ad;
         }
         #statusTranscript {
@@ -2828,21 +3407,21 @@ def run_desktop(container: Container) -> int:
             font-family: "Consolas";
             font-size: 9pt;
         }
-        #pipelineProgress {
+        #pipelineProgress, #compactPipelineProgress {
             border: 0;
             background: #1c2b40;
             border-radius: 2px;
         }
-        #pipelineProgress::chunk {
+        #pipelineProgress::chunk, #compactPipelineProgress::chunk {
             background: #5a8cff;
             border-radius: 2px;
         }
-        #micLevel {
+        #micLevel, #compactMicLevel {
             border: 0;
             background: #17263a;
             border-radius: 4px;
         }
-        #micLevel::chunk {
+        #micLevel::chunk, #compactMicLevel::chunk {
             background: #41d6a3;
             border-radius: 4px;
         }
@@ -2862,12 +3441,12 @@ def run_desktop(container: Container) -> int:
         QTextEdit:focus, QLineEdit:focus, QComboBox:focus, QListWidget:focus {
             border: 1px solid #5a8cff;
         }
-        #commandInput {
+        #commandInput, #compactCommandInput {
             background: #0b1627;
             font-size: 11pt;
             padding: 14px;
         }
-        #assistantResponse {
+        #assistantResponse, #compactAssistantResponse {
             background: #0d192a;
             border: 0;
             color: #e8f0fa;
@@ -2882,6 +3461,33 @@ def run_desktop(container: Container) -> int:
             padding: 4px 9px;
             font-size: 7.5pt;
             font-weight: 700;
+        }
+        #compactLatestRequest {
+            color: #cbd7e6;
+            background: #101d30;
+            border: 1px solid #1e304a;
+            border-radius: 8px;
+            padding: 8px;
+        }
+        #compactHeaderButton {
+            padding: 6px 10px;
+            font-size: 8.5pt;
+        }
+        #compactActivationMode {
+            padding: 6px 8px;
+        }
+        #wakewordBadge {
+            color: #8496ad;
+            background: #142238;
+            border: 1px solid #263952;
+            border-radius: 8px;
+            padding: 5px 8px;
+            font-size: 7pt;
+            font-weight: 700;
+        }
+        #wakewordBadge[active="true"] {
+            color: #72e2bd;
+            border-color: #2b6e5a;
         }
         #activityLog {
             background: transparent;
@@ -2975,19 +3581,30 @@ def run_desktop(container: Container) -> int:
         """
     )
     window = MainWindow()
+    app.aboutToQuit.connect(window.shutdown)
     tray = QSystemTrayIcon(QIcon(), app)
     menu = QMenu()
-    show_action = QAction("Show", app)
-    show_action.triggered.connect(window.show)
+    show_action = QAction("Show Companion", app)
+    show_action.triggered.connect(window.show_from_tray)
+    full_action = QAction("Open Full Assistant", app)
+    full_action.triggered.connect(window.open_full_from_tray)
     cancel_action = QAction("Emergency Stop", app)
     cancel_action.triggered.connect(window.cancel)
     quit_action = QAction("Quit", app)
     quit_action.triggered.connect(app.quit)
     menu.addAction(show_action)
+    menu.addAction(full_action)
     menu.addAction(cancel_action)
     menu.addSeparator()
     menu.addAction(quit_action)
     tray.setContextMenu(menu)
+    tray.activated.connect(
+        lambda reason: (
+            window.show_from_tray()
+            if reason == QSystemTrayIcon.ActivationReason.DoubleClick
+            else None
+        )
+    )
     tray.setToolTip(
         "Local Assistant - voice activation "
         + ("ON" if container.settings.voice_activation_mode != "hotkey" else "off")

@@ -111,9 +111,11 @@ class MemorySkill(Skill):
             )
             memories = [_memory_dict(item) for item in values]
             summary = f"{len(memories)} enabled memories."
+        display = _memory_display(args.operation, summary, memories)
         return SkillResult(
             status=ResultStatus.COMPLETED,
             summary=summary,
+            display_text=display,
             data=MemoryOutput(memories=memories).model_dump(),
             sensitive=True,
         )
@@ -137,6 +139,17 @@ def _memory_dict(item) -> dict:
         "confidence": item.confidence,
         "enabled": item.enabled,
     }
+
+
+def _memory_display(operation: str, summary: str, memories: list[dict]) -> str:
+    if operation not in {"list", "inspect"}:
+        return summary
+    if not memories:
+        return "No enabled memories matched."
+    return summary + "\nEnabled memories:\n" + "\n".join(
+        f"- {item['id']} [{item['type']}] {item['key']}: {item['value']}"
+        for item in memories
+    )
 
 
 def _looks_sensitive(value: str) -> bool:

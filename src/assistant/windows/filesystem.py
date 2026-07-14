@@ -21,6 +21,10 @@ class LocalFileSystemAdapter:
     async def copy(self, source: Path, destination: Path) -> Path:
         return Path(shutil.copy2(source, destination))
 
+    async def create_directory(self, path: Path) -> Path:
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     async def create_text_file(self, path: Path, content: str) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")

@@ -56,6 +56,7 @@ class Settings(BaseModel):
     automatic_gain_control: bool = True
     wake_word_enabled: bool = False
     wake_word_model: Path | None = None
+    wake_word_threshold: float = Field(default=0.5, gt=0, le=1)
     confirmation_overrides: dict[str, bool] = Field(default_factory=dict)
     trusted_model_keys: dict[str, str] = Field(default_factory=dict)
     trusted_skill_keys: dict[str, str] = Field(default_factory=dict)

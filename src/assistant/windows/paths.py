@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 ASSISTANT_FOLDER_TOKEN = "${assistant_folder}"
@@ -47,6 +48,9 @@ def resolve_user_path(value: str | Path) -> Path:
         if folded.startswith(token + "/") or folded.startswith(token + "\\"):
             suffix = raw[len(token) :].lstrip("/\\")
             return (home / folder / suffix).resolve()
+
+    if unsupported := re.search(r"\$\{[^}]+\}", raw):
+        raise ValueError(f"unsupported path placeholder: {unsupported.group(0)}")
 
     normalized = raw.replace("\\", "/")
     first, _, remainder = normalized.partition("/")

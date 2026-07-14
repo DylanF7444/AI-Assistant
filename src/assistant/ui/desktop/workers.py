@@ -65,6 +65,9 @@ class PassiveVoiceWorker(QThread):
         )
         if self._stop_requested or transcript is None:
             return
+        spoken = transcript.normalized_text or transcript.raw_text
+        if await self.container.orchestrator.consume_persistent_voice_interrupt(spoken):
+            return
         self.complete.emit(await self.container.orchestrator.handle_transcript(transcript))
 
     async def _listen_for_activation(self) -> None:

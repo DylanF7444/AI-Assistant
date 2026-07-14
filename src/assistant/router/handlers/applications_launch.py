@@ -33,18 +33,6 @@ class ApplicationHandler:
                     source="rule",
                 )
             )
-        if re.fullmatch(
-            r"(?:open|launch|start) (?:a |an |the )?(?:new |blank )?(?:browser )?tab",
-            routed,
-        ):
-            return RouteResult(
-                Intent(
-                    name="windows.launcher",
-                    arguments={"application": "browser"},
-                    confidence=0.94,
-                    source="rule",
-                )
-            )
         if context_navigation := router._route_context_navigation(routed):
             return RouteResult(context_navigation)
         if match := re.fullmatch(
@@ -110,6 +98,7 @@ class ApplicationHandler:
         if match := re.fullmatch(r"(?:open|launch|start) (.+)", routed):
             raw_target = match.group(1)
             application, follow_up = router._split_launch_target(raw_target)
+            application = _normalize_browser_reference(application)
             if not follow_up and (fallback_url := router._website_fallback_url(application)):
                 return RouteResult(
                     Intent(
@@ -204,18 +193,16 @@ class ApplicationHandler:
                     source="rule",
                 )
             )
-        if match := re.fullmatch(
-            r"(?:find|search for) (?:my |the )?(.+?) (?:in|on) (?:my |the )?(.+)",
-            routed,
-        ):
-            return RouteResult(
-                Intent(
-                    name="windows.file_search",
-                    arguments={"query": match.group(1), "root": match.group(2), "limit": 20},
-                    confidence=0.88,
-                    source="rule",
-                    ambiguous=True,
-                    ambiguity_reasons=("filesystem path must be resolved and approved",),
-                )
-            )
         return None
+
+
+def _normalize_browser_reference(application: str) -> str:
+    """Canonicalize relational browser wording without naming a specific browser."""
+    value = application.strip()
+    if re.fullmatch(
+        r"(?:(?:my|the)\s+)?(?:(?:default|preferred|usual|regular)\s+)?browser",
+        value,
+        flags=re.IGNORECASE,
+    ):
+        return "browser"
+    return value

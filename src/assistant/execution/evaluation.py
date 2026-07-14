@@ -92,6 +92,12 @@ class CallEvaluator:
                     ApplicationRegistrationRequest(call=call, application=exc.application),
                 ),
             )
+        except (KeyError, ValidationError, ValueError) as exc:
+            return CallEvaluation(
+                call=call,
+                skill=skill,
+                invalid_error=SkillError(code="invalid_call", message=str(exc)),
+            )
 
         decisions = tuple(
             self.permissions.authorize(
@@ -122,10 +128,17 @@ class CallEvaluator:
                 policy_denied=policy_denied,
             )
 
-        risk = skill.risk_for(call)
-        preview = None
-        if include_preview and self.requires_confirmation(call, risk):
-            preview = await skill.preview(call)
+        try:
+            risk = skill.risk_for(call)
+            preview = None
+            if include_preview and self.requires_confirmation(call, risk):
+                preview = await skill.preview(call)
+        except (KeyError, ValidationError, ValueError) as exc:
+            return CallEvaluation(
+                call=call,
+                skill=skill,
+                invalid_error=SkillError(code="invalid_call", message=str(exc)),
+            )
         return CallEvaluation(
             call=call,
             skill=skill,

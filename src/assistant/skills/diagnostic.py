@@ -84,12 +84,18 @@ class DiagnosticSkill(Skill):
             guidance=guidance,
         )
         healthy = not guidance
+        summary = (
+            "All configured components are healthy."
+            if healthy
+            else f"Diagnostics found {len(guidance)} item(s) needing attention."
+        )
         return SkillResult(
             status=ResultStatus.COMPLETED,
-            summary=(
-                "All configured components are healthy."
+            summary=summary,
+            display_text=(
+                summary
                 if healthy
-                else f"Diagnostics found {len(guidance)} item(s) needing attention."
+                else summary + "\n" + "\n".join(f"- {item}" for item in guidance)
             ),
             data=output.model_dump(),
         )

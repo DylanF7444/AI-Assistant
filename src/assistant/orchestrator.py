@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import sys
+import threading
 import time
 import urllib.error
 from collections import deque
@@ -13,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
+from assistant.audio.activation import is_explicit_cancel_command
 from assistant.context.providers import (
     ContextProvider,
     PermissionContextProvider,
@@ -124,11 +126,14 @@ class AssistantOrchestrator:
         self.workflow_template_indexer = workflow_template_indexer
         self.context_providers = context_providers
         self._active_correlation: UUID | None = None
+        self._request_state_lock = threading.Lock()
+        self._active_request_correlations: list[UUID] = []
         self._active_stt: STTProvider | None = None
         self.state = ConversationState()
         self.interactions = InteractionRecorder(history, self.state)
         self.file_resolver = FileReferenceResolver(self._resolve_file_placeholders)
         self.planner_flow = PlannerCoordinator()
+        self._pending_confirmation: ExecutionOutcome | None = None
 
     @property
     def _session_context(self) -> deque[dict[str, str]]:
@@ -164,6 +169,20 @@ class AssistantOrchestrator:
     def remember_file_candidates(self, paths: tuple[str, ...] | list[str]) -> None:
         self.state.remember_file_candidates(paths)
 
+    @property
+    def request_in_progress(self) -> bool:
+        with self._request_state_lock:
+            return bool(self._active_request_correlations)
+
+    async def consume_persistent_voice_interrupt(self, text: str) -> bool:
+        """Consume speech heard during a request, cancelling only on an explicit command."""
+
+        if not self.request_in_progress:
+            return False
+        if is_explicit_cancel_command(text):
+            await self.cancel()
+        return True
+
     def _remember_interaction(
         self,
         correlation_id: UUID,
@@ -196,6 +215,8 @@ class AssistantOrchestrator:
         add_session_context: bool = True,
     ) -> tuple[Response, ExecutionOutcome]:
         final_outcome = outcome or ExecutionOutcome()
+        if final_outcome.confirmation is not None:
+            self._pending_confirmation = final_outcome
         if final_outcome.result:
             self._remember_file_result(final_outcome.result)
         self._print_terminal_debug(
@@ -1111,6 +1132,16 @@ class AssistantOrchestrator:
                 invoked_by_voice=invoked_by_voice,
             )
 
+        if resolved := self._named_skill_follow_up_intent(pending, text):
+            self._pending_clarification_follow_up = None
+            return await self._handle_planner_intent(
+                correlation_id,
+                pending.original_text,
+                resolved,
+                session_id=session_id,
+                invoked_by_voice=invoked_by_voice,
+            )
+
         if resolved := self._file_search_limit_follow_up_intent(pending, text):
             self._pending_clarification_follow_up = None
             return await self._handle_planner_intent(
@@ -1128,6 +1159,29 @@ class AssistantOrchestrator:
             session_id=session_id,
             invoked_by_voice=invoked_by_voice,
         )
+
+    def _named_skill_follow_up_intent(
+        self,
+        pending: PendingClarificationFollowUp,
+        answer: str,
+    ) -> Intent | None:
+        """Honor an explicit skill choice without asking the same question again."""
+        route = self.router.route(pending.original_text)
+        if route.needs_llm or route.clarification or route.intents or route.intent is None:
+            return None
+        try:
+            manifest = self.engine.registry.get(route.intent.name).manifest
+        except KeyError:
+            return None
+        labels = {
+            manifest.display_name.casefold(),
+            manifest.skill_id.casefold().replace(".", " ").replace("_", " "),
+            manifest.skill_id.rsplit(".", 1)[-1].casefold().replace("_", " "),
+        }
+        folded = " ".join(answer.casefold().split())
+        if not any(re.search(rf"\b{re.escape(label)}\b", folded) for label in labels):
+            return None
+        return route.intent
 
     @staticmethod
     def _pending_follow_up_reset(text: str) -> tuple[str | None, str | None]:
@@ -1393,6 +1447,28 @@ class AssistantOrchestrator:
         invoked_by_voice: bool = False,
     ) -> tuple[Response, ExecutionOutcome]:
         correlation_id = uuid4()
+        with self._request_state_lock:
+            self._active_request_correlations.append(correlation_id)
+        try:
+            return await self._handle_text(
+                correlation_id,
+                text,
+                session_id=session_id,
+                invoked_by_voice=invoked_by_voice,
+            )
+        finally:
+            with self._request_state_lock:
+                if correlation_id in self._active_request_correlations:
+                    self._active_request_correlations.remove(correlation_id)
+
+    async def _handle_text(
+        self,
+        correlation_id: UUID,
+        text: str,
+        *,
+        session_id: str = "desktop",
+        invoked_by_voice: bool = False,
+    ) -> tuple[Response, ExecutionOutcome]:
         self._active_correlation = correlation_id
         await self.events.publish(
             PipelineEvent(
@@ -1527,7 +1603,7 @@ class AssistantOrchestrator:
                 invoked_by_voice=invoked_by_voice,
             )
         if intent.name == "control.cancel":
-            await self.cancel()
+            await self.cancel(exclude_correlation=correlation_id)
             response = Response(
                 display_text="Cancelled.",
                 speech_text="Cancelled.",
@@ -1545,6 +1621,87 @@ class AssistantOrchestrator:
                 response,
                 intent_name=intent.name,
                 outcome_label="cancelled",
+                invoked_by_voice=invoked_by_voice,
+            )
+        if intent.name == "control.confirm":
+            pending = self._pending_confirmation
+            if pending is None or pending.confirmation is None or pending.call is None:
+                response = Response(
+                    display_text="There is no pending action to confirm.",
+                    speech_text="There is no pending action to confirm.",
+                    response_type=ResponseType.CONTROL,
+                    severity="warning",
+                )
+                return await self._finish_interaction(
+                    correlation_id,
+                    text,
+                    response,
+                    intent_name=intent.name,
+                    outcome_label="nothing_to_confirm",
+                    invoked_by_voice=invoked_by_voice,
+                )
+            request = pending.confirmation
+            if request.requires_typed_token:
+                response = Response(
+                    display_text=(
+                        "This critical action requires the displayed confirmation token; "
+                        "use the on-screen confirmation prompt."
+                    ),
+                    speech_text=(
+                        "This critical action requires the displayed confirmation token."
+                    ),
+                    response_type=ResponseType.CONFIRMATION,
+                    severity="warning",
+                )
+                return await self._finish_interaction(
+                    correlation_id,
+                    text,
+                    response,
+                    pending,
+                    intent_name=intent.name,
+                    outcome_label="typed_token_required",
+                    invoked_by_voice=invoked_by_voice,
+                )
+            self._pending_confirmation = None
+            confirmed = ExecutionOutcome(
+                result=await self.engine.execute(
+                    pending.call,
+                    confirmation_id=request.confirmation_id,
+                ),
+                call=pending.call,
+            )
+            response = self._response_from_outcome(confirmed).model_copy(
+                update={"response_type": ResponseType.CONTROL}
+            )
+            return await self._finish_interaction(
+                correlation_id,
+                text,
+                response,
+                confirmed,
+                intent_name=intent.name,
+                outcome_label=self._outcome_label(confirmed),
+                invoked_by_voice=invoked_by_voice,
+            )
+        if intent.name == "control.deny":
+            pending = self._pending_confirmation
+            denied = bool(pending and pending.confirmation)
+            if denied:
+                assert pending is not None and pending.confirmation is not None
+                self.engine.confirmations.deny(pending.confirmation.confirmation_id)
+                self._pending_confirmation = None
+            message = "Pending action denied." if denied else "There is no pending action to deny."
+            response = Response(
+                display_text=message,
+                speech_text=message,
+                response_type=ResponseType.CONTROL,
+                severity="warning",
+            )
+            return await self._finish_interaction(
+                correlation_id,
+                text,
+                response,
+                intent_name=intent.name,
+                outcome_label="denied" if denied else "nothing_to_deny",
                 invoked_by_voice=invoked_by_voice,
             )
         if intent.name == "control.undo":
@@ -2415,19 +2572,31 @@ class AssistantOrchestrator:
             return await self._finish(response, ExecutionOutcome(), invoked_by_voice=True)
         return await self.handle_transcript(final)
 
-    async def cancel(self) -> None:
+    async def cancel(self, *, exclude_correlation: UUID | None = None) -> None:
         # Provider cancellation is coordinated by the desktop/bootstrap layer.
-        await self.engine.cancel(self._active_correlation)
+        self._pending_confirmation = None
+        with self._request_state_lock:
+            active_requests = tuple(self._active_request_correlations)
+        request_correlation = next(
+            (
+                correlation_id
+                for correlation_id in reversed(active_requests)
+                if correlation_id != exclude_correlation
+            ),
+            None,
+        )
+        cancellation_correlation = request_correlation or self._active_correlation
+        await self.engine.cancel(cancellation_correlation)
         if self._active_stt:
             await self._active_stt.cancel()
         if self.planner:
             await self.planner.cancel()
         if self.tts:
             await self.tts.cancel()
-        if self._active_correlation:
+        if cancellation_correlation:
             await self.events.publish(
                 PipelineEvent(
-                    correlation_id=self._active_correlation,
+                    correlation_id=cancellation_correlation,
                     state=PipelineState.CANCELLED,
                     message="Cancelled",
                 )

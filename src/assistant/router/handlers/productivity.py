@@ -82,9 +82,14 @@ class ProductivityHandler:
                         source="rule",
                     )
                 )
+        conversion_text = re.sub(
+            r"\bdegrees?\s+(?=(?:celsius|fahrenheit)\b)",
+            "",
+            routed,
+        )
         if match := re.fullmatch(
             r"convert (.+?) (kilometers?|miles?|meters?|feet|kilograms?|pounds?|liters?|gallons?|celsius|fahrenheit) to (kilometers?|miles?|meters?|feet|kilograms?|pounds?|liters?|gallons?|celsius|fahrenheit)",
-            routed,
+            conversion_text,
         ):
             try:
                 value = spoken_number(match.group(1))

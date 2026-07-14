@@ -14,6 +14,26 @@ and execution steps under each on-screen response. Register applications by
 friendly spoken name before asking the assistant to launch them; arbitrary
 executable paths are not accepted from transcripts or models.
 
+## Compact companion
+
+The assistant opens as a compact companion on first launch and remembers whether
+the compact or full interface was last used. Compact mode stays above other
+windows by default; use **Pinned** to turn that behavior off and **Expand** to
+open the full settings and management interface. It shows the latest request,
+assistant response, live voice transcript, microphone level, and pipeline status.
+
+Type a request and press Enter to send it, or press Shift+Enter for a new line.
+The voice menu switches immediately between hotkey-only, keyword/clap, and
+persistent listening. Model-based wake-word monitoring is configured separately
+in full Settings by selecting a local openWakeWord ONNX model and sensitivity.
+Wake-word, microphone, model, and global-hotkey changes require an application
+restart.
+
+Closing the window hides it to the system tray while voice activation and global
+hotkeys continue running. Double-click the tray icon or choose **Show Companion**
+to restore it. Use **Open Full Assistant** for the management interface,
+**Emergency Stop** to cancel active work, and **Quit** to stop the assistant.
+
 ## Local models
 
 - STT: install a faster-whisper model locally or configure a whisper.cpp
@@ -37,12 +57,15 @@ critical actions also show the exact proposed action immediately before
 execution. A confirmation is single-use, expires, and cannot approve changed
 arguments.
 
-Use the cancel hotkey or tray Cancel command to stop capture, transcription,
+Use the cancel hotkey or tray Emergency Stop command to stop capture, transcription,
 planning, speech, plans, and active jobs. File deletion uses the Recycle Bin
 where Windows supports it. Dry-run previews are available for file operations.
 File search results are numbered; after searching, use commands such as
 `select 1`, `open it`, `copy it to Desktop`, or `delete it` to act on the
 selected result with exact-path permissions and confirmation.
+Named subfolders can be searched relative to a known folder, for example
+`find my resume in the Assistant folder on my Desktop`. Folder organization
+can use explicit extensions or the built-in image and text-file categories.
 
 Settings also includes file access policy lists. Read and write/delete
 blacklists block matching paths even when a permission grant exists; whitelists
@@ -56,6 +79,9 @@ apply to that browser: `open a new tab`, `close this tab`, `reopen closed tab`,
 `next tab`, `previous tab`, `go back`, `go forward`, `refresh the page`, and
 `focus the address bar`. Named browser commands such as `open a brave tab`
 still launch the registered browser directly.
+Relational requests such as `open my browser` use an enabled browser preference
+when it names an already registered application; memory never introduces an
+unregistered executable path.
 
 ## Microphone and privacy
 
@@ -85,7 +111,11 @@ API invocations require the `network` permission; Codex invocations require
 Install only signed skill packages from trusted publishers. Updates that add a
 capability require renewed review. The Skills tab supports enable, disable,
 update, uninstall, and health checks. Macros can compose registered skills but
-do not bypass any step's validation, permission, confirmation, or audit.
+must already exist under their exact saved name and do not bypass any step's
+validation, permission, confirmation, or audit. Open-ended requests are
+interpreted by the local planner before skill selection. Extension-based file
+organization previews every matched move and requires folder-scoped read/write
+permissions and confirmation before changing files.
 See `docs/FEATURES.md` for the current built-in feature catalog and project
 status.
 

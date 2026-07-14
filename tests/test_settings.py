@@ -80,3 +80,30 @@ def test_alias_store_batch_registers_applications(settings):
 
     assert (added, updated) == (0, 1)
     assert store.get("application", "notepad") == r"C:\Windows\System32\notepad.exe"
+
+
+def test_wake_word_provider_uses_selected_microphone_and_threshold(settings, tmp_path, monkeypatch):
+    import assistant.bootstrap as bootstrap
+
+    model = tmp_path / "wake.onnx"
+    model.write_bytes(b"model")
+    captured = {}
+
+    class FakeWakeWordProvider:
+        def __init__(self, model_path, *, threshold, device):
+            captured.update(model_path=model_path, threshold=threshold, device=device)
+
+    monkeypatch.setattr(bootstrap, "OpenWakeWordProvider", FakeWakeWordProvider)
+    configured = settings.model_copy(
+        update={
+            "wake_word_enabled": True,
+            "wake_word_model": model,
+            "wake_word_threshold": 0.72,
+            "audio_input_device": 4,
+        }
+    )
+
+    services = bootstrap._build_audio_services(configured)
+
+    assert services.wakeword is not None
+    assert captured == {"model_path": model, "threshold": 0.72, "device": 4}

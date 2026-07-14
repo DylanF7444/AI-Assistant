@@ -85,6 +85,8 @@ async def test_memory_skill_requires_explicit_remember_and_can_list_and_forget(t
     )
     memory_id = listed.data["memories"][0]["id"]
     assert listed.data["memories"][0]["value"] == "User prefers Brave for browsing."
+    assert "Enabled memories:" in listed.display_text
+    assert "browser: User prefers Brave for browsing." in listed.display_text
 
     forgotten = await skill.execute(
         _call({"operation": "forget", "memory_id": memory_id}),

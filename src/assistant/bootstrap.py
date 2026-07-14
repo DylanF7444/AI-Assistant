@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import re
 from dataclasses import dataclass
 
 from assistant.audio.capture import AudioCapture
@@ -134,6 +135,57 @@ def _settings_with_persisted_values(settings: Settings, database: Database) -> S
     )
 
 
+def _is_browser_reference(name: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"(?:(?:my|the)\s+)?(?:(?:default|preferred|usual|regular)\s+)?browser",
+            name.strip(),
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _preferred_registered_browser(
+    aliases: AliasStore,
+    memory_store: MemoryStore,
+) -> str | None:
+    """Resolve a browser preference only to an already registered application.
+
+    Memories can choose among approved application aliases, but cannot introduce
+    or execute an unregistered path.
+    """
+    registered = aliases.all("application")
+    if not registered:
+        return None
+    browser_memories = [
+        item
+        for item in memory_store.list(type="preference")
+        if "browser" in item.key.casefold()
+        or re.search(r"\b(?:browser|browsing)\b", item.value, flags=re.IGNORECASE)
+    ]
+    for item in sorted(browser_memories, key=lambda value: (-value.confidence, value.id)):
+        for alias in sorted(registered, key=len, reverse=True):
+            if re.search(
+                rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])",
+                item.value,
+                flags=re.IGNORECASE,
+            ):
+                return registered[alias]
+        memory_terms = set(re.findall(r"[a-z0-9]+", item.value.casefold()))
+        matching_paths = {
+            path
+            for alias, path in registered.items()
+            if (
+                alias_terms := set(re.findall(r"[a-z0-9]+", alias.casefold()))
+                - {"app", "application", "browser"}
+            )
+            and alias_terms <= memory_terms
+        }
+        if len(matching_paths) == 1:
+            return matching_paths.pop()
+    return None
+
+
 def _register_core_skills(
     registry: SkillRegistry, file_access_policy: FileAccessPolicyStore
 ) -> None:
@@ -146,6 +198,7 @@ def _register_core_skills(
 def _register_windows_skills(
     registry: SkillRegistry,
     aliases: AliasStore,
+    memory_store: MemoryStore,
 ) -> None:
     filesystem = LocalFileSystemAdapter()
     applications = WindowsApplicationAdapter()
@@ -154,7 +207,10 @@ def _register_windows_skills(
         registered = aliases.get("application", name)
         if registered:
             return registered
-        if name.casefold().strip() in {"browser", "default browser"}:
+        if _is_browser_reference(name):
+            preferred = _preferred_registered_browser(aliases, memory_store)
+            if preferred:
+                return preferred
             return applications.default_browser_path()
         return None
 
@@ -304,7 +360,7 @@ def _build_registry(
         trusted_signing_keys=_decode_trusted_keys(settings.trusted_skill_keys),
     )
     _register_core_skills(registry, storage.file_access_policy)
-    _register_windows_skills(registry, storage.aliases)
+    _register_windows_skills(registry, storage.aliases, storage.memory_store)
     _register_productivity_skills(registry, database, storage.memory_store)
     _register_network_skills(registry, settings, storage.secret_vault)
     macro_store = MacroStore(database)
@@ -352,7 +408,11 @@ def _build_audio_services(settings: Settings) -> _AudioServices:
     )
     stt = FasterWhisperProvider(settings.stt_model, settings.stt_device)
     wakeword = (
-        OpenWakeWordProvider(settings.wake_word_model)
+        OpenWakeWordProvider(
+            settings.wake_word_model,
+            threshold=settings.wake_word_threshold,
+            device=settings.audio_input_device,
+        )
         if settings.wake_word_enabled
         and settings.wake_word_model
         and settings.wake_word_model.is_file()

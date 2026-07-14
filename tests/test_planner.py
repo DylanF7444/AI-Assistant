@@ -1,4 +1,5 @@
 import pytest
+from pydantic import create_model
 
 from assistant.context.snapshot import ContextSnapshot
 from assistant.language.planner import InvalidPlannerResponse, LocalPlanner, SkillRetriever
@@ -10,6 +11,7 @@ from assistant.skills.builtin import (
     FileSearchSkill,
     LauncherSkill,
     TimerSkill,
+    manifest,
 )
 from assistant.skills.windows import (
     ApplicationWindowSkill,
@@ -236,6 +238,27 @@ async def test_planner_normalizes_launcher_source_argument():
 
 
 @pytest.mark.asyncio
+async def test_planner_normalizes_launcher_executable_to_application_alias():
+    launcher = LauncherSkill(FakeApplications(), resolver=lambda name: "unused.exe")
+    provider = FakeProvider(
+        {
+            "disposition": "skill",
+            "skill_id": "windows.launcher",
+            "arguments": {"application": "notepad.exe"},
+            "answer": "Opened Notepad.",
+            "confidence": 1,
+            "clarification": None,
+        }
+    )
+    planner = LocalPlanner(provider, SkillRetriever((launcher.manifest,)))
+
+    intent = await planner.plan("open a blank notepad")
+
+    assert intent.name == "windows.launcher"
+    assert intent.arguments == {"application": "notepad"}
+
+
+@pytest.mark.asyncio
 async def test_planner_normalizes_file_search_desktop_and_limit():
     search = FileSearchSkill(FakeFileSystem())
     provider = FakeProvider(
@@ -290,6 +313,58 @@ async def test_planner_normalizes_window_process_name_punctuation():
     assert intent.arguments == {
         "operation": "close",
         "process_name": "RobloxPlayerBeta.exe",
+    }
+
+
+@pytest.mark.asyncio
+async def test_planner_retries_when_schema_valid_skill_does_not_match_goal():
+    window = ApplicationWindowSkill(FakeApplications())
+    files = FileOperationSkill(FakeFileSystem())
+    provider = FakeProvider(
+        [
+            {
+                "disposition": "skill",
+                "skill_id": "windows.application_window",
+                "arguments": {
+                    "operation": "move_to_monitor",
+                    "process_name": "assistant.exe",
+                    "monitor": 2,
+                },
+                "answer": None,
+                "confidence": 0.99,
+                "clarification": None,
+            },
+            {
+                "disposition": "skill",
+                "skill_id": "windows.file_operation",
+                "arguments": {
+                    "operation": "organize",
+                    "source": "${user_desktop}/assistant",
+                    "categories": {
+                        "Images": "images",
+                        "Text Files": "text_files",
+                    },
+                },
+                "answer": None,
+                "confidence": 0.96,
+                "clarification": None,
+            },
+        ]
+    )
+    planner = LocalPlanner(provider, SkillRetriever((window.manifest, files.manifest)))
+
+    decision = await planner.plan_decision(
+        "Separate the files in the assistant folder on my desktop into two "
+        "folders, one with images and one with text files."
+    )
+
+    assert provider.calls == 2
+    assert decision.intent is not None
+    assert decision.intent.name == "windows.file_operation"
+    assert decision.intent.arguments["operation"] == "organize"
+    assert decision.intent.arguments["categories"] == {
+        "Images": "images",
+        "Text Files": "text_files",
     }
 
 
@@ -415,6 +490,59 @@ async def test_planner_accepts_empty_reject_answer_with_reason():
 
 
 @pytest.mark.asyncio
+async def test_planner_discards_stray_skill_id_from_action_free_reject():
+    planner = LocalPlanner(
+        FakeProvider(
+            {
+                "disposition": "reject",
+                "skill_id": "windows.application_window",
+                "arguments": {},
+                "answer": "I cannot help with that request.",
+                "confidence": 0.95,
+                "clarification": None,
+            }
+        ),
+        SkillRetriever((ApplicationWindowSkill(FakeApplications()).manifest,)),
+    )
+
+    intent = await planner.plan("Explain an unsupported request")
+
+    assert intent.name == "conversation.reject"
+    assert intent.arguments["text"] == "I cannot help with that request."
+
+
+@pytest.mark.asyncio
+async def test_open_ended_file_organization_request_uses_model_interpretation():
+    question = "Which file types should go into each destination folder?"
+    provider = FakeProvider(
+        {
+            "user_goal": "Organize document files into two user-defined categories",
+            "request_type": "multi_step_goal",
+            "explicit_requests": ["separate files into Roblox and macro folders"],
+            "missing_information": ["file-type mapping for each folder"],
+            "should_ask_clarification": True,
+            "clarification_question": question,
+            "confidence": 0.94,
+        }
+    )
+    planner = LocalPlanner(provider, SkillRetriever(()))
+    request = (
+        "Seperate the files in my documents into two different folders, one with "
+        "roblox place files and one with macro files"
+    )
+
+    interpretation = await planner.interpret(
+        request,
+        context=ContextSnapshot(request_text=request, session_id="s1"),
+        retrieved=(),
+    )
+
+    assert interpretation.should_ask_clarification is True
+    assert interpretation.clarification_question == question
+    assert provider.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_planner_infers_missing_skill_id_from_valid_arguments():
     planner = LocalPlanner(
         FakeProvider(
@@ -479,6 +607,116 @@ async def test_planner_answers_when_no_skill_is_relevant():
     intent = await planner.plan("What is the capital of France?")
     assert intent.name == "conversation.answer"
     assert intent.arguments["text"].startswith("Paris")
+
+
+@pytest.mark.asyncio
+async def test_planner_repairs_promise_to_move_files_instead_of_requesting_confirmation():
+    file_operation = FileOperationSkill(FakeFileSystem())
+    invalid_promise = {
+        "disposition": "answer",
+        "skill_id": "",
+        "arguments": {
+            "operation": "move",
+            "source": "${documents_folder}/roblox_places/*.*",
+            "destination": "${documents_folder}/roblox_places",
+        },
+        "answer": (
+            "I will help you move the Roblox places files into a new folder. "
+            "After that, I'll create another folder for your macro files and move "
+            "them there. Please confirm if this is what you want to do."
+        ),
+        "confidence": 0.95,
+        "clarification": None,
+    }
+    repaired = {
+        "disposition": "plan",
+        "skill_id": "windows.file_operation",
+        "arguments": invalid_promise["arguments"],
+        "answer": invalid_promise["answer"],
+        "confidence": 0.9,
+        "clarification": (
+            "Please provide the names of the files that should be moved to the "
+            "'macro_files' folder."
+        ),
+    }
+    provider = FakeProvider([invalid_promise, repaired])
+    planner = LocalPlanner(provider, SkillRetriever((file_operation.manifest,)))
+
+    decision = await planner.plan_decision(
+        "Separate .rbxl and .rbxlx files in my documents into Roblox Places, and "
+        ".ahk and .mcr files into Macro Files"
+    )
+
+    assert provider.calls == 2
+    assert decision.clarification == repaired["clarification"]
+    assert decision.intent is None
+    assert decision.steps == ()
+    assert "cannot include a skill or action arguments" in provider.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_planner_repairs_invented_macro_into_registered_file_organization_skill():
+    file_operation = FileOperationSkill(FakeFileSystem())
+    provider = FakeProvider(
+        [
+            {
+                "disposition": "skill",
+                "skill_id": "core.macro",
+                "arguments": {"name": "SeparateFilesIntoFolders"},
+                "answer": None,
+                "confidence": 0.9,
+                "clarification": None,
+            },
+            {
+                "disposition": "skill",
+                "skill_id": "windows.file_operation",
+                "arguments": {
+                    "operation": "organize",
+                    "source": "documents",
+                    "rules": {
+                        "Roblox Places": [".rbxl", ".rbxlx"],
+                        "Macro Files": [".ahk"],
+                    },
+                },
+                "answer": None,
+                "confidence": 0.95,
+                "clarification": None,
+            },
+        ]
+    )
+
+    def validate_arguments(skill_id, arguments):
+        if skill_id == "core.macro":
+            raise ValueError("Unknown configured macro: SeparateFilesIntoFolders")
+        assert skill_id == "windows.file_operation"
+        file_operation.validate(arguments)
+
+    planner = LocalPlanner(
+        provider,
+        SkillRetriever(
+            (
+                manifest(
+                    skill_id="core.macro",
+                    display_name="Macro",
+                    description="Run an existing configured macro by exact saved name.",
+                    input_model=create_model("ConfiguredMacroInput", name=(str, ...)),
+                    output_model=create_model("ConfiguredMacroOutput", name=(str, ...)),
+                ),
+                file_operation.manifest,
+            )
+        ),
+        argument_validator=validate_arguments,
+    )
+
+    decision = await planner.plan_decision(
+        "Roblox Places: .rbxl and .rbxlx; Macro Files: .ahk"
+    )
+
+    assert provider.calls == 2
+    assert decision.intent is not None
+    assert decision.intent.name == "windows.file_operation"
+    assert decision.intent.arguments["operation"] == "organize"
+    assert "Unknown configured macro" in provider.last_prompt
 
 
 @pytest.mark.asyncio
@@ -695,7 +933,7 @@ async def test_plan_from_interpretation_uses_retrieved_candidate_skills():
     assert decision.intent is not None
     assert decision.intent.name == "windows.application_window"
     assert "windows.application_window" in provider.last_prompt
-    assert "core.calculator" not in provider.last_prompt
+    assert "core.calculator" in provider.last_prompt
 
 
 @pytest.mark.asyncio
@@ -794,6 +1032,59 @@ async def test_planner_repairs_arguments_rejected_by_real_skill_validation():
 
 
 @pytest.mark.asyncio
+async def test_interpreted_planner_rejects_existing_window_action_for_new_instance_goal():
+    launcher = LauncherSkill(FakeApplications(), resolver=lambda name: "unused.exe")
+    window = ApplicationWindowSkill(FakeApplications())
+    wrong_focus = {
+        "disposition": "skill",
+        "skill_id": "windows.application_window",
+        "arguments": {"operation": "focus", "process_name": "notepad.exe"},
+        "answer": "Focused Notepad.",
+        "confidence": 0.98,
+        "clarification": "",
+        "steps": [
+            {
+                "step_id": "1",
+                "skill_id": "windows.application_window",
+                "arguments": {"operation": "focus", "process_name": "notepad.exe"},
+                "depends_on": [],
+                "timeout_seconds": 60,
+            }
+        ],
+    }
+    provider = FakeProvider([wrong_focus, wrong_focus])
+    planner = LocalPlanner(
+        provider,
+        SkillRetriever((launcher.manifest, window.manifest)),
+    )
+
+    decision = await planner.plan_from_interpretation(
+        "I need a blank notepad",
+        interpretation=UserIntentInterpretation(
+            user_goal="I need a blank notepad",
+            request_type="unsupported",
+            confidence=0.87,
+        ),
+        context=ContextSnapshot(request_text="I need a blank notepad", session_id="s1"),
+        retrieved=(
+            RetrievedContextItem(
+                namespace="skill",
+                source_id="windows.application_window",
+                text="Focus an existing visible process window",
+                metadata={"skill_id": "windows.application_window"},
+                score=0.9,
+            ),
+        ),
+    )
+
+    assert provider.calls == 2
+    assert decision.intent is not None
+    assert decision.intent.name == "windows.launcher"
+    assert decision.intent.arguments == {"application": "notepad"}
+    assert "start a new application instance" in provider.last_prompt
+
+
+@pytest.mark.asyncio
 async def test_plan_revision_rejects_unavailable_next_step_skill():
     provider = FakeProvider(
         {
@@ -811,29 +1102,31 @@ async def test_plan_revision_rejects_unavailable_next_step_skill():
         SkillRetriever((CalculatorSkill.manifest,)),
     )
 
-    with pytest.raises(InvalidPlannerResponse):
-        await planner.revise_plan(
-            "calculate and run a shell command",
-            interpretation=UserIntentInterpretation(
-                user_goal="Calculate and run shell",
-                request_type="multi_step_goal",
-                explicit_requests=["calculate and run a shell command"],
-                confidence=0.8,
-            ),
-            context=ContextSnapshot(
-                request_text="calculate and run a shell command",
-                session_id="s1",
-            ),
-            retrieved=(),
-            observations=(
-                {
-                    "iteration": 1,
-                    "skill_id": "core.calculator",
-                    "outcome": "completed",
-                    "summary": "4",
-                },
-            ),
-        )
+    revision = await planner.revise_plan(
+        "calculate and run a shell command",
+        interpretation=UserIntentInterpretation(
+            user_goal="Calculate and run shell",
+            request_type="multi_step_goal",
+            explicit_requests=["calculate and run a shell command"],
+            confidence=0.8,
+        ),
+        context=ContextSnapshot(
+            request_text="calculate and run a shell command",
+            session_id="s1",
+        ),
+        retrieved=(),
+        observations=(
+            {
+                "iteration": 1,
+                "skill_id": "core.calculator",
+                "outcome": "completed",
+                "summary": "4",
+            },
+        ),
+    )
+
+    assert revision.disposition == "clarify"
+    assert "registered skill" in revision.clarification
 
 
 @pytest.mark.asyncio
@@ -884,6 +1177,79 @@ async def test_complex_planner_can_request_clarification():
 
     assert decision.needs_clarification
     assert decision.clarification == "Which folder should I search?"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("internal_label", ["needs_clarification", "operation"])
+async def test_complex_planner_replaces_internal_clarification_label_with_real_question(
+    internal_label,
+):
+    provider = FakeProvider(
+        {
+            "disposition": "clarify",
+            "skill_id": "",
+            "arguments": {"operation": "move_files_by_type"},
+            "answer": (
+                "Great! To clarify further, can you please specify which file types "
+                "belong in the Roblox Places folder and which belong in Macro Files? "
+                "Would you like to proceed now?"
+            ),
+            "confidence": 0.95,
+            "clarification": internal_label,
+            "steps": [],
+        }
+    )
+    planner = LocalPlanner(
+        provider,
+        SkillRetriever((FileOperationSkill(object()).manifest,)),
+    )
+
+    decision = await planner.plan_decision(
+        "Move the files based on file type, not name."
+    )
+
+    assert decision.clarification == (
+        "To clarify further, can you please specify which file types belong in the "
+        "Roblox Places folder and which belong in Macro Files?"
+    )
+    assert decision.clarification not in {"needs_clarification", "operation"}
+
+
+@pytest.mark.asyncio
+async def test_action_with_internal_clarification_label_uses_question_from_answer():
+    provider = FakeProvider(
+        {
+            "disposition": "plan",
+            "skill_id": "windows.file_search",
+            "arguments": {"root": "documents", "query": "roblox"},
+            "answer": (
+                "Do you have specific preferences for the folder structure? "
+                "Would you like to proceed now?"
+            ),
+            "confidence": 0.95,
+            "clarification": "needs_clarification",
+            "steps": [
+                {
+                    "step_id": "search",
+                    "skill_id": "windows.file_search",
+                    "arguments": {"root": "documents", "query": "roblox"},
+                    "depends_on": [],
+                }
+            ],
+        }
+    )
+    planner = LocalPlanner(
+        provider,
+        SkillRetriever((FileSearchSkill(FakeFileSystem()).manifest,)),
+    )
+
+    decision = await planner.plan_decision("Organize my Roblox files.")
+
+    assert decision.intent is None
+    assert decision.steps == ()
+    assert decision.clarification == (
+        "Do you have specific preferences for the folder structure?"
+    )
 
 
 @pytest.mark.asyncio

@@ -125,6 +125,22 @@ async def test_sensitive_macro_requires_permission_and_full_plan_confirmation(tm
     assert result.status == ResultStatus.COMPLETED
 
 
+@pytest.mark.asyncio
+async def test_unknown_macro_name_is_an_invalid_call_instead_of_preparation_exception(tmp_path):
+    _, engine, _, _ = setup(tmp_path)
+    call = SkillCall(
+        skill_id="core.macro",
+        arguments={"name": "SeparateFilesIntoFolders"},
+        permission_context=PermissionContext(session_id="test"),
+    )
+
+    outcome = await engine.prepare(call)
+
+    assert outcome.result.status == ResultStatus.DENIED
+    assert outcome.result.error.code == "invalid_call"
+    assert "Unknown configured macro" in outcome.result.error.message
+
+
 def test_macro_rejects_recursion_and_invalid_skill(tmp_path):
     store, engine, _, _ = setup(tmp_path)
     store.save(

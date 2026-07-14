@@ -1,7 +1,7 @@
 import pytest
 
 from assistant.router.deterministic import DeterministicRouter
-from assistant.router.normalization import normalize_text, spoken_number
+from assistant.router.normalization import command_text, normalize_text, spoken_number
 
 
 @pytest.mark.parametrize(
@@ -47,6 +47,26 @@ def test_timer_normalizes_spoken_number():
     assert result.intent.arguments["seconds"] == 1500
 
 
+@pytest.mark.parametrize(
+    ("text", "canonical", "application"),
+    [
+        ("Open up notepad", "open notepad", "notepad"),
+        ("Start up calculator", "start calculator", "calculator"),
+        ("Fire up paint", "open paint", "paint"),
+    ],
+)
+def test_phrasal_launch_verbs_do_not_leak_particles_into_application_name(
+    text, canonical, application
+):
+    assert command_text(text) == canonical
+
+    result = DeterministicRouter().route(text)
+
+    assert not result.needs_llm
+    assert result.intent.name == "windows.launcher"
+    assert result.intent.arguments == {"application": application}
+
+
 def test_unknown_request_needs_local_planner():
     result = DeterministicRouter().route("organize these files for me")
     assert result.needs_llm
@@ -58,7 +78,7 @@ def test_unknown_request_needs_local_planner():
     ("text", "expected_intent", "needs_llm"),
     [
         ("help me calculate 2 plus 3", "planner.goal", True),
-        ("what time is my timer", "conversation.question", True),
+        ("what time is my timer", "planner.goal", True),
         ("open brave and search for vlr.gg", "windows.launcher", False),
         ("find my resume on my desktop", "windows.file_search", False),
         ("delete the resume in my desktop", "windows.file_operation", False),
@@ -121,7 +141,7 @@ def test_broad_goal_requests_route_to_planner_goal(text):
     assert result.intent.arguments == {"text": text}
     assert result.intent.source == "classifier"
     assert result.intent.ambiguous
-    assert result.intent.ambiguity_reasons == ("Broad goal request requires interpretation",)
+    assert result.intent.ambiguity_reasons == ("Open-ended input requires goal interpretation",)
 
 
 @pytest.mark.parametrize(
@@ -139,9 +159,7 @@ def test_naturally_framed_requests_use_goal_interpretation(text):
     assert result.needs_llm
     assert result.intent.name == "planner.goal"
     assert result.intent.arguments == {"text": text}
-    assert result.intent.ambiguity_reasons == (
-        "Natural-language request requires goal interpretation",
-    )
+    assert result.intent.ambiguity_reasons == ("Open-ended input requires goal interpretation",)
 
 
 def test_file_search_on_desktop_routes_without_local_planner():
@@ -276,9 +294,6 @@ def test_open_https_url_routes_to_existing_browser_navigation():
         ("open a brave tab", {"application": "brave"}),
         ("open a chrome browser tab", {"application": "chrome"}),
         ("open a firefox window", {"application": "firefox"}),
-        ("open a tab", {"application": "browser"}),
-        ("open a new tab", {"application": "browser"}),
-        ("open a browser tab", {"application": "browser"}),
         ("open a private brave tab", {"application": "brave", "private": True}),
         ("open an incognito chrome tab", {"application": "chrome", "private": True}),
         ("open an inprivate edge window", {"application": "edge", "private": True}),
@@ -369,6 +384,9 @@ def test_browser_tab_wording_with_website_routes_to_launcher(text, arguments):
     ("text", "operation"),
     [
         ("new tab", "new_tab"),
+        ("open a tab", "new_tab"),
+        ("open a new tab", "new_tab"),
+        ("open a browser tab", "new_tab"),
         ("open a new browser window", "new_window"),
         ("close this tab", "close_tab"),
         ("reopen closed tab", "reopen_closed_tab"),
@@ -628,7 +646,7 @@ def test_light_and_dark_mode_routes():
 def test_knowledge_question_is_not_misrouted_to_calculator():
     result = DeterministicRouter().route("What is the capital of France?")
     assert result.needs_llm
-    assert result.intent.name == "conversation.question"
+    assert result.intent.name == "planner.goal"
 
 
 def test_normalization_and_numbers():

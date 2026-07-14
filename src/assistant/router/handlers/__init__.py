@@ -4,7 +4,7 @@ from assistant.router.handlers.control import ControlHandler, MemoryConversation
 from assistant.router.handlers.devices import DeviceStatusHandler
 from assistant.router.handlers.devices_control import DeviceControlHandler
 from assistant.router.handlers.fallback import FallbackHandler
-from assistant.router.handlers.files import FileMutationHandler
+from assistant.router.handlers.files import FileMutationHandler, FileSearchHandler
 from assistant.router.handlers.files_operation import FileOperationHandler
 from assistant.router.handlers.network import NetworkHandler
 from assistant.router.handlers.productivity import ProductivityHandler
@@ -16,6 +16,7 @@ DEFAULT_ROUTE_HANDLERS: tuple[RouteHandler, ...] = (
     ProductivityHandler(),
     NetworkHandler(),
     DeviceStatusHandler(),
+    FileSearchHandler(),
     FileMutationHandler(),
     DeviceControlHandler(),
     ApplicationWindowHandler(),

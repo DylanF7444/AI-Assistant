@@ -10,7 +10,6 @@ if TYPE_CHECKING:
     from assistant.router.deterministic import DeterministicRouter
 
 from assistant.router.handlers.common import (
-    looks_like_goal_request,
     memory_key,
     memory_type,
     memory_value_from_original,
@@ -160,17 +159,5 @@ class MemoryConversationHandler:
                     confidence=0.99,
                     source="rule",
                 )
-            )
-        if looks_like_goal_request(routed):
-            return RouteResult(
-                Intent(
-                    name="planner.goal",
-                    arguments={"text": text},
-                    confidence=0.7,
-                    source="classifier",
-                    ambiguous=True,
-                    ambiguity_reasons=("Broad goal request requires interpretation",),
-                ),
-                needs_llm=True,
             )
         return None

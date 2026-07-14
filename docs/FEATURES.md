@@ -1,6 +1,6 @@
 # Feature Catalog
 
-Updated July 5, 2026. This catalog lists the built-in features registered by
+Updated July 10, 2026. This catalog lists the built-in features registered by
 the application container. Optional integrations are implemented but require
 the relevant setting, credential, local service, or device to be configured.
 
@@ -19,7 +19,7 @@ the relevant setting, credential, local service, or device to be configured.
 | Core | `core.diagnostic` | Implemented | Low | None | Report local hardware, microphone, model, and skill health. |
 | Core | `core.file_access_policy` | Implemented | High | `settings.get`, `settings.set` | List and change filesystem read and write/delete allow and block lists. |
 | Core | `core.help` | Implemented | Low | None | Explain available commands, skills, and required permissions. |
-| Core | `core.macro` | Extensible | Low | Per macro step | Run a configured sequence of registered skills without bypassing validation, permissions, or confirmations. |
+| Core | `core.macro` | Extensible | Low | Per macro step | Run an existing configured sequence by its exact saved name without bypassing validation, permissions, or confirmations. |
 | Core | `core.notes` | Implemented | Low | None | Add, search, list, and delete local notes. |
 | Core | `core.reminder` | Implemented | Low | None | Create local reminders or alarms. |
 | Core | `core.tasks` | Implemented | Low | None | Add, list, complete, and delete local tasks. |
@@ -33,10 +33,10 @@ the relevant setting, credential, local service, or device to be configured.
 | Windows | `windows.clipboard` | Implemented | Medium | `clipboard.read`, `clipboard.write` | Read or write the local clipboard with separate permissions. |
 | Windows | `windows.context_navigation` | Implemented | Medium | `process.window`, `input.control` | Use browser tab, page, and address-bar shortcuts in the focused or visible browser. |
 | Windows | `windows.device_control` | Implemented | Critical | `device.read`, `device.control`, `media.control`, `system.apps`, `system.display`, `system.network`, `system.power` | Search installed apps, control volume/brightness/radios/power, and read local device status. |
-| Windows | `windows.file_operation` | Implemented | High | `filesystem.read`, `filesystem.write` | Open, copy, move, rename, or recycle approved files, including contextual operations on selected search results. |
+| Windows | `windows.file_operation` | Implemented | High | `filesystem.read`, `filesystem.write` | Open, copy, move, rename, or recycle approved files, or organize one approved folder into named subfolders using explicit extension rules or standard image/text categories and an exact confirmation preview. |
 | Windows | `windows.file_search` | Implemented | Low | `filesystem.read` | Search filenames inside an approved folder and return selectable numbered results. |
 | Windows | `windows.input_automation` | Implemented | High | `input.control` | Type text or click visibly inside one approved active application. |
-| Windows | `windows.launcher` | Implemented | Medium | `process.launch` or `network` | Launch registered application paths or open approved HTTPS fallback URLs. |
+| Windows | `windows.launcher` | Implemented | Medium | `process.launch` or `network` | Launch registered application paths, resolve relational browser requests through approved preference memory, or open approved HTTPS fallback URLs. |
 | Windows | `windows.media` | Implemented | Low | `media.control` | Send local media play, pause, next, previous, stop, and volume commands. |
 | Windows | `windows.notification` | Implemented | Low | `notification.create` | Show a visible local desktop notification. |
 | Windows | `windows.process` | Implemented | Critical | `process.terminate` | Inspect running processes or terminate an exact PID after approval. |
@@ -45,10 +45,13 @@ the relevant setting, credential, local service, or device to be configured.
 
 ## Implemented Platform Features
 
-- PySide6 tray UI with assistant, settings, skills, permissions, audit,
-  privacy, diagnostics, applications, macros, models, and benchmark views.
-- Push-to-talk and optional wake-word activation, streaming STT, optional local
-  Piper TTS, cancellation, response-detail modes, and privacy controls.
+- PySide6 tray UI with a pinned compact companion, expandable assistant,
+  settings, skills, permissions, audit, privacy, diagnostics, applications,
+  macros, models, and benchmark views. Closing hides to the tray so background
+  activation remains available.
+- Text input, push-to-talk, keyword/clap, persistent voice, and configurable
+  local ONNX wake-word activation, plus streaming STT, optional local Piper TTS,
+  cancellation, response-detail modes, and privacy controls.
 - Deterministic routing plus schema-constrained local planner support for
   ambiguous or multi-step requests.
 - Default-deny scoped permissions, action-bound confirmations, audit logging,

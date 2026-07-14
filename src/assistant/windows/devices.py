@@ -21,6 +21,17 @@ class LocalWindowsDeviceAdapter:
         "update.exe",
         "updater.exe",
     }
+    _APP_EXECUTABLE_EXCLUDE_MARKERS = (
+        "crashpad",
+        "installer",
+        "setup",
+        "unins",
+        "uninstall",
+        "updater",
+        "vc_redist",
+        "vcredist",
+        "winsdksetup",
+    )
 
     async def search_installed_apps(self, query: str | None = None, limit: int = 20) -> list[dict]:
         import winreg
@@ -93,7 +104,7 @@ class LocalWindowsDeviceAdapter:
         candidates = [
             path
             for path in root.glob("*.exe")
-            if path.name.casefold() not in cls._APP_EXECUTABLE_EXCLUDE
+            if cls._is_launchable_application_executable(path)
         ]
         if not candidates:
             return None
@@ -108,8 +119,8 @@ class LocalWindowsDeviceAdapter:
         )
         return str(scored[0].resolve())
 
-    @staticmethod
-    def _display_icon_executable(display_icon: str | None) -> Path | None:
+    @classmethod
+    def _display_icon_executable(cls, display_icon: str | None) -> Path | None:
         if not display_icon:
             return None
         value = display_icon.strip()
@@ -121,9 +132,19 @@ class LocalWindowsDeviceAdapter:
             if ".exe" in candidate.casefold():
                 candidate = candidate[: candidate.casefold().find(".exe") + 4]
         path = Path(candidate).expanduser()
-        if path.suffix.casefold() != ".exe" or not path.is_file():
+        if not cls._is_launchable_application_executable(path):
             return None
         return path.resolve()
+
+    @classmethod
+    def _is_launchable_application_executable(cls, path: Path) -> bool:
+        name = path.name.casefold()
+        return (
+            path.suffix.casefold() == ".exe"
+            and path.is_file()
+            and name not in cls._APP_EXECUTABLE_EXCLUDE
+            and not any(marker in name for marker in cls._APP_EXECUTABLE_EXCLUDE_MARKERS)
+        )
 
     async def set_volume(self, level: int) -> None:
         self._audio_endpoint().set_volume(max(0, min(100, level)) / 100)

@@ -26,3 +26,4 @@ async def test_diagnostic_skill_returns_actionable_provider_guidance(settings):
     )
     assert result.status == ResultStatus.COMPLETED
     assert any("STT" in item for item in result.data["guidance"])
+    assert "STT is unavailable: model missing" in result.display_text

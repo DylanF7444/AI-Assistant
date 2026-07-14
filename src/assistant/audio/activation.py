@@ -44,6 +44,22 @@ def keyword_request(text: str, keyword: str) -> str | None:
     return request_text[match.end() :].strip()
 
 
+def is_explicit_cancel_command(text: str) -> bool:
+    """Return whether speech is an unambiguous request to cancel current work."""
+
+    spoken = " ".join(re.findall(r"[a-z0-9']+", text.casefold()))
+    return bool(
+        re.fullmatch(
+            r"(?:hey\s+)?(?:assistant\s+)?(?:please\s+)?"
+            r"(?:cancel|stop)"
+            r"(?:\s+(?:that|this|it|now|processing|the\s+current\s+request|"
+            r"current\s+request|the\s+current\s+command|current\s+command))?"
+            r"(?:\s+please)?",
+            spoken,
+        )
+    )
+
+
 class ClapDetector:
     def __init__(self, *, threshold: float = 0.35, cooldown_blocks: int = 20) -> None:
         self.threshold = threshold

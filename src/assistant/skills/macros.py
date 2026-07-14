@@ -54,11 +54,22 @@ class MacroSkill(Skill):
         self.manifest = manifest(
             skill_id="core.macro",
             display_name="Macro",
-            description="Run a configured sequence of already registered skills.",
+            description=(
+                "Run an existing user-configured automation by its exact saved name. "
+                "This does not create new workflows or operate on files named 'macro'."
+            ),
             input_model=self.input_model,
             output_model=self.output_model,
             permissions=(),
         )
+
+    def validate(self, arguments: dict) -> MacroInput:
+        args = MacroInput.model_validate(arguments)
+        try:
+            self.store.get(args.name)
+        except KeyError as exc:
+            raise ValueError(f"Unknown configured macro: {args.name}") from exc
+        return args
 
     def _calls(self, call: SkillCall) -> tuple[tuple[Skill, SkillCall], ...]:
         definition = self.store.get(self.validate(call.arguments).name)

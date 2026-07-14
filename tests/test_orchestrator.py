@@ -363,6 +363,55 @@ class InterpretingLaunchPlanner:
         pass
 
 
+class FileOrganizationPlanner:
+    def __init__(self):
+        self.interpret_calls = []
+        self.plan_calls = []
+
+    async def interpret(self, text, *, context, retrieved):
+        self.interpret_calls.append(text)
+        has_mapping = ".rbxl" in text and ".rbxlx" in text and ".ahk" in text
+        return UserIntentInterpretation(
+            user_goal="Organize documents into extension-based subfolders",
+            request_type="multi_step_goal",
+            explicit_requests=[text],
+            missing_information=[] if has_mapping else ["extension mapping"],
+            should_ask_clarification=not has_mapping,
+            clarification_question=(
+                None if has_mapping else "Which file extensions belong in each destination folder?"
+            ),
+            confidence=0.95,
+        )
+
+    async def plan_from_interpretation(
+        self,
+        text,
+        *,
+        interpretation,
+        context,
+        retrieved,
+    ):
+        self.plan_calls.append(text)
+        return PlannerDecision(
+            intent=Intent(
+                name="windows.file_operation",
+                arguments={
+                    "operation": "organize",
+                    "source": "documents",
+                    "rules": {
+                        "Roblox Places": [".rbxl", ".rbxlx"],
+                        "Macro Files": [".ahk"],
+                    },
+                },
+                confidence=0.96,
+                source="llm",
+            )
+        )
+
+    async def cancel(self):
+        pass
+
+
 class FakeSemanticRetriever:
     def __init__(self):
         self.calls = []
@@ -428,9 +477,7 @@ async def test_naturally_worded_launch_goal_executes_selected_skill(settings, tm
     )
     container.orchestrator.planner = InterpretingLaunchPlanner()
 
-    response, outcome = await container.orchestrator.handle_text(
-        "I need a blank Notepad window"
-    )
+    response, outcome = await container.orchestrator.handle_text("I need a blank Notepad window")
 
     assert outcome.result is not None
     assert outcome.result.status == ResultStatus.COMPLETED
@@ -821,6 +868,71 @@ async def test_selected_file_delete_requires_exact_write_confirmation(settings, 
 
 
 @pytest.mark.asyncio
+async def test_text_confirm_executes_the_exact_pending_file_action(settings, tmp_path):
+    container = build_container(settings)
+    source = tmp_path / "resume.txt"
+    source.write_text("resume")
+    destination_folder = tmp_path / "archive"
+    destination_folder.mkdir()
+    destination = destination_folder / source.name
+    container.orchestrator.remember_file_candidates([str(source.resolve())])
+    await container.orchestrator.handle_text("select 1")
+    for capability, targets in (
+        ("filesystem.read", (str(source.resolve()),)),
+        ("filesystem.write", (str(destination.resolve()),)),
+    ):
+        container.permissions.grant(
+            user_id="local-user",
+            skill_id="windows.file_operation",
+            capability=capability,
+            grant_type=GrantType.ALWAYS,
+            targets=targets,
+        )
+
+    preview, pending = await container.orchestrator.handle_text(f"copy it to {destination_folder}")
+    assert preview.response_type == ResponseType.CONFIRMATION
+    assert pending.confirmation is not None
+
+    response, outcome = await container.orchestrator.handle_text("Confirm")
+
+    assert response.response_type == ResponseType.CONTROL
+    assert outcome.result is not None
+    assert outcome.result.status == ResultStatus.COMPLETED
+    assert destination.read_text() == "resume"
+
+
+@pytest.mark.asyncio
+async def test_router_converts_spoken_temperature_with_degrees_word(settings):
+    container = build_container(settings)
+
+    response, outcome = await container.orchestrator.handle_text(
+        "Convert 68 degrees Fahrenheit to Celsius"
+    )
+
+    assert response.response_type == ResponseType.SKILL
+    assert outcome.call.skill_id == "core.unit_conversion"
+    assert outcome.call.arguments == {
+        "value": 68,
+        "from_unit": "fahrenheit",
+        "to_unit": "celsius",
+    }
+    assert outcome.result.status == ResultStatus.COMPLETED
+    assert outcome.result.data["value"] == pytest.approx(20)
+
+
+@pytest.mark.asyncio
+async def test_text_confirm_without_pending_action_is_not_routed_as_a_denied_skill(settings):
+    container = build_container(settings)
+
+    response, outcome = await container.orchestrator.handle_text("Confirm")
+
+    assert response.response_type == ResponseType.CONTROL
+    assert response.display_text == "There is no pending action to confirm."
+    assert outcome.call is None
+    assert outcome.result is None
+
+
+@pytest.mark.asyncio
 async def test_voice_only_tts_speaks_voice_invocations_once(settings):
     container = build_container(settings)
     tts = FakeTTS()
@@ -837,6 +949,40 @@ async def test_voice_only_tts_speaks_voice_invocations_once(settings):
     assert len(tts.spoken) == 1
     await container.orchestrator.cancel()
     assert tts.cancelled
+
+
+@pytest.mark.asyncio
+async def test_persistent_voice_ignores_sound_until_explicit_stop(settings):
+    container = build_container(settings)
+    request = asyncio.create_task(
+        container.orchestrator.handle_text("set a timer for 10 seconds")
+    )
+
+    for _ in range(100):
+        jobs = container.engine.active_jobs()
+        if jobs:
+            break
+        await asyncio.sleep(0.01)
+    assert jobs
+    request_correlation = jobs[0].correlation_id
+    assert container.orchestrator.request_in_progress
+
+    # A concurrent persistent listener uses its own correlation ID. It must not
+    # replace the request that a later explicit stop should cancel.
+    container.orchestrator._active_correlation = uuid4()
+    assert await container.orchestrator.consume_persistent_voice_interrupt(
+        "background clatter"
+    )
+    await asyncio.sleep(0)
+    assert not request.done()
+    assert container.engine.active_jobs()[0].correlation_id == request_correlation
+
+    assert await container.orchestrator.consume_persistent_voice_interrupt("stop")
+    _response, outcome = await asyncio.wait_for(request, timeout=1)
+
+    assert outcome.result is not None
+    assert outcome.result.status == ResultStatus.CANCELLED
+    assert not container.orchestrator.request_in_progress
 
 
 @pytest.mark.asyncio
@@ -1008,6 +1154,28 @@ async def test_unavailable_planner_keeps_deterministic_commands_available(settin
 
 
 @pytest.mark.asyncio
+async def test_location_first_named_file_search_does_not_use_local_planner(settings):
+    container = build_container(settings)
+    container.orchestrator.planner = BrokenPlanner()
+
+    response, outcome = await container.orchestrator.handle_text(
+        "Look in my desktop for a file named resume"
+    )
+
+    assert response.response_type == ResponseType.PERMISSION
+    assert "local planner" not in response.display_text
+    assert len(outcome.permission_requests) == 1
+    request = outcome.permission_requests[0]
+    assert request.call.skill_id == "windows.file_search"
+    assert request.call.arguments == {
+        "query": "resume",
+        "root": "desktop",
+        "limit": 20,
+    }
+    assert request.scope.capability == "filesystem.read"
+
+
+@pytest.mark.asyncio
 async def test_switch_window_to_monitor_does_not_use_local_planner(settings):
     container = build_container(settings)
     container.orchestrator.planner = BrokenPlanner()
@@ -1051,9 +1219,7 @@ async def test_cpu_and_memory_question_uses_device_skill_without_local_planner(s
     container = build_container(settings)
     container.orchestrator.planner = BrokenPlanner()
 
-    response, outcome = await container.orchestrator.handle_text(
-        "Whats my cpu and memory usage?"
-    )
+    response, outcome = await container.orchestrator.handle_text("Whats my cpu and memory usage?")
 
     assert response.response_type == ResponseType.PERMISSION
     assert "local planner" not in response.display_text
@@ -1062,9 +1228,7 @@ async def test_cpu_and_memory_question_uses_device_skill_without_local_planner(s
     assert request.call.skill_id == "windows.device_control"
     assert request.call.arguments == {"operation": "performance_status"}
     assert request.scope.capability == "device.read"
-    assert container.orchestrator._session_context[-1]["intent"] == (
-        "windows.device_control"
-    )
+    assert container.orchestrator._session_context[-1]["intent"] == ("windows.device_control")
 
 
 @pytest.mark.asyncio
@@ -1225,6 +1389,33 @@ async def test_broad_goal_interpretation_can_ask_clarification(settings):
         item.namespace == "skill_example" and item.metadata["skill_id"] == "windows.file_operation"
         for item in planner.calls[0][2]
     )
+
+
+@pytest.mark.asyncio
+async def test_open_ended_file_organization_follow_up_plans_registered_skill(settings):
+    container = build_container(settings)
+    planner = FileOrganizationPlanner()
+    container.orchestrator.planner = planner
+
+    first, first_outcome = await container.orchestrator.handle_text(
+        "Separate the files in my documents into Roblox Places and Macro Files folders"
+    )
+    response, outcome = await container.orchestrator.handle_text(
+        "Roblox Places: .rbxl and .rbxlx; Macro Files: .ahk"
+    )
+
+    assert first.response_type == ResponseType.CLARIFICATION
+    assert first_outcome.result is None
+    assert response.response_type == ResponseType.PERMISSION
+    assert outcome.call is not None
+    assert outcome.call.skill_id == "windows.file_operation"
+    assert outcome.call.arguments["operation"] == "organize"
+    assert outcome.call.arguments["rules"] == {
+        "Roblox Places": [".rbxl", ".rbxlx"],
+        "Macro Files": [".ahk"],
+    }
+    assert len(planner.interpret_calls) == 2
+    assert len(planner.plan_calls) == 1
 
 
 @pytest.mark.asyncio
@@ -1465,6 +1656,32 @@ async def test_file_search_limit_follow_up_completes_original_desktop_search(set
 
 
 @pytest.mark.asyncio
+async def test_explicit_skill_follow_up_completes_pending_file_search(settings):
+    container = build_container(settings)
+    container.orchestrator._set_pending_clarification(
+        original_text="Find my resume in the assistant folder on my desktop",
+        clarification=(
+            "I could not map the next step to a registered skill. "
+            "What exact outcome and targets should I use to build the plan?"
+        ),
+        session_id="desktop",
+    )
+
+    response, outcome = await container.orchestrator.handle_text(
+        "Use file search on the assistant folder on my desktop"
+    )
+
+    assert response.response_type == ResponseType.PERMISSION
+    assert outcome.call is not None
+    assert outcome.call.skill_id == "windows.file_search"
+    assert outcome.call.arguments == {
+        "query": "resume",
+        "root": "desktop/assistant",
+        "limit": 20,
+    }
+
+
+@pytest.mark.asyncio
 async def test_skill_preparation_error_is_returned_as_response(settings):
     container = build_container(settings)
     response, outcome = await container.orchestrator.handle_text("open application not-registered")
@@ -1508,6 +1725,30 @@ async def test_unregistered_application_returns_registration_request(settings):
     assert outcome.registration_requests
     assert outcome.registration_requests[0].call.skill_id == "windows.launcher"
     assert outcome.registration_requests[0].application == "discord"
+
+
+@pytest.mark.asyncio
+async def test_open_my_browser_resolves_registered_preference_memory(settings, tmp_path):
+    container = build_container(settings)
+    brave = tmp_path / "brave.exe"
+    brave.write_bytes(b"")
+    container.aliases.set("application", "brave browser", str(brave))
+    container.memory_store.remember(
+        type="preference",
+        key="default_browser",
+        value="Brave is my default browser.",
+        source="user",
+        confidence=1,
+    )
+
+    response, outcome = await container.orchestrator.handle_text("Open my browser")
+
+    assert response.response_type == ResponseType.PERMISSION
+    assert not outcome.registration_requests
+    assert outcome.call is not None
+    assert outcome.call.skill_id == "windows.launcher"
+    assert outcome.call.arguments == {"application": "browser"}
+    assert outcome.permission_requests[0].scope.targets == (str(brave.resolve()),)
 
 
 @pytest.mark.asyncio
@@ -1664,9 +1905,12 @@ async def test_default_browser_registration_handles_generic_tab(settings, tmp_pa
 
     assert response.response_type == ResponseType.PERMISSION
     assert not outcome.registration_requests
-    assert len(outcome.permission_requests) == 1
-    assert outcome.call.arguments == {"application": "browser"}
-    assert outcome.permission_requests[0].scope.targets == (str(target.resolve()),)
+    assert {request.scope.capability for request in outcome.permission_requests} == {
+        "process.window",
+        "input.control",
+    }
+    assert outcome.call.arguments == {"operation": "new_tab", "target": "browser"}
+    assert all(request.scope.targets == ("browser",) for request in outcome.permission_requests)
 
 
 @pytest.mark.asyncio

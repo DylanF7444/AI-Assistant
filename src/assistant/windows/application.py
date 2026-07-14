@@ -16,6 +16,48 @@ from assistant.windows.process_names import (
 )
 
 
+def _win32_input_types():
+    from ctypes import wintypes
+
+    class MOUSEINPUT(ctypes.Structure):
+        _fields_ = [
+            ("dx", wintypes.LONG),
+            ("dy", wintypes.LONG),
+            ("mouseData", wintypes.DWORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", wintypes.WPARAM),
+        ]
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [
+            ("wVk", wintypes.WORD),
+            ("wScan", wintypes.WORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", wintypes.WPARAM),
+        ]
+
+    class HARDWAREINPUT(ctypes.Structure):
+        _fields_ = [
+            ("uMsg", wintypes.DWORD),
+            ("wParamL", wintypes.WORD),
+            ("wParamH", wintypes.WORD),
+        ]
+
+    class INPUT_UNION(ctypes.Union):
+        _fields_ = [
+            ("mi", MOUSEINPUT),
+            ("ki", KEYBDINPUT),
+            ("hi", HARDWAREINPUT),
+        ]
+
+    class INPUT(ctypes.Structure):
+        _fields_ = [("type", wintypes.DWORD), ("union", INPUT_UNION)]
+
+    return KEYBDINPUT, INPUT_UNION, INPUT
+
+
 class WindowsApplicationAdapter:
     _KEY_CODES = {
         **{chr(code + 96): 0x40 + code for code in range(1, 27)},
@@ -409,20 +451,7 @@ class WindowsApplicationAdapter:
             raise ValueError("hotkey requires at least one key")
         from ctypes import wintypes
 
-        class KEYBDINPUT(ctypes.Structure):
-            _fields_ = [
-                ("wVk", wintypes.WORD),
-                ("wScan", wintypes.WORD),
-                ("dwFlags", wintypes.DWORD),
-                ("time", wintypes.DWORD),
-                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
-            ]
-
-        class INPUT_UNION(ctypes.Union):
-            _fields_ = [("ki", KEYBDINPUT)]
-
-        class INPUT(ctypes.Structure):
-            _fields_ = [("type", wintypes.DWORD), ("union", INPUT_UNION)]
+        KEYBDINPUT, INPUT_UNION, INPUT = _win32_input_types()
 
         key_codes: list[int] = []
         for key in keys:
@@ -430,13 +459,16 @@ class WindowsApplicationAdapter:
             if code is None:
                 raise ValueError(f"Unsupported hotkey key: {key}")
             key_codes.append(code)
-        inputs = [INPUT(1, INPUT_UNION(ki=KEYBDINPUT(code, 0, 0, 0, None))) for code in key_codes]
+        inputs = [INPUT(1, INPUT_UNION(ki=KEYBDINPUT(code, 0, 0, 0, 0))) for code in key_codes]
         inputs.extend(
-            INPUT(1, INPUT_UNION(ki=KEYBDINPUT(code, 0, 0x0002, 0, None)))
+            INPUT(1, INPUT_UNION(ki=KEYBDINPUT(code, 0, 0x0002, 0, 0)))
             for code in reversed(key_codes)
         )
         values = (INPUT * len(inputs))(*inputs)
-        sent = ctypes.windll.user32.SendInput(len(values), values, ctypes.sizeof(INPUT))
+        send_input = ctypes.windll.user32.SendInput
+        send_input.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
+        send_input.restype = wintypes.UINT
+        sent = send_input(len(values), values, ctypes.sizeof(INPUT))
         if sent != len(values):
             raise ctypes.WinError()
 
@@ -444,20 +476,7 @@ class WindowsApplicationAdapter:
     def _type_text(text: str) -> None:
         from ctypes import wintypes
 
-        class KEYBDINPUT(ctypes.Structure):
-            _fields_ = [
-                ("wVk", wintypes.WORD),
-                ("wScan", wintypes.WORD),
-                ("dwFlags", wintypes.DWORD),
-                ("time", wintypes.DWORD),
-                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
-            ]
-
-        class INPUT_UNION(ctypes.Union):
-            _fields_ = [("ki", KEYBDINPUT)]
-
-        class INPUT(ctypes.Structure):
-            _fields_ = [("type", wintypes.DWORD), ("union", INPUT_UNION)]
+        KEYBDINPUT, INPUT_UNION, INPUT = _win32_input_types()
 
         inputs = []
         for char in text:
@@ -466,18 +485,21 @@ class WindowsApplicationAdapter:
                 [
                     INPUT(
                         1,
-                        INPUT_UNION(ki=KEYBDINPUT(0, code, 0x0004, 0, None)),
+                        INPUT_UNION(ki=KEYBDINPUT(0, code, 0x0004, 0, 0)),
                     ),
                     INPUT(
                         1,
-                        INPUT_UNION(ki=KEYBDINPUT(0, code, 0x0004 | 0x0002, 0, None)),
+                        INPUT_UNION(ki=KEYBDINPUT(0, code, 0x0004 | 0x0002, 0, 0)),
                     ),
                 ]
             )
         if inputs:
             array_type = INPUT * len(inputs)
             values = array_type(*inputs)
-            sent = ctypes.windll.user32.SendInput(len(values), values, ctypes.sizeof(INPUT))
+            send_input = ctypes.windll.user32.SendInput
+            send_input.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
+            send_input.restype = wintypes.UINT
+            sent = send_input(len(values), values, ctypes.sizeof(INPUT))
             if sent != len(values):
                 raise ctypes.WinError()
 

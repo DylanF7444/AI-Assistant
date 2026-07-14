@@ -2,6 +2,7 @@ import pytest
 
 from assistant.audio.activation import (
     ClapDetector,
+    is_explicit_cancel_command,
     keyword_request,
     parse_voice_prompt_response,
 )
@@ -26,6 +27,34 @@ def test_clap_detector_requires_transient_spike():
     assert detector.observe(0.55) is False
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "cancel",
+        "stop",
+        "please cancel that",
+        "assistant stop processing",
+        "stop the current request please",
+    ],
+)
+def test_explicit_cancel_command_accepts_only_clear_interruptions(text):
+    assert is_explicit_cancel_command(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "background noise",
+        "keep going",
+        "do not stop",
+        "cancel culture",
+        "start the stopwatch",
+    ],
+)
+def test_explicit_cancel_command_rejects_other_sounds_and_requests(text):
+    assert not is_explicit_cancel_command(text)
+
+
 def test_keyword_clap_mode_requires_a_trigger(tmp_path):
     with pytest.raises(ValueError, match="keyword or clap trigger"):
         Settings(
@@ -34,6 +63,14 @@ def test_keyword_clap_mode_requires_a_trigger(tmp_path):
             voice_activation_keyword_enabled=False,
             voice_activation_clap_enabled=False,
         )
+
+
+def test_wake_word_threshold_is_bounded(tmp_path):
+    assert Settings(data_dir=tmp_path, wake_word_threshold=0.7).wake_word_threshold == 0.7
+    with pytest.raises(ValueError):
+        Settings(data_dir=tmp_path, wake_word_threshold=0)
+    with pytest.raises(ValueError):
+        Settings(data_dir=tmp_path, wake_word_threshold=1.1)
 
 
 def test_voice_prompt_response_approves_and_denies():

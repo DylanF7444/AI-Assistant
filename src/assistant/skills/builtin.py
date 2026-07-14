@@ -395,7 +395,7 @@ class LaunchOutput(BaseModel):
 
 
 class RegisteredApplicationsInput(BaseModel):
-    include_paths: bool = True
+    include_paths: bool = False
 
 
 class RegisteredApplicationsOutput(BaseModel):
@@ -420,9 +420,12 @@ class RegisteredApplicationsSkill(Skill):
     async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult:
         args = self.validate(call.arguments)
         registrations = self._registrations()
-        applications = [
-            {"name": name, "path": path} for name, path in sorted(registrations.items())
-        ]
+        applications = _safe_distinct_application_registrations(
+            [
+                {"name": name, "path": path}
+                for name, path in sorted(registrations.items())
+            ]
+        )
         if not applications:
             return SkillResult(
                 status=ResultStatus.COMPLETED,
@@ -434,10 +437,16 @@ class RegisteredApplicationsSkill(Skill):
                 ),
                 data=RegisteredApplicationsOutput(applications=[]).model_dump(),
             )
+        display_limit = 20
+        shown = applications[:display_limit]
         if args.include_paths:
-            lines = [f"- {item['name']}: {item['path']}" for item in applications]
+            lines = [f"- {item['name']}: {item['path']}" for item in shown]
         else:
-            lines = [f"- {item['name']}" for item in applications]
+            lines = [f"- {item['name']}" for item in shown]
+        if len(applications) > display_limit:
+            lines.append(
+                f"- …and {len(applications) - display_limit} more in the Applications tab."
+            )
         count = len(applications)
         return SkillResult(
             status=ResultStatus.COMPLETED,
@@ -446,6 +455,37 @@ class RegisteredApplicationsSkill(Skill):
             data=RegisteredApplicationsOutput(applications=applications).model_dump(),
             sensitive=args.include_paths,
         )
+
+
+def _safe_distinct_application_registrations(
+    applications: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    unsafe_name_parts = (
+        "crashpad",
+        "installer",
+        "setup",
+        "unins",
+        "uninstall",
+        "updater",
+        "vcredist",
+        "winsdksetup",
+    )
+    by_path: dict[str, dict[str, str]] = {}
+    for item in applications:
+        executable = Path(item["path"])
+        folded_name = executable.name.casefold()
+        if executable.suffix.casefold() != ".exe" or any(
+            marker in folded_name for marker in unsafe_name_parts
+        ):
+            continue
+        identity = str(executable).casefold()
+        existing = by_path.get(identity)
+        if existing is None or (len(item["name"]), item["name"].casefold()) < (
+            len(existing["name"]),
+            existing["name"].casefold(),
+        ):
+            by_path[identity] = item
+    return sorted(by_path.values(), key=lambda item: item["name"].casefold())
 
 
 class LauncherSkill(Skill):
@@ -473,9 +513,8 @@ class LauncherSkill(Skill):
             skill_id="windows.launcher",
             display_name="Launcher",
             description=(
-                "Start or open a new, fresh, or blank window/instance of an approved "
-                "registered application. This creates an application instance; it does "
-                "not focus or change an existing window."
+                "Start or open an approved registered application, creating a new, "
+                "fresh, or blank running instance and its initial window."
             ),
             input_model=self.input_model,
             output_model=self.output_model,

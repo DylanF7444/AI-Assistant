@@ -73,4 +73,6 @@ def normalize_text(text: str, aliases: dict[str, str] | None = None) -> str:
 
 def command_text(text: str) -> str:
     """Remove sentence-ending punctuation that should not change command routing."""
-    return re.sub(r"[.?!]+$", "", normalize_text(text)).rstrip()
+    command = re.sub(r"[.?!]+$", "", normalize_text(text)).rstrip()
+    command = re.sub(r"^(open|start)\s+up\b", r"\1", command)
+    return re.sub(r"^fire\s+up\b", "open", command)

@@ -83,7 +83,9 @@ async def test_registered_applications_skill_lists_assistant_registrations(tmp_p
     notepad = tmp_path / "notepad.exe"
     skill = RegisteredApplicationsSkill(lambda: {"brave": str(brave), "notepad": str(notepad)})
 
-    result = await skill.execute(registered_call(), asyncio.Event())
+    result = await skill.execute(
+        registered_call({"include_paths": True}), asyncio.Event()
+    )
 
     assert result.summary == "2 applications are registered."
     assert "brave" in result.display_text
@@ -94,6 +96,28 @@ async def test_registered_applications_skill_lists_assistant_registrations(tmp_p
             {"name": "notepad", "path": str(notepad)},
         ]
     }
+
+
+@pytest.mark.asyncio
+async def test_registered_applications_default_hides_paths_and_filters_helpers(
+    tmp_path: Path,
+):
+    brave = tmp_path / "brave.exe"
+    installer = tmp_path / "Docker Desktop Installer.exe"
+    skill = RegisteredApplicationsSkill(
+        lambda: {
+            "brave": str(brave),
+            "browser": str(brave),
+            "docker desktop": str(installer),
+        }
+    )
+
+    result = await skill.execute(registered_call(), asyncio.Event())
+
+    assert result.summary == "1 application is registered."
+    assert result.display_text == "Registered applications:\n- brave"
+    assert str(tmp_path) not in result.display_text
+    assert result.data == {"applications": [{"name": "brave", "path": str(brave)}]}
 
 
 @pytest.mark.asyncio

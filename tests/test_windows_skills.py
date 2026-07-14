@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import shutil
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from assistant.windows.adapters import (
     ProcessInfo,
     WindowsApplicationAdapter,
 )
+from assistant.windows.application import _win32_input_types
 
 
 class FakeFiles:
@@ -36,6 +38,11 @@ class FakeFiles:
 
     async def copy(self, source, destination):
         return Path(shutil.copy2(source, destination))
+
+    async def create_directory(self, path):
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     async def create_text_file(self, path, content):
         path = Path(path)
@@ -495,6 +502,117 @@ async def test_file_dry_run_and_scoped_targets(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_file_organization_previews_moves_executes_rules_and_rolls_back(tmp_path):
+    for filename in ("place.rbxl", "world.rbxlx", "recording.ahk", "notes.txt"):
+        (tmp_path / filename).write_text(filename)
+    skill = FileOperationSkill(FakeFiles())
+    skill_call = call(
+        "windows.file_operation",
+        {
+            "operation": "organize",
+            "source": str(tmp_path),
+            "rules": {
+                "Roblox Places": [".rbxl", "rbxlx"],
+                "Macro Files": [".ahk"],
+            },
+        },
+    )
+
+    scopes = skill.required_permissions(skill_call)
+    preview = await skill.preview(skill_call)
+    result = await skill.execute(skill_call, __import__("asyncio").Event())
+
+    assert [scope.capability for scope in scopes] == [
+        "filesystem.read",
+        "filesystem.write",
+    ]
+    assert all(scope.targets == (str(tmp_path.resolve()),) for scope in scopes)
+    assert "place.rbxl" in preview
+    assert "recording.ahk" in preview
+    assert "notes.txt" not in preview
+    assert result.status == ResultStatus.COMPLETED
+    assert result.summary == "Organized 3 file(s)."
+    assert (tmp_path / "Roblox Places" / "place.rbxl").is_file()
+    assert (tmp_path / "Roblox Places" / "world.rbxlx").is_file()
+    assert (tmp_path / "Macro Files" / "recording.ahk").is_file()
+    assert (tmp_path / "notes.txt").is_file()
+
+    rollback = await skill.rollback(result.rollback_token)
+
+    assert rollback.status == ResultStatus.COMPLETED
+    assert (tmp_path / "place.rbxl").is_file()
+    assert (tmp_path / "world.rbxlx").is_file()
+    assert (tmp_path / "recording.ahk").is_file()
+
+
+@pytest.mark.asyncio
+async def test_file_organization_supports_standard_content_categories(tmp_path):
+    for filename in ("photo.jpg", "diagram.png", "notes.txt", "readme.md", "archive.zip"):
+        (tmp_path / filename).write_text(filename)
+    skill = FileOperationSkill(FakeFiles())
+    skill_call = call(
+        "windows.file_operation",
+        {
+            "operation": "organize",
+            "source": str(tmp_path),
+            "categories": {
+                "Images": "images",
+                "Text Files": "text_files",
+            },
+        },
+    )
+
+    preview = await skill.preview(skill_call)
+    result = await skill.execute(skill_call, __import__("asyncio").Event())
+
+    assert "photo.jpg" in preview
+    assert "notes.txt" in preview
+    assert "archive.zip" not in preview
+    assert result.summary == "Organized 4 file(s)."
+    assert (tmp_path / "Images" / "photo.jpg").is_file()
+    assert (tmp_path / "Images" / "diagram.png").is_file()
+    assert (tmp_path / "Text Files" / "notes.txt").is_file()
+    assert (tmp_path / "Text Files" / "readme.md").is_file()
+    assert (tmp_path / "archive.zip").is_file()
+
+
+def test_file_organization_rejects_ambiguous_extension_rules(tmp_path):
+    skill = FileOperationSkill(FakeFiles())
+
+    with pytest.raises(ValueError, match="more than one rule"):
+        skill.validate(
+            {
+                "operation": "organize",
+                "source": str(tmp_path),
+                "rules": {
+                    "First": [".txt"],
+                    "Second": ["txt"],
+                },
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "source, error",
+    [
+        ("${user_documents}/roblox_places/*.*", "wildcards are not supported"),
+        ("${documents_folder}/roblox_places/file.rbxl", "unsupported path placeholder"),
+    ],
+)
+def test_file_operation_requires_an_exact_supported_path(source, error):
+    skill = FileOperationSkill(FakeFiles())
+
+    with pytest.raises(ValueError, match=error):
+        skill.validate(
+            {
+                "operation": "move",
+                "source": source,
+                "destination": "${user_documents}/roblox_places",
+            }
+        )
+
+
+@pytest.mark.asyncio
 async def test_file_copy_and_reliable_rollback(tmp_path):
     source = tmp_path / "source.txt"
     source.write_text("data")
@@ -516,6 +634,38 @@ async def test_file_copy_and_reliable_rollback(tmp_path):
     rollback = await skill.rollback(result.rollback_token)
     assert rollback.status == ResultStatus.COMPLETED
     assert not destination.exists()
+
+
+@pytest.mark.asyncio
+async def test_file_rename_keeps_source_directory_when_destination_points_elsewhere(tmp_path):
+    source_folder = tmp_path / "desktop"
+    other_folder = tmp_path / "system32"
+    source_folder.mkdir()
+    other_folder.mkdir()
+    source = source_folder / "Resume.txt"
+    source.write_text("resume")
+    unsafe_destination = other_folder / "final resume.txt"
+    safe_destination = source_folder / unsafe_destination.name
+    skill = FileOperationSkill(FakeFiles())
+    skill_call = call(
+        "windows.file_operation",
+        {
+            "operation": "rename",
+            "source": str(source),
+            "destination": str(unsafe_destination),
+        },
+    )
+
+    scopes = skill.required_permissions(skill_call)
+    preview = await skill.preview(skill_call)
+    result = await skill.execute(skill_call, __import__("asyncio").Event())
+
+    assert scopes[0].targets == (str(source.resolve()), str(safe_destination.resolve()))
+    assert str(safe_destination.resolve()) in preview
+    assert str(unsafe_destination.resolve()) not in preview
+    assert result.data["destination"] == str(safe_destination.resolve())
+    assert safe_destination.read_text() == "resume"
+    assert not unsafe_destination.exists()
 
 
 @pytest.mark.asyncio
@@ -804,6 +954,20 @@ def test_installed_application_executable_resolution(tmp_path):
     ) == str(app.resolve())
 
 
+def test_installed_application_executable_rejects_installers(tmp_path):
+    install = tmp_path / "Example App"
+    install.mkdir()
+    installer = install / "Example App Installer.exe"
+    installer.write_bytes(b"")
+    redistributable = install / "VC_redist.x64.exe"
+    redistributable.write_bytes(b"")
+
+    assert LocalWindowsDeviceAdapter._display_icon_executable(f'"{installer}",0') is None
+    assert LocalWindowsDeviceAdapter._application_executable_path(
+        "Example App", None, str(install)
+    ) is None
+
+
 def test_default_browser_command_executable_path_is_parsed():
     assert (
         WindowsApplicationAdapter._command_executable_path(
@@ -817,6 +981,12 @@ def test_default_browser_command_executable_path_is_parsed():
         )
         == r"C:\Browsers\Firefox\firefox.exe"
     )
+
+
+def test_win32_input_structure_matches_native_abi_size():
+    _, _, input_type = _win32_input_types()
+
+    assert ctypes.sizeof(input_type) == (40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 28)
 
 
 def test_window_input_trims_trailing_planner_punctuation():

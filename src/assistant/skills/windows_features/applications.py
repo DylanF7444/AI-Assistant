@@ -104,8 +104,7 @@ class ApplicationWindowSkill(Skill):
             display_name="Application Window",
             description=(
                 "Focus, bring forward, hide/minimize, maximize, close, move, or resize "
-                "an existing approved application window. This changes a window that "
-                "already exists; it does not launch a new application instance."
+                "an existing, currently visible approved application process window."
             ),
             input_model=self.input_model,
             output_model=self.output_model,
