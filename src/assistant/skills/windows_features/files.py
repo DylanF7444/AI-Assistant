@@ -22,7 +22,6 @@ from assistant.windows.interfaces import (
 )
 from assistant.windows.paths import resolve_user_path
 
-
 _ALLOWED_PATH_PLACEHOLDERS = {
     "${assistant_folder}",
     "${user_desktop}",
@@ -102,9 +101,7 @@ class FileOperationInput(BaseModel):
                     or "\\" in folder_name
                     or not re.fullmatch(r"[A-Za-z0-9 _.-]{1,100}", folder_name)
                 ):
-                    raise ValueError(
-                        "organize destination names must be simple folder names"
-                    )
+                    raise ValueError("organize destination names must be simple folder names")
                 if not extensions:
                     raise ValueError(
                         f"organize rule {folder_name!r} requires at least one extension"
@@ -260,14 +257,13 @@ class FileOperationSkill(Skill):
             if not moves:
                 return f"{prefix}Organize {source}: no direct files match the rules."
             lines = [f"{prefix}Organize {len(moves)} file(s) in {source}:"]
-            lines.extend(f"- {source_path.name} to {destination}" for source_path, destination in moves)
+            lines.extend(
+                f"- {source_path.name} to {destination}" for source_path, destination in moves
+            )
             return "\n".join(lines)
         destination = f" to {destination_path}" if destination_path else ""
         prefix = "Preview only: " if args.dry_run else ""
-        return (
-            f"{prefix}{_file_operation_label(args.operation)} "
-            f"{source}{destination}"
-        )
+        return f"{prefix}{_file_operation_label(args.operation)} {source}{destination}"
 
     async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult:
         args = self.validate(call.arguments)

@@ -50,7 +50,7 @@ def test_upgrade_from_schema_version_one(tmp_path: Path):
     MacroRow.__table__.drop(database.engine)
     database.migrate()
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 6
+        assert session.get(SchemaVersionRow, 1).version == 8
     assert inspect(database.engine).has_table("macros")
 
 
@@ -108,7 +108,7 @@ def test_upgrade_from_schema_version_three_adds_knowledge_bases(tmp_path: Path):
 
     assert inspect(database.engine).has_table("knowledge_bases")
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 6
+        assert session.get(SchemaVersionRow, 1).version == 8
 
 
 def test_upgrade_from_schema_version_four_adds_vector_items(tmp_path: Path):
@@ -122,7 +122,7 @@ def test_upgrade_from_schema_version_four_adds_vector_items(tmp_path: Path):
 
     assert inspect(database.engine).has_table("vector_items")
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 6
+        assert session.get(SchemaVersionRow, 1).version == 8
 
 
 def test_upgrade_from_schema_version_five_adds_memory_items(tmp_path: Path):
@@ -136,4 +136,4 @@ def test_upgrade_from_schema_version_five_adds_memory_items(tmp_path: Path):
 
     assert inspect(database.engine).has_table("memory_items")
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 6
+        assert session.get(SchemaVersionRow, 1).version == 8

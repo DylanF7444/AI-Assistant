@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import threading
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -22,6 +23,7 @@ def action_digest(call: SkillCall) -> str:
 class ConfirmationManager:
     def __init__(self) -> None:
         self._pending: dict[UUID, ConfirmationRequest] = {}
+        self._lock = threading.RLock()
 
     def create(
         self,
@@ -42,7 +44,8 @@ class ConfirmationManager:
             expires_at=datetime.now(UTC) + timedelta(seconds=ttl_seconds),
             requires_typed_token=risk == RiskLevel.CRITICAL,
         )
-        self._pending[request.confirmation_id] = request
+        with self._lock:
+            self._pending[request.confirmation_id] = request
         return request
 
     def approve(
@@ -52,7 +55,8 @@ class ConfirmationManager:
         *,
         typed_token: str | None = None,
     ) -> bool:
-        request = self._pending.pop(confirmation_id, None)
+        with self._lock:
+            request = self._pending.pop(confirmation_id, None)
         if request is None or request.expires_at <= datetime.now(UTC):
             return False
         if request.correlation_id != call.correlation_id:
@@ -62,7 +66,9 @@ class ConfirmationManager:
         return not (request.requires_typed_token and typed_token != str(confirmation_id)[-6:])
 
     def deny(self, confirmation_id: UUID) -> bool:
-        return self._pending.pop(confirmation_id, None) is not None
+        with self._lock:
+            return self._pending.pop(confirmation_id, None) is not None
 
     def cancel_all(self) -> None:
-        self._pending.clear()
+        with self._lock:
+            self._pending.clear()

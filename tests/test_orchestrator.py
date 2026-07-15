@@ -542,6 +542,17 @@ async def test_terminal_debug_can_be_disabled(settings, capsys):
     assert "[assistant debug]" not in captured.err
 
 
+def test_terminal_debug_setting_is_applied_to_ai_provider(settings):
+    container = build_container(settings)
+    provider = container.orchestrator.planner.provider
+
+    assert provider.terminal_debug is True
+
+    container.orchestrator.terminal_debug = False
+
+    assert provider.terminal_debug is False
+
+
 @pytest.mark.asyncio
 async def test_sensitive_action_is_denied_without_permission(settings):
     container = build_container(settings)
@@ -954,9 +965,7 @@ async def test_voice_only_tts_speaks_voice_invocations_once(settings):
 @pytest.mark.asyncio
 async def test_persistent_voice_ignores_sound_until_explicit_stop(settings):
     container = build_container(settings)
-    request = asyncio.create_task(
-        container.orchestrator.handle_text("set a timer for 10 seconds")
-    )
+    request = asyncio.create_task(container.orchestrator.handle_text("set a timer for 10 seconds"))
 
     for _ in range(100):
         jobs = container.engine.active_jobs()
@@ -970,9 +979,7 @@ async def test_persistent_voice_ignores_sound_until_explicit_stop(settings):
     # A concurrent persistent listener uses its own correlation ID. It must not
     # replace the request that a later explicit stop should cancel.
     container.orchestrator._active_correlation = uuid4()
-    assert await container.orchestrator.consume_persistent_voice_interrupt(
-        "background clatter"
-    )
+    assert await container.orchestrator.consume_persistent_voice_interrupt("background clatter")
     await asyncio.sleep(0)
     assert not request.done()
     assert container.engine.active_jobs()[0].correlation_id == request_correlation

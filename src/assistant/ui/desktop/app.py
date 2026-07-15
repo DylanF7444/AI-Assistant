@@ -9,19 +9,26 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-
-from sqlalchemy import select
+from uuid import UUID
 
 from assistant.audio.activation import parse_voice_prompt_response
 from assistant.audio.capture import display_audio_devices
 from assistant.bootstrap import Container
-from assistant.contracts import PipelineEvent, PipelineState, ResponseType
+from assistant.contracts import (
+    PermissionContext,
+    PipelineEvent,
+    PipelineState,
+    ResponseType,
+    RiskLevel,
+    SkillCall,
+)
 from assistant.diagnostics import hardware_report, model_recommendations
 from assistant.models import ModelManifest
 from assistant.policy.capabilities import available_capabilities
 from assistant.policy.permissions import GrantType
 from assistant.response import response_from_result
-from assistant.storage.database import ItemRow, SettingsStore
+from assistant.scheduling.contracts import ScheduleRunState, ScheduleStatus
+from assistant.storage.database import SettingsStore
 from assistant.storage.history import HistoryStore
 from assistant.storage.macros import MacroDefinition, MacroStep
 from assistant.storage.secrets import SecretVault
@@ -29,9 +36,94 @@ from assistant.ui.desktop.controller import DesktopController
 from assistant.ui.desktop.state import DesktopWindowState, WindowGeometry
 from assistant.ui.desktop.tabs import TAB_LABELS
 from assistant.windows.adapters import LocalWindowsDeviceAdapter
+from assistant.windows.singleton import acquire_single_instance
+
+_DEMO_STRING_VALUES = {
+    "application": "notepad",
+    "body": "Created by the Skills tab demo.",
+    "expression": "2 + 2",
+    "from_unit": "mile",
+    "label": "Skills tab demo",
+    "message": "Skills tab demo",
+    "name": "demo",
+    "path": ".",
+    "query": "demo",
+    "root": ".",
+    "text": "Skills tab demo",
+    "title": "Skills tab demo",
+    "to_unit": "kilometer",
+    "url": "https://example.com",
+}
+
+
+def _demo_arguments(input_schema: dict[str, Any]) -> dict[str, Any]:
+    """Build an editable starting point from a skill's declared JSON schema."""
+
+    def resolve(schema: dict[str, Any]) -> dict[str, Any]:
+        reference = schema.get("$ref")
+        if isinstance(reference, str) and reference.startswith("#/$defs/"):
+            name = reference.rsplit("/", 1)[-1]
+            target = input_schema.get("$defs", {}).get(name)
+            if isinstance(target, dict):
+                return target
+        return schema
+
+    def sample(schema: dict[str, Any], field_name: str = "") -> Any:
+        schema = resolve(schema)
+        if "const" in schema:
+            return schema["const"]
+        choices = schema.get("enum")
+        if isinstance(choices, list) and choices:
+            return choices[0]
+        if "default" in schema:
+            return schema["default"]
+        alternatives = schema.get("anyOf") or schema.get("oneOf")
+        if isinstance(alternatives, list):
+            usable = [
+                item
+                for item in alternatives
+                if isinstance(item, dict) and item.get("type") != "null"
+            ]
+            if usable:
+                return sample(usable[0], field_name)
+        if isinstance(schema.get("allOf"), list) and schema["allOf"]:
+            first = schema["allOf"][0]
+            if isinstance(first, dict):
+                return sample(first, field_name)
+
+        schema_type = schema.get("type")
+        if schema_type == "object" or "properties" in schema:
+            properties = schema.get("properties", {})
+            required = schema.get("required", [])
+            return {
+                name: sample(properties[name], name)
+                for name in required
+                if name in properties and isinstance(properties[name], dict)
+            }
+        if schema_type == "array":
+            count = max(0, int(schema.get("minItems", 0)))
+            item_schema = schema.get("items", {})
+            return [sample(item_schema, field_name) for _ in range(count)]
+        if schema_type == "boolean":
+            return False
+        if schema_type in {"integer", "number"}:
+            if "minimum" in schema:
+                value = schema["minimum"]
+            elif "exclusiveMinimum" in schema:
+                value = schema["exclusiveMinimum"] + 1
+            else:
+                value = 1
+            return int(value) if schema_type == "integer" else float(value)
+        if schema_type == "string" or not schema_type:
+            return _DEMO_STRING_VALUES.get(field_name, "demo")
+        return None
+
+    arguments = sample(input_schema)
+    return arguments if isinstance(arguments, dict) else {}
 
 
 def run_desktop(container: Container) -> int:
+    instance_mutex = acquire_single_instance()
     controller = DesktopController(container)
     capability_details = {
         "clipboard.read": ("Read clipboard", "Read the current clipboard contents."),
@@ -130,12 +222,13 @@ def run_desktop(container: Container) -> int:
             QFileDialog,
             QFormLayout,
             QFrame,
-            QHeaderView,
             QHBoxLayout,
+            QHeaderView,
             QInputDialog,
             QLabel,
             QLineEdit,
             QListWidget,
+            QListWidgetItem,
             QMainWindow,
             QMenu,
             QMessageBox,
@@ -185,6 +278,8 @@ def run_desktop(container: Container) -> int:
         push_to_talk = Signal()
         cancel = Signal()
         pipeline_event = Signal(object)
+        notification = Signal(object)
+        automation_complete = Signal(object)
 
     class HorizontalTabBar(QTabBar):
         def tabSizeHint(self, index: int) -> QSize:
@@ -456,7 +551,10 @@ def run_desktop(container: Container) -> int:
             self.hotkey_bridge.push_to_talk.connect(self.listen)
             self.hotkey_bridge.cancel.connect(self.cancel)
             self.hotkey_bridge.pipeline_event.connect(self._handle_pipeline_event)
+            self.hotkey_bridge.notification.connect(self._handle_background_notification)
+            self.hotkey_bridge.automation_complete.connect(self._handle_automation_completion)
             container.events.add_listener(self.hotkey_bridge.pipeline_event.emit)
+            container.notification_center.add_listener(self.hotkey_bridge.notification.emit)
             self.tabs = QTabWidget()
             self.tabs.setObjectName("fullAssistantTabs")
             self.tabs.setTabBar(HorizontalTabBar())
@@ -712,15 +810,20 @@ def run_desktop(container: Container) -> int:
 
             header = QHBoxLayout()
             heading = QVBoxLayout()
-            title = QLabel("Active scripts")
+            title = QLabel("Automations")
             title.setObjectName("pageTitle")
-            subtitle = QLabel("Live assistant jobs, future reminders, and runtime hooks.")
+            subtitle = QLabel(
+                "Live jobs, durable schedules, pending approvals, and runtime controls."
+            )
             subtitle.setObjectName("pageSubtitle")
             heading.addWidget(title)
             heading.addWidget(subtitle)
             refresh = QPushButton("Refresh")
             refresh.clicked.connect(self._refresh_active_scripts)
+            self.pause_automations = QPushButton("Pause all")
+            self.pause_automations.clicked.connect(self._toggle_automation_pause)
             header.addLayout(heading, 1)
+            header.addWidget(self.pause_automations)
             header.addWidget(refresh)
             layout.addLayout(header)
 
@@ -740,11 +843,64 @@ def run_desktop(container: Container) -> int:
 
             scheduled_label = QLabel("SCHEDULED")
             scheduled_label.setObjectName("sectionLabel")
-            self.scheduled_scripts = QTableWidget(0, 4)
-            self.scheduled_scripts.setHorizontalHeaderLabels(["Type", "Name", "Due", "Status"])
+            self.scheduled_scripts = QTableWidget(0, 5)
+            self.scheduled_scripts.setHorizontalHeaderLabels(
+                ["Type", "Name", "Due", "Status", "Risk"]
+            )
+            self.scheduled_scripts.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
             self.scheduled_scripts.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
             self.scheduled_scripts.setAlternatingRowColors(True)
             self.scheduled_scripts.horizontalHeader().setStretchLastSection(True)
+            schedule_controls = QHBoxLayout()
+            self.schedule_pause_resume = QPushButton("Pause / resume")
+            self.schedule_pause_resume.clicked.connect(self._pause_or_resume_schedule)
+            schedule_run_now = QPushButton("Run now")
+            schedule_run_now.clicked.connect(self._run_selected_schedule)
+            schedule_revoke = QPushButton("Revoke authority")
+            schedule_revoke.clicked.connect(self._revoke_selected_schedule)
+            schedule_delete = QPushButton("Delete")
+            schedule_delete.setObjectName("dangerButton")
+            schedule_delete.clicked.connect(self._delete_selected_schedule)
+            for button in (
+                self.schedule_pause_resume,
+                schedule_run_now,
+                schedule_revoke,
+                schedule_delete,
+            ):
+                schedule_controls.addWidget(button)
+            schedule_controls.addStretch(1)
+
+            approvals_label = QLabel("PENDING APPROVAL")
+            approvals_label.setObjectName("sectionLabel")
+            self.pending_approvals = QTableWidget(0, 5)
+            self.pending_approvals.setHorizontalHeaderLabels(
+                ["Schedule", "Action", "Risk", "Expires", "Reason"]
+            )
+            self.pending_approvals.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            self.pending_approvals.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            self.pending_approvals.setAlternatingRowColors(True)
+            self.pending_approvals.horizontalHeader().setStretchLastSection(True)
+            approval_controls = QHBoxLayout()
+            approve = QPushButton("Review and approve")
+            approve.clicked.connect(self._review_selected_approval)
+            reject = QPushButton("Reject")
+            reject.setObjectName("dangerButton")
+            reject.clicked.connect(self._reject_selected_approval)
+            approval_controls.addWidget(approve)
+            approval_controls.addWidget(reject)
+            approval_controls.addStretch(1)
+
+            history_label = QLabel("RECENT RUNS")
+            history_label.setObjectName("sectionLabel")
+            self.schedule_history = QTableWidget(0, 5)
+            self.schedule_history.setHorizontalHeaderLabels(
+                ["Schedule", "Scheduled", "State", "Attempt", "Details"]
+            )
+            self.schedule_history.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            self.schedule_history.setAlternatingRowColors(True)
+            self.schedule_history.horizontalHeader().setStretchLastSection(True)
+            clear_history = QPushButton("Clear completed history")
+            clear_history.clicked.connect(self._clear_completed_schedule_history)
 
             hooks_label = QLabel("HOOKS")
             hooks_label.setObjectName("sectionLabel")
@@ -759,6 +915,13 @@ def run_desktop(container: Container) -> int:
             layout.addWidget(cancel)
             layout.addWidget(scheduled_label)
             layout.addWidget(self.scheduled_scripts, 2)
+            layout.addLayout(schedule_controls)
+            layout.addWidget(approvals_label)
+            layout.addWidget(self.pending_approvals, 2)
+            layout.addLayout(approval_controls)
+            layout.addWidget(history_label)
+            layout.addWidget(self.schedule_history, 2)
+            layout.addWidget(clear_history)
             layout.addWidget(hooks_label)
             layout.addWidget(self.script_hooks, 1)
             self._refresh_active_scripts()
@@ -778,6 +941,11 @@ def run_desktop(container: Container) -> int:
             if selected >= 0:
                 item = self.running_scripts.item(selected, 0)
                 selected_id = item.data(Qt.ItemDataRole.UserRole) if item else None
+            selected_schedule_id = self._selected_table_id(self.scheduled_scripts)
+            selected_run_id = self._selected_table_id(self.pending_approvals)
+            self.pause_automations.setText(
+                "Resume all" if container.scheduler.paused else "Pause all"
+            )
 
             self.running_scripts.setRowCount(0)
             now = datetime.now(UTC)
@@ -806,31 +974,117 @@ def run_desktop(container: Container) -> int:
                     self.running_scripts.selectRow(row)
 
             self.scheduled_scripts.setRowCount(0)
-            with container.database.session() as session:
-                reminders = list(
-                    session.scalars(
-                        select(ItemRow)
-                        .where(
-                            ItemRow.kind == "reminder",
-                            ItemRow.completed.is_(False),
-                        )
-                        .order_by(ItemRow.due_at)
-                    )
+            schedules = container.schedule_store.list(
+                statuses=(
+                    ScheduleStatus.ACTIVE,
+                    ScheduleStatus.PAUSED,
+                    ScheduleStatus.PENDING_AUTHORIZATION,
+                    ScheduleStatus.PENDING_REVIEW,
+                    ScheduleStatus.COMPLETED,
+                    ScheduleStatus.DISABLED,
                 )
-            for row, reminder in enumerate(reminders):
-                due = reminder.due_at
+            )
+            for row, schedule in enumerate(schedules):
+                due = schedule.next_run_at
                 if due is None:
                     due_text = "No due time"
-                    status = "Pending"
+                    status = schedule.status.value.replace("_", " ").title()
                 else:
                     if due.tzinfo is None:
                         due = due.replace(tzinfo=UTC)
                     due_text = due.astimezone().strftime("%b %d, %Y %I:%M %p")
-                    status = "Overdue" if due < now else "Scheduled"
+                    status = (
+                        "Overdue"
+                        if schedule.status == ScheduleStatus.ACTIVE and due < now
+                        else schedule.status.value.replace("_", " ").title()
+                    )
                 self._set_table_row(
                     self.scheduled_scripts,
                     row,
-                    ["Reminder", reminder.title, due_text, status],
+                    [
+                        "Reminder" if schedule.action.kind == "notify_only" else "Automation",
+                        schedule.name,
+                        due_text,
+                        status,
+                        (
+                            "Low"
+                            if not schedule.skill_snapshot
+                            else max(
+                                schedule.skill_snapshot,
+                                key=lambda item: {
+                                    "low": 0,
+                                    "medium": 1,
+                                    "high": 2,
+                                    "critical": 3,
+                                }[item.risk.value],
+                            ).risk.value.title()
+                        ),
+                    ],
+                )
+                id_item = self.scheduled_scripts.item(row, 0)
+                id_item.setData(Qt.ItemDataRole.UserRole, str(schedule.schedule_id))
+                if selected_schedule_id == str(schedule.schedule_id):
+                    self.scheduled_scripts.selectRow(row)
+
+            self.pending_approvals.setRowCount(0)
+            pending_runs = container.schedule_store.list_runs(
+                states=(ScheduleRunState.AWAITING_APPROVAL,),
+            )
+            schedules_by_id = {
+                schedule.schedule_id: schedule for schedule in container.schedule_store.list()
+            }
+            for row, run in enumerate(pending_runs):
+                schedule = schedules_by_id.get(run.schedule_id)
+                if schedule is None:
+                    continue
+                risk = (
+                    max(
+                        schedule.skill_snapshot,
+                        key=lambda item: {
+                            "low": 0,
+                            "medium": 1,
+                            "high": 2,
+                            "critical": 3,
+                        }[item.risk.value],
+                    ).risk.value.title()
+                    if schedule.skill_snapshot
+                    else "Low"
+                )
+                expires = (
+                    run.approval_expires_at.astimezone().strftime("%b %d, %I:%M:%S %p")
+                    if run.approval_expires_at
+                    else "Unknown"
+                )
+                self._set_table_row(
+                    self.pending_approvals,
+                    row,
+                    [
+                        schedule.name,
+                        schedule.action.kind.replace("_", " ").title(),
+                        risk,
+                        expires,
+                        run.blocked_reason or "Waiting for review",
+                    ],
+                )
+                id_item = self.pending_approvals.item(row, 0)
+                id_item.setData(Qt.ItemDataRole.UserRole, str(run.run_id))
+                if selected_run_id == str(run.run_id):
+                    self.pending_approvals.selectRow(row)
+
+            self.schedule_history.setRowCount(0)
+            for row, run in enumerate(container.schedule_store.list_runs(limit=50)):
+                schedule = schedules_by_id.get(run.schedule_id)
+                details = run.blocked_reason or run.result_status or ""
+                self._set_table_row(
+                    self.schedule_history,
+                    row,
+                    [
+                        schedule.name if schedule else str(run.schedule_id),
+                        run.scheduled_for.astimezone().strftime("%b %d, %I:%M:%S %p"),
+                        run.state.value.replace("_", " ").title(),
+                        str(run.attempt),
+                        details,
+                    ],
                 )
 
             hooks = [
@@ -857,6 +1111,15 @@ def run_desktop(container: Container) -> int:
             for row, hook in enumerate(hooks):
                 self._set_table_row(self.script_hooks, row, list(hook))
 
+        @staticmethod
+        def _selected_table_id(table: QTableWidget) -> str | None:
+            row = table.currentRow()
+            if row < 0:
+                return None
+            item = table.item(row, 0)
+            value = item.data(Qt.ItemDataRole.UserRole) if item else None
+            return str(value) if value else None
+
         def _cancel_selected_script(self) -> None:
             row = self.running_scripts.currentRow()
             if row < 0:
@@ -877,6 +1140,196 @@ def run_desktop(container: Container) -> int:
             worker.finished.connect(lambda: self._workers.remove(worker))
             self._workers.append(worker)
             worker.start()
+
+        def _selected_schedule(self):
+            schedule_id = self._selected_table_id(self.scheduled_scripts)
+            if schedule_id is None:
+                self.statusBar().showMessage("Select an automation first.", 3000)
+                return None
+            try:
+                return container.schedule_store.get(UUID(schedule_id))
+            except (KeyError, ValueError) as error:
+                self._show_error(str(error))
+                return None
+
+        def _toggle_automation_pause(self) -> None:
+            if container.scheduler.paused:
+                container.scheduler.resume()
+                self.statusBar().showMessage("Automations resumed.", 3000)
+                paused = False
+            else:
+                container.scheduler.pause()
+                self.statusBar().showMessage("All automations paused.", 3000)
+                paused = True
+            updated = container.settings.model_copy(update={"automations_paused": paused})
+            self._persist_application_settings(updated)
+            self._refresh_active_scripts()
+
+        def _pause_or_resume_schedule(self) -> None:
+            schedule = self._selected_schedule()
+            if schedule is None:
+                return
+            try:
+                if schedule.status == ScheduleStatus.PAUSED:
+                    container.schedule_store.resume(schedule.schedule_id)
+                else:
+                    container.schedule_store.pause(schedule.schedule_id)
+            except (KeyError, ValueError) as error:
+                self._show_error(str(error))
+            self._refresh_active_scripts()
+
+        def _run_selected_schedule(self) -> None:
+            schedule = self._selected_schedule()
+            if schedule is None:
+                return
+            try:
+                container.schedule_store.run_now(schedule.schedule_id)
+                container.scheduler.wake()
+            except (KeyError, ValueError) as error:
+                self._show_error(str(error))
+            self._refresh_active_scripts()
+
+        def _revoke_selected_schedule(self) -> None:
+            schedule = self._selected_schedule()
+            if schedule is None:
+                return
+            answer = QMessageBox.question(
+                self,
+                "Revoke Background Authority",
+                f"Stop {schedule.name} until its exact action is reviewed again?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                container.schedule_store.revoke_authorization(
+                    schedule.schedule_id,
+                    "Background authorization revoked by user",
+                )
+            except (KeyError, ValueError) as error:
+                self._show_error(str(error))
+            self._refresh_active_scripts()
+
+        def _delete_selected_schedule(self) -> None:
+            schedule = self._selected_schedule()
+            if schedule is None:
+                return
+            answer = QMessageBox.question(
+                self,
+                "Delete Automation",
+                f"Delete {schedule.name} and cancel its pending occurrences?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                container.schedule_store.delete(schedule.schedule_id)
+            except (KeyError, ValueError) as error:
+                self._show_error(str(error))
+            self._refresh_active_scripts()
+
+        def _clear_completed_schedule_history(self) -> None:
+            answer = QMessageBox.question(
+                self,
+                "Clear Automation History",
+                "Delete completed automation run records? Active and pending runs are kept.",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            deleted = container.schedule_store.clear_completed_run_history()
+            self.statusBar().showMessage(f"Deleted {deleted} completed run records.", 5000)
+            self._refresh_active_scripts()
+
+        def _submit_scheduler_work(self, coroutine, on_success) -> None:
+            try:
+                future = container.background_runtime.submit(coroutine)
+            except Exception as error:
+                self._show_error(str(error))
+                return
+
+            def completed(result_future) -> None:
+                try:
+                    payload = (on_success, result_future.result(), None)
+                except Exception as error:
+                    payload = (on_success, None, error)
+                self.hotkey_bridge.automation_complete.emit(payload)
+
+            future.add_done_callback(completed)
+
+        def _handle_automation_completion(self, payload: tuple) -> None:
+            callback, result, error = payload
+            if error is not None:
+                self._show_error(str(error))
+            else:
+                callback(result)
+            self._refresh_active_scripts()
+
+        def _review_selected_approval(self) -> None:
+            run_id = self._selected_table_id(self.pending_approvals)
+            if run_id is None:
+                self.statusBar().showMessage("Select a pending approval first.", 3000)
+                return
+            self._submit_scheduler_work(
+                container.scheduler.runner.prepare_approval(UUID(run_id)),
+                self._confirm_approval_review,
+            )
+
+        def _confirm_approval_review(self, review) -> None:
+            lines = [
+                f"Schedule: {review.schedule_name}",
+                f"Risk: {review.risk.value.title()}",
+                "",
+            ]
+            for item in review.confirmations:
+                request = item.request
+                lines.append(f"{item.step_id}: {request.exact_action}")
+                if request.exact_targets:
+                    lines.append("Targets: " + "; ".join(request.exact_targets))
+            answer = QMessageBox.question(
+                self,
+                "Approve Scheduled Occurrence",
+                "\n".join(lines),
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                for item in review.confirmations:
+                    container.confirmations.deny(item.request.confirmation_id)
+                return
+            confirmation_ids = {}
+            typed_tokens = {}
+            for item in review.confirmations:
+                request = item.request
+                confirmation_ids[item.step_id] = request.confirmation_id
+                if request.requires_typed_token:
+                    token, ok = QInputDialog.getText(
+                        self,
+                        "Critical Action Confirmation",
+                        "Type the final six characters of the confirmation ID "
+                        f"{request.confirmation_id}:",
+                    )
+                    if not ok:
+                        container.confirmations.deny(request.confirmation_id)
+                        return
+                    typed_tokens[item.step_id] = token.strip()
+            self._submit_scheduler_work(
+                container.scheduler.runner.approve(
+                    review.run_id,
+                    confirmation_ids,
+                    typed_tokens=typed_tokens,
+                ),
+                lambda run: self.statusBar().showMessage(
+                    f"Scheduled occurrence finished: {run.state.value}.",
+                    5000,
+                ),
+            )
+
+        def _reject_selected_approval(self) -> None:
+            run_id = self._selected_table_id(self.pending_approvals)
+            if run_id is None:
+                self.statusBar().showMessage("Select a pending approval first.", 3000)
+                return
+            try:
+                container.scheduler.runner.reject(UUID(run_id))
+            except (KeyError, ValueError) as error:
+                self._show_error(str(error))
+            self._refresh_active_scripts()
 
         def _command_tab(self) -> QWidget:
             page = QWidget()
@@ -1286,6 +1739,24 @@ def run_desktop(container: Container) -> int:
                 self.compact_panel.set_request(event.message)
                 self._set_status_transcript(event.message)
 
+        def _handle_background_notification(self, message: Any) -> None:
+            tray = getattr(self, "tray", None)
+            if tray is not None:
+                icons = {
+                    "info": QSystemTrayIcon.MessageIcon.Information,
+                    "success": QSystemTrayIcon.MessageIcon.Information,
+                    "warning": QSystemTrayIcon.MessageIcon.Warning,
+                    "error": QSystemTrayIcon.MessageIcon.Critical,
+                }
+                tray.showMessage(
+                    message.title,
+                    message.message,
+                    icons.get(message.severity, QSystemTrayIcon.MessageIcon.Information),
+                    10_000,
+                )
+            self.statusBar().showMessage(message.message, 10_000)
+            self._refresh_active_scripts()
+
         def _show_voice_transcript(self, text: str) -> None:
             self.transcript.setPlainText(text)
             self.transcript.moveCursor(QTextCursor.MoveOperation.End)
@@ -1388,14 +1859,40 @@ def run_desktop(container: Container) -> int:
 
         def _skills_tab(self) -> QWidget:
             page = QWidget()
-            layout = QVBoxLayout(page)
-            self.skill_list = QListWidget()
-            for manifest in container.registry.list():
-                self.skill_list.addItem(
-                    f"{'Enabled' if container.registry.is_enabled(manifest.skill_id) else 'Disabled'} | "
-                    f"{manifest.display_name} ({manifest.skill_id}) - {manifest.risk.value}"
+            page.setObjectName("assistantPage")
+            layout = QHBoxLayout(page)
+            layout.setContentsMargins(20, 20, 20, 20)
+            layout.setSpacing(18)
+
+            browser = QFrame()
+            browser.setObjectName("skillBrowserCard")
+            browser.setMinimumWidth(250)
+            browser.setMaximumWidth(340)
+            browser_layout = QVBoxLayout(browser)
+            browser_layout.setContentsMargins(16, 16, 16, 16)
+            browser_layout.setSpacing(10)
+            browser_title = QLabel("SKILL LIBRARY")
+            browser_title.setObjectName("sectionLabel")
+            browser_layout.addWidget(browser_title)
+            browser_layout.addWidget(
+                self._info_label(
+                    "Select a skill to review its purpose, access, security level, and demo."
                 )
+            )
+            self.skill_list = QListWidget()
+            self.skill_list.setObjectName("skillList")
+            self.skill_list.setAccessibleName("Available skills")
+            self.skill_list.setWordWrap(True)
+            self.skill_list.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            )
+            self.skill_list.currentItemChanged.connect(
+                lambda *_: self._update_skill_details()
+            )
+            browser_layout.addWidget(self.skill_list, 1)
+
             toggle = QPushButton("Enable / Disable Selected")
+            toggle.setObjectName("secondaryButton")
             toggle.clicked.connect(self._toggle_skill)
             install = QPushButton("Install Signed Skill")
             install.clicked.connect(self._install_skill)
@@ -1404,35 +1901,340 @@ def run_desktop(container: Container) -> int:
             health = QPushButton("Check Selected Health")
             health.clicked.connect(self._check_skill_health)
             uninstall = QPushButton("Uninstall Selected Skill")
+            uninstall.setObjectName("dangerButton")
             uninstall.clicked.connect(self._uninstall_skill)
-            layout.addWidget(self.skill_list)
-            layout.addWidget(toggle)
-            layout.addWidget(install)
-            layout.addWidget(update)
-            layout.addWidget(health)
-            layout.addWidget(uninstall)
+            browser_layout.addWidget(toggle)
+            browser_layout.addWidget(health)
+            browser_layout.addWidget(install)
+            browser_layout.addWidget(update)
+            browser_layout.addWidget(uninstall)
+
+            detail_scroll = QScrollArea()
+            detail_scroll.setObjectName("skillDetailScroll")
+            detail_scroll.setWidgetResizable(True)
+            detail_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            detail = QWidget()
+            detail.setObjectName("skillDetailPage")
+            detail_layout = QVBoxLayout(detail)
+            detail_layout.setContentsMargins(4, 2, 10, 16)
+            detail_layout.setSpacing(12)
+
+            self.skill_detail_title = QLabel("Select a skill")
+            self.skill_detail_title.setObjectName("skillDetailTitle")
+            self.skill_detail_title.setWordWrap(True)
+            self.skill_detail_id = QLabel("")
+            self.skill_detail_id.setObjectName("skillDetailId")
+            detail_layout.addWidget(self.skill_detail_title)
+            detail_layout.addWidget(self.skill_detail_id)
+
+            overview = QFrame()
+            overview.setObjectName("skillDetailCard")
+            overview_layout = QVBoxLayout(overview)
+            overview_layout.setContentsMargins(18, 16, 18, 16)
+            overview_header = QHBoxLayout()
+            self.skill_category_value = QLabel("General")
+            self.skill_category_value.setObjectName("skillCategoryBadge")
+            self.skill_security_value = QLabel("Low security risk")
+            self.skill_security_value.setObjectName("skillSecurityBadge")
+            self.skill_security_value.setWordWrap(True)
+            self.skill_security_value.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+            )
+            overview_header.addWidget(self.skill_category_value)
+            overview_header.addStretch()
+            self.skill_description = QLabel("")
+            self.skill_description.setObjectName("skillDescription")
+            self.skill_description.setWordWrap(True)
+            overview_layout.addLayout(overview_header)
+            overview_layout.addWidget(self.skill_security_value)
+            overview_layout.addWidget(self.skill_description)
+            detail_layout.addWidget(overview)
+
+            permission_heading = QLabel("REQUIRED PERMISSIONS")
+            permission_heading.setObjectName("sectionLabel")
+            detail_layout.addWidget(permission_heading)
+            self.skill_permissions_summary = QLabel("")
+            self.skill_permissions_summary.setWordWrap(True)
+            detail_layout.addWidget(self.skill_permissions_summary)
+            self.skill_permission_table = QTableWidget(0, 3)
+            self.skill_permission_table.setObjectName("skillPermissionTable")
+            self.skill_permission_table.setHorizontalHeaderLabels(
+                ["Permission", "Applies to", "Why it is needed"]
+            )
+            self._configure_data_table(self.skill_permission_table)
+            self.skill_permission_table.setWordWrap(True)
+            self.skill_permission_table.setMinimumHeight(110)
+            self.skill_permission_table.setMaximumHeight(130)
+            self.skill_permission_table.horizontalHeader().setSectionResizeMode(
+                2, QHeaderView.ResizeMode.Stretch
+            )
+            detail_layout.addWidget(self.skill_permission_table)
+
+            demo_card = QFrame()
+            demo_card.setObjectName("skillDetailCard")
+            demo_layout = QVBoxLayout(demo_card)
+            demo_layout.setContentsMargins(18, 16, 18, 16)
+            demo_heading = QLabel("RUN A DEMO")
+            demo_heading.setObjectName("sectionLabel")
+            demo_explanation = self._info_label(
+                "Edit the sample JSON, then run it through the normal permission and "
+                "confirmation checks. The demo performs the real skill action."
+            )
+            self.skill_demo_input = QTextEdit()
+            self.skill_demo_input.setObjectName("skillDemoInput")
+            self.skill_demo_input.setAccessibleName("Skill demo JSON arguments")
+            self.skill_demo_input.setMinimumHeight(90)
+            self.skill_demo_input.setMaximumHeight(110)
+            self.skill_demo_run_button = QPushButton("Run selected skill")
+            self.skill_demo_run_button.setObjectName("primaryButton")
+            self.skill_demo_run_button.clicked.connect(self._run_skill_demo)
+            self.skill_demo_output = QTextEdit()
+            self.skill_demo_output.setObjectName("skillDemoOutput")
+            self.skill_demo_output.setAccessibleName("Skill demo result")
+            self.skill_demo_output.setReadOnly(True)
+            self.skill_demo_output.setMinimumHeight(110)
+            self.skill_demo_output.setPlaceholderText("The demo result will appear here.")
+            demo_layout.addWidget(demo_heading)
+            demo_layout.addWidget(demo_explanation)
+            demo_layout.addWidget(self.skill_demo_input)
+            demo_layout.addWidget(self.skill_demo_run_button, 0, Qt.AlignmentFlag.AlignRight)
+            demo_layout.addWidget(self.skill_demo_output)
+            detail_layout.addWidget(demo_card)
+            detail_layout.addStretch()
+            detail_scroll.setWidget(detail)
+
+            layout.addWidget(browser, 1)
+            layout.addWidget(detail_scroll, 3)
+            self._skill_demo_running = False
+            self._reload_skills()
             return page
 
+        @staticmethod
+        def _skill_list_text(manifest: Any, enabled: bool) -> str:
+            state = "Enabled" if enabled else "Disabled"
+            return f"{manifest.display_name}\n{manifest.category}  ·  {state}"
+
         def _reload_skills(self) -> None:
+            selected = self._selected_manifest()
+            selected_id = selected.skill_id if selected is not None else "core.calculator"
             self.skill_list.clear()
             for manifest in container.registry.list():
-                self.skill_list.addItem(
-                    f"{'Enabled' if container.registry.is_enabled(manifest.skill_id) else 'Disabled'} | "
-                    f"{manifest.display_name} ({manifest.skill_id}) - {manifest.risk.value}"
+                item = QListWidgetItem(
+                    self._skill_list_text(
+                        manifest, container.registry.is_enabled(manifest.skill_id)
+                    )
                 )
+                item.setData(Qt.ItemDataRole.UserRole, manifest.skill_id)
+                item.setToolTip(f"{manifest.description}\n{manifest.skill_id}")
+                self.skill_list.addItem(item)
+                if manifest.skill_id == selected_id:
+                    self.skill_list.setCurrentItem(item)
+            if self.skill_list.currentRow() < 0 and self.skill_list.count():
+                self.skill_list.setCurrentRow(0)
+            self._update_skill_details()
+
+        @staticmethod
+        def _security_description(risk: RiskLevel) -> str:
+            return {
+                RiskLevel.LOW: "Low — no confirmation by default; permissions still apply.",
+                RiskLevel.MEDIUM: "Medium — limited side effects or sensitive access; confirm to run.",
+                RiskLevel.HIGH: "High — significant system or data changes; confirm to run.",
+                RiskLevel.CRITICAL: "Critical — severe or irreversible impact; typed confirmation required.",
+            }[risk]
+
+        def _update_skill_details(self, *, reset_demo: bool = True) -> None:
+            manifest = self._selected_manifest()
+            if manifest is None:
+                self.skill_detail_title.setText("No skill selected")
+                self.skill_detail_id.clear()
+                self.skill_description.clear()
+                self.skill_permissions_summary.clear()
+                self.skill_permission_table.setRowCount(0)
+                self.skill_demo_input.clear()
+                self.skill_demo_run_button.setEnabled(False)
+                return
+
+            enabled = container.registry.is_enabled(manifest.skill_id)
+            self.skill_detail_title.setText(manifest.display_name)
+            self.skill_detail_id.setText(
+                f"{manifest.skill_id}  ·  version {manifest.version}  ·  "
+                f"{'Enabled' if enabled else 'Disabled'}"
+            )
+            self.skill_category_value.setText(manifest.category)
+            self.skill_security_value.setText(self._security_description(manifest.risk))
+            self.skill_security_value.setProperty("level", manifest.risk.value)
+            self.skill_security_value.style().unpolish(self.skill_security_value)
+            self.skill_security_value.style().polish(self.skill_security_value)
+            self.skill_description.setText(manifest.description)
+
+            permissions = manifest.permissions
+            self.skill_permission_table.setRowCount(max(1, len(permissions)))
+            if not permissions:
+                self.skill_permissions_summary.setText(
+                    "This skill declares no special permissions."
+                )
+                for column, value in enumerate(
+                    ("None", "Local skill boundary", "No protected capability is requested.")
+                ):
+                    self.skill_permission_table.setItem(
+                        0, column, self._table_item(value)
+                    )
+            else:
+                self.skill_permissions_summary.setText(
+                    f"{len(permissions)} declared permission"
+                    f"{'s' if len(permissions) != 1 else ''}. Actual targets are checked "
+                    "again when the demo runs."
+                )
+                for row, permission in enumerate(permissions):
+                    values = (
+                        capability_table_label(permission.capability),
+                        target_summary(permission.targets),
+                        permission.reason,
+                    )
+                    for column, value in enumerate(values):
+                        self.skill_permission_table.setItem(
+                            row, column, self._table_item(value)
+                        )
+            self.skill_permission_table.resizeRowsToContents()
+
+            if reset_demo:
+                arguments = _demo_arguments(manifest.input_schema)
+                self.skill_demo_input.setPlainText(json.dumps(arguments, indent=2))
+                self.skill_demo_output.clear()
+            self.skill_demo_run_button.setEnabled(enabled and not self._skill_demo_running)
+            self.skill_demo_run_button.setToolTip(
+                "" if enabled else "Enable this skill before running its demo."
+            )
 
         def _toggle_skill(self) -> None:
-            row = self.skill_list.currentRow()
-            if row < 0:
+            manifest = self._selected_manifest()
+            if manifest is None:
                 return
-            manifest = container.registry.list()[row]
             if container.registry.is_enabled(manifest.skill_id):
                 container.registry.disable(manifest.skill_id)
             else:
                 container.registry.enable(manifest.skill_id)
-            self.skill_list.item(row).setText(
-                f"{'Enabled' if container.registry.is_enabled(manifest.skill_id) else 'Disabled'} | "
-                f"{manifest.display_name} ({manifest.skill_id}) - {manifest.risk.value}"
+            self.skill_list.currentItem().setText(
+                self._skill_list_text(
+                    manifest, container.registry.is_enabled(manifest.skill_id)
+                )
+            )
+            self._update_skill_details(reset_demo=False)
+
+        def _run_skill_demo(self) -> None:
+            manifest = self._selected_manifest()
+            if manifest is None or self._skill_demo_running:
+                return
+            if not container.registry.is_enabled(manifest.skill_id):
+                self.skill_demo_output.setPlainText(
+                    "Enable this skill before running its demo."
+                )
+                return
+            try:
+                arguments = json.loads(self.skill_demo_input.toPlainText() or "{}")
+                if not isinstance(arguments, dict):
+                    raise ValueError("Demo input must be a JSON object.")
+                container.registry.inspect(manifest.skill_id).validate(arguments)
+            except Exception as error:
+                self.skill_demo_output.setPlainText(f"Invalid demo input:\n{error}")
+                return
+
+            call = SkillCall(
+                skill_id=manifest.skill_id,
+                caller="user",
+                arguments=arguments,
+                permission_context=PermissionContext(session_id="skills-tab-demo"),
+            )
+            self._set_skill_demo_running(True)
+            self.skill_demo_output.setPlainText(
+                "Checking permissions and preparing the demo…"
+            )
+            self._set_pipeline_state(
+                PipelineState.THINKING, f"Preparing {manifest.display_name} demo"
+            )
+            worker = AsyncWorker(container.engine.prepare(call))
+            worker.complete.connect(self._show_skill_demo_outcome)
+            worker.failed.connect(self._show_skill_demo_error)
+            worker.finished.connect(lambda: self._discard_worker(worker))
+            self._workers.append(worker)
+            worker.start()
+
+        def _show_skill_demo_outcome(self, outcome: Any) -> None:
+            if outcome.registration_requests:
+                self.skill_demo_output.setPlainText(
+                    "The demo needs an application registration before it can run."
+                )
+                self._request_registrations(
+                    outcome,
+                    continuation=self._show_skill_demo_outcome,
+                    cancelled=lambda: self._cancel_skill_demo(
+                        "Demo cancelled because the application was not registered."
+                    ),
+                )
+            elif outcome.permission_requests:
+                self.skill_demo_output.setPlainText(
+                    "The demo is waiting for the required permission."
+                )
+                self._request_permissions(
+                    outcome,
+                    continuation=self._show_skill_demo_outcome,
+                    cancelled=lambda: self._cancel_skill_demo(
+                        "Demo cancelled because permission was not granted."
+                    ),
+                )
+            elif outcome.confirmation:
+                self.skill_demo_output.setPlainText(
+                    "The demo is waiting for confirmation of the exact action."
+                )
+                self._request_confirmation(
+                    outcome,
+                    result_handler=self._show_skill_demo_result,
+                    cancelled=lambda: self._cancel_skill_demo(
+                        "Demo cancelled because the action was not confirmed."
+                    ),
+                )
+            elif outcome.result is not None:
+                self._show_skill_demo_result(outcome.result)
+            else:
+                self._show_skill_demo_error("The demo returned no result.")
+
+        def _show_skill_demo_result(self, result: Any) -> None:
+            response = response_from_result(
+                result,
+                detail=container.orchestrator.response_detail,
+                allow_sensitive_speech=False,
+                hide_sensitive_display=container.orchestrator.hide_sensitive_display,
+            )
+            self.skill_demo_output.setPlainText(
+                f"Status: {result.status.value.replace('_', ' ').title()}\n\n"
+                f"{response.display_text}"
+            )
+            self._set_skill_demo_running(False)
+            state = (
+                PipelineState.IDLE
+                if result.status.value == "completed"
+                else PipelineState.ERROR
+            )
+            self._set_pipeline_state(state, f"Demo {result.status.value.replace('_', ' ')}")
+
+        def _show_skill_demo_error(self, error: str) -> None:
+            self.skill_demo_output.setPlainText(f"Demo failed:\n{error}")
+            self._set_skill_demo_running(False)
+            self._set_pipeline_state(PipelineState.ERROR, "Skill demo failed")
+
+        def _cancel_skill_demo(self, message: str) -> None:
+            self.skill_demo_output.setPlainText(message)
+            self._set_skill_demo_running(False)
+
+        def _set_skill_demo_running(self, running: bool) -> None:
+            self._skill_demo_running = running
+            manifest = self._selected_manifest()
+            enabled = bool(
+                manifest and container.registry.is_enabled(manifest.skill_id)
+            )
+            self.skill_demo_run_button.setEnabled(enabled and not running)
+            self.skill_demo_run_button.setText(
+                "Running…" if running else "Run selected skill"
             )
 
         def _install_skill(self) -> None:
@@ -1453,9 +2255,18 @@ def run_desktop(container: Container) -> int:
             )
 
         def _selected_manifest(self):
-            row = self.skill_list.currentRow()
-            manifests = container.registry.list()
-            return manifests[row] if 0 <= row < len(manifests) else None
+            item = self.skill_list.currentItem()
+            if item is None:
+                return None
+            skill_id = item.data(Qt.ItemDataRole.UserRole)
+            return next(
+                (
+                    manifest
+                    for manifest in container.registry.list()
+                    if manifest.skill_id == skill_id
+                ),
+                None,
+            )
 
         def _update_skill(self) -> None:
             selected = self._selected_manifest()
@@ -1962,6 +2773,17 @@ def run_desktop(container: Container) -> int:
             form = QFormLayout(content)
             self.setting_offline = QCheckBox()
             self.setting_offline.setChecked(container.settings.offline_lock)
+            self.setting_scheduler_enabled = QCheckBox()
+            self.setting_scheduler_enabled.setChecked(container.settings.scheduler_enabled)
+            self.setting_background_actions = QCheckBox()
+            self.setting_background_actions.setChecked(
+                container.settings.background_actions_enabled
+            )
+            self.setting_pause_while_locked = QCheckBox()
+            self.setting_pause_while_locked.setChecked(
+                container.settings.pause_background_while_locked
+            )
+            self.setting_default_timezone = QLineEdit(container.settings.default_timezone)
             self.setting_stt = QLineEdit(container.settings.stt_model)
             self.setting_llm = QLineEdit(container.settings.llm_model)
             self.setting_openai_model = QLineEdit(container.settings.openai_model)
@@ -2086,6 +2908,10 @@ def run_desktop(container: Container) -> int:
             save = QPushButton("Save Settings")
             save.clicked.connect(self._save_settings)
             form.addRow("Global offline lock", self.setting_offline)
+            form.addRow("Enable durable scheduling", self.setting_scheduler_enabled)
+            form.addRow("Enable background skill actions", self.setting_background_actions)
+            form.addRow("Pause interactive actions while locked", self.setting_pause_while_locked)
+            form.addRow("Default schedule time zone", self.setting_default_timezone)
             form.addRow("Input device", self.setting_input)
             form.addRow("STT model", self.setting_stt)
             form.addRow("Local LLM model", self.setting_llm)
@@ -2206,6 +3032,10 @@ def run_desktop(container: Container) -> int:
                 }
                 values = {
                     "offline_lock": self.setting_offline.isChecked(),
+                    "scheduler_enabled": self.setting_scheduler_enabled.isChecked(),
+                    "background_actions_enabled": self.setting_background_actions.isChecked(),
+                    "pause_background_while_locked": self.setting_pause_while_locked.isChecked(),
+                    "default_timezone": self.setting_default_timezone.text().strip(),
                     "audio_input_device": self.setting_input.currentData(),
                     "stt_model": self.setting_stt.text().strip(),
                     "llm_model": self.setting_llm.text().strip(),
@@ -2246,6 +3076,15 @@ def run_desktop(container: Container) -> int:
                 QMessageBox.critical(self, "Invalid Settings", str(error))
                 return
             self._persist_application_settings(validated)
+            container.scheduler.enabled = validated.scheduler_enabled
+            if validated.scheduler_enabled and not container.background_runtime.running:
+                container.background_runtime.start()
+            container.scheduler.runner.background_actions_enabled = (
+                validated.background_actions_enabled
+            )
+            container.scheduler.runner.pause_while_locked = validated.pause_background_while_locked
+            container.scheduler.max_concurrency = validated.max_background_concurrency
+            container.scheduler.wake()
             vault = SecretVault(validated.data_dir / "secrets")
             for name, field in (
                 ("openai", self.setting_openai_key),
@@ -2965,7 +3804,13 @@ def run_desktop(container: Container) -> int:
                 )
                 self._apply_passive_voice_indicators()
 
-        def _request_permissions(self, outcome: Any) -> None:
+        def _request_permissions(
+            self,
+            outcome: Any,
+            *,
+            continuation: Any | None = None,
+            cancelled: Any | None = None,
+        ) -> None:
             details = []
             for request in outcome.permission_requests:
                 manifest = container.registry.get(request.call.skill_id).manifest
@@ -2993,6 +3838,8 @@ def run_desktop(container: Container) -> int:
             )
             if decision != "approve":
                 self._set_pipeline_state(PipelineState.CANCELLED, "Permission was not granted")
+                if cancelled is not None:
+                    cancelled()
                 return
             labels = {
                 "once": GrantType.ONCE,
@@ -3014,6 +3861,8 @@ def run_desktop(container: Container) -> int:
             )
             if mode_label not in labels:
                 self._set_pipeline_state(PipelineState.CANCELLED, "Permission was not granted")
+                if cancelled is not None:
+                    cancelled()
                 return
             grant_type = labels[mode_label]
             target_mode = self._voice_prompt_choice(
@@ -3034,6 +3883,8 @@ def run_desktop(container: Container) -> int:
             )
             if target_mode not in {"requested_targets", "any_target"}:
                 self._set_pipeline_state(PipelineState.CANCELLED, "Permission was not granted")
+                if cancelled is not None:
+                    cancelled()
                 return
             grants: dict[tuple[str, str, str, str], set[str]] = {}
             for request in outcome.permission_requests:
@@ -3064,13 +3915,21 @@ def run_desktop(container: Container) -> int:
             self._reload_permissions()
             self._set_pipeline_state(PipelineState.THINKING, "Preparing the approved action")
             worker = AsyncWorker(container.engine.prepare(outcome.call))
-            worker.complete.connect(self._show_continued_outcome)
-            worker.failed.connect(self._show_error)
-            worker.finished.connect(lambda: self._workers.remove(worker))
+            worker.complete.connect(continuation or self._show_continued_outcome)
+            worker.failed.connect(
+                self._show_skill_demo_error if continuation is not None else self._show_error
+            )
+            worker.finished.connect(lambda: self._discard_worker(worker))
             self._workers.append(worker)
             worker.start()
 
-        def _request_registrations(self, outcome: Any) -> None:
+        def _request_registrations(
+            self,
+            outcome: Any,
+            *,
+            continuation: Any | None = None,
+            cancelled: Any | None = None,
+        ) -> None:
             request = outcome.registration_requests[0]
             decision = self._voice_prompt_choice(
                 title="Application Registration Required",
@@ -3091,15 +3950,21 @@ def run_desktop(container: Container) -> int:
             )
             if decision != "approve":
                 self._set_pipeline_state(PipelineState.CANCELLED, "Application was not registered")
+                if cancelled is not None:
+                    cancelled()
                 return
             if not self._register_application_alias(request.application):
                 self._set_pipeline_state(PipelineState.CANCELLED, "Application was not registered")
+                if cancelled is not None:
+                    cancelled()
                 return
             self._set_pipeline_state(PipelineState.THINKING, "Preparing the registered application")
             worker = AsyncWorker(container.engine.prepare(outcome.call))
-            worker.complete.connect(self._show_continued_outcome)
-            worker.failed.connect(self._show_error)
-            worker.finished.connect(lambda: self._workers.remove(worker))
+            worker.complete.connect(continuation or self._show_continued_outcome)
+            worker.failed.connect(
+                self._show_skill_demo_error if continuation is not None else self._show_error
+            )
+            worker.finished.connect(lambda: self._discard_worker(worker))
             self._workers.append(worker)
             worker.start()
 
@@ -3132,7 +3997,13 @@ def run_desktop(container: Container) -> int:
             elif outcome.result:
                 self._show_skill_result(outcome.result)
 
-        def _request_confirmation(self, outcome: Any) -> None:
+        def _request_confirmation(
+            self,
+            outcome: Any,
+            *,
+            result_handler: Any | None = None,
+            cancelled: Any | None = None,
+        ) -> None:
             request = outcome.confirmation
             decision = self._voice_prompt_choice(
                 title=f"Confirm {request.risk.value.title()} Risk Action",
@@ -3148,6 +4019,8 @@ def run_desktop(container: Container) -> int:
             if decision != "approve":
                 container.confirmations.deny(request.confirmation_id)
                 self._set_pipeline_state(PipelineState.CANCELLED, "Action was not confirmed")
+                if cancelled is not None:
+                    cancelled()
                 return
             typed_token = None
             if request.requires_typed_token:
@@ -3175,6 +4048,8 @@ def run_desktop(container: Container) -> int:
                 if typed_token != expected:
                     container.confirmations.deny(request.confirmation_id)
                     self._set_pipeline_state(PipelineState.CANCELLED, "Action was not confirmed")
+                    if cancelled is not None:
+                        cancelled()
                     return
             self._set_pipeline_state(PipelineState.EXECUTING, request.exact_action)
             worker = AsyncWorker(
@@ -3184,9 +4059,11 @@ def run_desktop(container: Container) -> int:
                     typed_token=typed_token,
                 )
             )
-            worker.complete.connect(self._show_skill_result)
-            worker.failed.connect(self._show_error)
-            worker.finished.connect(lambda: self._workers.remove(worker))
+            worker.complete.connect(result_handler or self._show_skill_result)
+            worker.failed.connect(
+                self._show_skill_demo_error if result_handler is not None else self._show_error
+            )
+            worker.finished.connect(lambda: self._discard_worker(worker))
             self._workers.append(worker)
             worker.start()
 
@@ -3255,6 +4132,8 @@ def run_desktop(container: Container) -> int:
             self._set_pipeline_state(PipelineState.CANCELLED, "Stopped by you")
 
         def cancel(self) -> None:
+            container.scheduler.pause()
+
             async def cancel_all():
                 await controller.cancel()
 
@@ -3277,6 +4156,7 @@ def run_desktop(container: Container) -> int:
             self._save_current_geometry()
             self._persist_window_state()
             container.events.remove_listener(self.hotkey_bridge.pipeline_event.emit)
+            container.notification_center.remove_listener(self.hotkey_bridge.notification.emit)
             try:
                 import keyboard
 
@@ -3288,6 +4168,8 @@ def run_desktop(container: Container) -> int:
             self._stop_passive_voice()
             if container.wakeword:
                 asyncio.run(container.wakeword.cancel())
+            with suppress(Exception):
+                container.background_runtime.stop()
             with suppress(Exception):
                 asyncio.run(controller.cancel())
 
@@ -3358,7 +4240,7 @@ def run_desktop(container: Container) -> int:
             color: #8fa0b7;
             font-size: 10.5pt;
         }
-        #statusCard, #composeCard, #activityCard {
+        #statusCard, #composeCard, #activityCard, #skillBrowserCard, #skillDetailCard {
             background: #101d30;
             border: 1px solid #1e304a;
             border-radius: 14px;
@@ -3461,6 +4343,47 @@ def run_desktop(container: Container) -> int:
             padding: 4px 9px;
             font-size: 7.5pt;
             font-weight: 700;
+        }
+        #skillDetailScroll, #skillDetailPage {
+            background: transparent;
+        }
+        #skillDetailTitle {
+            color: #f7fbff;
+            font-size: 21pt;
+            font-weight: 650;
+        }
+        #skillDetailId {
+            color: #8292a8;
+            font-family: "Consolas";
+            font-size: 9pt;
+        }
+        #skillDescription {
+            color: #dce7f3;
+            font-size: 10.5pt;
+            padding-top: 8px;
+        }
+        #skillCategoryBadge, #skillSecurityBadge {
+            color: #9fc0ff;
+            background: #172b49;
+            border: 1px solid #28456f;
+            border-radius: 9px;
+            padding: 5px 9px;
+            font-size: 8pt;
+            font-weight: 700;
+        }
+        #skillSecurityBadge[level="medium"] {
+            color: #ffd18a;
+            background: #3a2a18;
+            border-color: #6a4b22;
+        }
+        #skillSecurityBadge[level="high"], #skillSecurityBadge[level="critical"] {
+            color: #ff9cac;
+            background: #3a1e2a;
+            border-color: #633747;
+        }
+        #skillDemoInput, #skillDemoOutput {
+            font-family: "Consolas";
+            font-size: 9pt;
         }
         #compactLatestRequest {
             color: #cbd7e6;
@@ -3609,6 +4532,12 @@ def run_desktop(container: Container) -> int:
         "Local Assistant - voice activation "
         + ("ON" if container.settings.voice_activation_mode != "hotkey" else "off")
     )
+    window.tray = tray
     tray.show()
+    if container.settings.scheduler_enabled:
+        container.background_runtime.start()
     window.show()
-    return app.exec()
+    try:
+        return app.exec()
+    finally:
+        instance_mutex.close()

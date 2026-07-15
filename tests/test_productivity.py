@@ -1,9 +1,11 @@
 import asyncio
+from datetime import datetime
+from uuid import UUID
 
 import pytest
 
 from assistant.contracts import PermissionContext, ResultStatus, SkillCall
-from assistant.skills.productivity import NoteSkill, TaskSkill, UnitConversionSkill
+from assistant.skills.productivity import NoteSkill, ReminderSkill, TaskSkill, UnitConversionSkill
 from assistant.storage.database import Database
 
 
@@ -71,3 +73,24 @@ async def test_note_search_display_includes_matching_note(tmp_path):
 
     assert "Matching notes:" in result.display_text
     assert "Filter — Model X200" in result.display_text
+
+
+@pytest.mark.asyncio
+async def test_reminder_skill_creates_an_authorized_durable_schedule(tmp_path):
+    database = Database(f"sqlite:///{tmp_path / 'reminders.db'}")
+    database.migrate()
+    skill = ReminderSkill(database)
+
+    result = await skill.execute(
+        _call(
+            "core.reminder",
+            {"title": "Check the oven", "delay_seconds": 300},
+        ),
+        asyncio.Event(),
+    )
+
+    schedule = skill.store.get(UUID(result.data["schedule_id"]))
+    assert result.status == ResultStatus.COMPLETED
+    assert schedule.name == "Check the oven"
+    assert schedule.status.value == "active"
+    assert schedule.next_run_at == datetime.fromisoformat(result.data["due_at"])

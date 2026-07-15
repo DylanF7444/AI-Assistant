@@ -42,6 +42,7 @@ def manifest(
     skill_id: str,
     display_name: str,
     description: str,
+    category: str | None = None,
     input_model: type[BaseModel],
     output_model: type[BaseModel],
     permissions: tuple[PermissionScope, ...] = (),
@@ -53,6 +54,7 @@ def manifest(
         skill_id=skill_id,
         version="1.0.0",
         display_name=display_name,
+        category=category or _category_for_skill(skill_id),
         description=description,
         input_schema=input_model.model_json_schema(),
         output_schema=output_model.model_json_schema(),
@@ -62,6 +64,32 @@ def manifest(
         supports_rollback=supports_rollback,
         safe_to_retry=safe_to_retry,
     )
+
+
+def _category_for_skill(skill_id: str) -> str:
+    if skill_id in {"windows.file_search", "windows.file_operation"}:
+        return "Files & Folders"
+    if skill_id.startswith("windows."):
+        return "Windows"
+    if skill_id.startswith(("web.", "cloud.")):
+        return "Web & Cloud"
+    if skill_id.startswith("integration."):
+        return "Connected Devices"
+    if skill_id in {
+        "core.timer",
+        "core.datetime",
+        "core.calculator",
+        "core.tasks",
+        "core.notes",
+        "core.reminder",
+        "core.unit_conversion",
+        "core.schedule",
+        "core.macro",
+    }:
+        return "Productivity"
+    if skill_id.startswith("core."):
+        return "Assistant & Security"
+    return "General"
 
 
 class TimerInput(BaseModel):
@@ -421,10 +449,7 @@ class RegisteredApplicationsSkill(Skill):
         args = self.validate(call.arguments)
         registrations = self._registrations()
         applications = _safe_distinct_application_registrations(
-            [
-                {"name": name, "path": path}
-                for name, path in sorted(registrations.items())
-            ]
+            [{"name": name, "path": path} for name, path in sorted(registrations.items())]
         )
         if not applications:
             return SkillResult(

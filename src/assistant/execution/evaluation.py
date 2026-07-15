@@ -69,6 +69,7 @@ class CallEvaluator:
         *,
         consume_once: bool,
         include_preview: bool,
+        force_confirmation: bool = False,
     ) -> CallEvaluation:
         try:
             skill = self.registry.get(call.skill_id)
@@ -131,7 +132,7 @@ class CallEvaluator:
         try:
             risk = skill.risk_for(call)
             preview = None
-            if include_preview and self.requires_confirmation(call, risk):
+            if include_preview and (force_confirmation or self.requires_confirmation(call, risk)):
                 preview = await skill.preview(call)
         except (KeyError, ValidationError, ValueError) as exc:
             return CallEvaluation(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from collections import OrderedDict
 from collections.abc import Mapping
@@ -95,9 +96,12 @@ class ExecutionEngine:
         self._cancel_events: dict[UUID, asyncio.Event] = {}
         self._completed_keys: OrderedDict[str, SkillResult] = OrderedDict()
         self._last_command: UndoRecord | None = None
+        self._state_lock = threading.RLock()
 
     def active_jobs(self) -> tuple[ActiveJob, ...]:
         current = time.monotonic()
+        with self._state_lock:
+            details = tuple(self._job_details.items())
         return tuple(
             ActiveJob(
                 correlation_id=correlation_id,
@@ -113,7 +117,7 @@ class ExecutionEngine:
                 arguments,
                 started_at,
                 started_monotonic,
-            ) in tuple(self._job_details.items())
+            ) in details
         )
 
     async def prepare(self, call: SkillCall) -> ExecutionOutcome:
@@ -136,6 +140,42 @@ class ExecutionEngine:
         if evaluation.needs_confirmation:
             return await self._confirmation_outcome(evaluation)
         return ExecutionOutcome(result=await self.execute(call), call=call)
+
+    async def request_confirmation(
+        self,
+        call: SkillCall,
+        *,
+        ttl_seconds: int = 30,
+    ) -> ExecutionOutcome:
+        """Validate a call and create a confirmation without executing it.
+
+        Background approval uses this path so global interactive confirmation
+        overrides can never turn a reviewed occurrence into immediate execution.
+        """
+        evaluation = await self.evaluator.evaluate(
+            call,
+            consume_once=False,
+            include_preview=True,
+            force_confirmation=True,
+        )
+        if evaluation.invalid_error:
+            return self._invalid_outcome(evaluation)
+        if evaluation.registration_requests:
+            return await self._registration_outcome(
+                call,
+                evaluation.registration_requests,
+            )
+        if evaluation.policy_denied:
+            return await self._policy_outcome(call, evaluation.policy_denied)
+        if evaluation.permission_requests or not evaluation.allowed:
+            return await self._permission_outcome(
+                call,
+                evaluation.permission_requests,
+            )
+        return await self._confirmation_outcome(
+            evaluation,
+            ttl_seconds=ttl_seconds,
+        )
 
     async def prepare_plan(self, plan: ExecutionPlan) -> ExecutionOutcome:
         permission_requests: list[PermissionGrantRequest] = []
@@ -315,7 +355,12 @@ class ExecutionEngine:
             permission_requests=requests,
         )
 
-    def _create_confirmation(self, evaluation: CallEvaluation) -> ConfirmationRequest:
+    def _create_confirmation(
+        self,
+        evaluation: CallEvaluation,
+        *,
+        ttl_seconds: int = 30,
+    ) -> ConfirmationRequest:
         assert evaluation.risk is not None
         assert evaluation.preview is not None
         targets = tuple(
@@ -328,13 +373,19 @@ class ExecutionEngine:
             exact_action=evaluation.preview,
             targets=targets,
             risk=evaluation.risk,
+            ttl_seconds=ttl_seconds,
         )
 
     async def _confirmation_outcome(
         self,
         evaluation: CallEvaluation,
+        *,
+        ttl_seconds: int = 30,
     ) -> ExecutionOutcome:
-        confirmation = self._create_confirmation(evaluation)
+        confirmation = self._create_confirmation(
+            evaluation,
+            ttl_seconds=ttl_seconds,
+        )
         return await self._publish_confirmation(evaluation.call, confirmation)
 
     async def _publish_confirmation(
@@ -359,9 +410,10 @@ class ExecutionEngine:
         confirmation_id: UUID | None = None,
         typed_token: str | None = None,
     ) -> SkillResult:
-        if call.idempotency_key in self._completed_keys:
-            self._completed_keys.move_to_end(call.idempotency_key)
-            return self._completed_keys[call.idempotency_key]
+        with self._state_lock:
+            if call.idempotency_key in self._completed_keys:
+                self._completed_keys.move_to_end(call.idempotency_key)
+                return self._completed_keys[call.idempotency_key]
         evaluation = await self.evaluator.evaluate(
             call,
             consume_once=True,
@@ -405,7 +457,8 @@ class ExecutionEngine:
                 ResultStatus.DENIED,
             )
         cancel_event = asyncio.Event()
-        self._cancel_events[call.correlation_id] = cancel_event
+        with self._state_lock:
+            self._cancel_events[call.correlation_id] = cancel_event
         await self.events.publish(
             PipelineEvent(
                 correlation_id=call.correlation_id,
@@ -414,7 +467,13 @@ class ExecutionEngine:
             )
         )
         started = time.perf_counter()
-        max_attempts = 2 if skill.manifest.safe_to_retry else 1
+        max_attempts = (
+            1
+            if call.permission_context.invocation == "background"
+            else 2
+            if skill.manifest.safe_to_retry
+            else 1
+        )
         timeout_seconds = (
             max(30.0, float(call.arguments.get("seconds", 0)) + 1.0)
             if call.skill_id == "core.timer"
@@ -426,15 +485,16 @@ class ExecutionEngine:
             while attempts < max_attempts:
                 attempts += 1
                 task = asyncio.create_task(skill.execute(call, cancel_event))
-                self._jobs[call.correlation_id] = task
-                self._job_loops[call.correlation_id] = asyncio.get_running_loop()
-                self._job_details[call.correlation_id] = (
-                    call.skill_id,
-                    skill.manifest.display_name,
-                    dict(call.arguments),
-                    datetime.now(UTC),
-                    time.monotonic(),
-                )
+                with self._state_lock:
+                    self._jobs[call.correlation_id] = task
+                    self._job_loops[call.correlation_id] = asyncio.get_running_loop()
+                    self._job_details[call.correlation_id] = (
+                        call.skill_id,
+                        skill.manifest.display_name,
+                        dict(call.arguments),
+                        datetime.now(UTC),
+                        time.monotonic(),
+                    )
                 try:
                     result = await asyncio.wait_for(task, timeout=timeout_seconds)
                     skill.validate_result(result)
@@ -458,10 +518,11 @@ class ExecutionEngine:
                     if attempts >= max_attempts:
                         result = self._failure("skill_failed", str(exc), ResultStatus.FAILED)
         finally:
-            self._jobs.pop(call.correlation_id, None)
-            self._job_details.pop(call.correlation_id, None)
-            self._job_loops.pop(call.correlation_id, None)
-            self._cancel_events.pop(call.correlation_id, None)
+            with self._state_lock:
+                self._jobs.pop(call.correlation_id, None)
+                self._job_details.pop(call.correlation_id, None)
+                self._job_loops.pop(call.correlation_id, None)
+                self._cancel_events.pop(call.correlation_id, None)
         assert result is not None
         self.audit.record(
             correlation_id=str(call.correlation_id),
@@ -493,23 +554,26 @@ class ExecutionEngine:
             },
         )
         if result.status == ResultStatus.COMPLETED:
-            self._last_command = UndoRecord(
-                skill_id=call.skill_id,
-                display_name=skill.manifest.display_name,
-                rollback_token=(
-                    result.rollback_token if skill.manifest.supports_rollback else None
-                ),
-                result_summary=result.summary,
-            )
-            self._completed_keys[call.idempotency_key] = result
-            self._completed_keys.move_to_end(call.idempotency_key)
-            while len(self._completed_keys) > self.completed_key_limit:
-                self._completed_keys.popitem(last=False)
+            with self._state_lock:
+                if call.permission_context.invocation == "interactive":
+                    self._last_command = UndoRecord(
+                        skill_id=call.skill_id,
+                        display_name=skill.manifest.display_name,
+                        rollback_token=(
+                            result.rollback_token if skill.manifest.supports_rollback else None
+                        ),
+                        result_summary=result.summary,
+                    )
+                self._completed_keys[call.idempotency_key] = result
+                self._completed_keys.move_to_end(call.idempotency_key)
+                while len(self._completed_keys) > self.completed_key_limit:
+                    self._completed_keys.popitem(last=False)
         return result
 
     async def undo_last(self, correlation_id: UUID | None = None) -> SkillResult:
         undo_correlation_id = correlation_id or uuid4()
-        record = self._last_command
+        with self._state_lock:
+            record = self._last_command
         if record is None:
             return self._failure(
                 "undo_unavailable",
@@ -572,7 +636,9 @@ class ExecutionEngine:
             },
         )
         if result.status == ResultStatus.COMPLETED:
-            self._last_command = None
+            with self._state_lock:
+                if self._last_command == record:
+                    self._last_command = None
         return result
 
     def _requires_confirmation(self, call: SkillCall, risk: RiskLevel) -> bool:
@@ -596,15 +662,27 @@ class ExecutionEngine:
         keys.append(f"risk:{risk.value}")
         return tuple(keys)
 
-    async def execute_plan(self, plan: ExecutionPlan) -> dict[str, SkillResult]:
+    async def execute_plan(
+        self,
+        plan: ExecutionPlan,
+        *,
+        confirmations: Mapping[str, tuple[UUID, str | None]] | None = None,
+    ) -> dict[str, SkillResult]:
         results: dict[str, SkillResult] = {}
         pending = {step.step_id: step for step in plan.steps}
+        approvals = dict(confirmations or {})
 
         async def run_step(step_id: str) -> tuple[str, SkillResult]:
             step = pending[step_id]
+            confirmation_id, typed_token = approvals.get(step_id, (None, None))
             try:
                 return step_id, await asyncio.wait_for(
-                    self.execute(step.call), timeout=step.timeout_seconds
+                    self.execute(
+                        step.call,
+                        confirmation_id=confirmation_id,
+                        typed_token=typed_token,
+                    ),
+                    timeout=step.timeout_seconds,
                 )
             except TimeoutError:
                 return step_id, self._failure(
@@ -682,13 +760,15 @@ class ExecutionEngine:
 
     async def cancel(self, correlation_id: UUID | None = None) -> None:
         self.confirmations.cancel_all()
-        targets = (
-            [correlation_id] if correlation_id is not None else list(self._cancel_events.keys())
-        )
+        with self._state_lock:
+            targets = (
+                [correlation_id] if correlation_id is not None else list(self._cancel_events.keys())
+            )
         for target in targets:
-            event = self._cancel_events.get(target)
-            task = self._jobs.get(target)
-            job_loop = self._job_loops.get(target)
+            with self._state_lock:
+                event = self._cancel_events.get(target)
+                task = self._jobs.get(target)
+                job_loop = self._job_loops.get(target)
             current_loop = asyncio.get_running_loop()
 
             def request_cancel(

@@ -136,6 +136,17 @@ class AssistantOrchestrator:
         self._pending_confirmation: ExecutionOutcome | None = None
 
     @property
+    def terminal_debug(self) -> bool:
+        return self._terminal_debug
+
+    @terminal_debug.setter
+    def terminal_debug(self, enabled: bool) -> None:
+        self._terminal_debug = enabled
+        provider = getattr(self.planner, "provider", None)
+        if provider is not None and hasattr(provider, "terminal_debug"):
+            provider.terminal_debug = enabled
+
+    @property
     def _session_context(self) -> deque[dict[str, str]]:
         return self.state.session_context
 
@@ -1647,9 +1658,7 @@ class AssistantOrchestrator:
                         "This critical action requires the displayed confirmation token; "
                         "use the on-screen confirmation prompt."
                     ),
-                    speech_text=(
-                        "This critical action requires the displayed confirmation token."
-                    ),
+                    speech_text=("This critical action requires the displayed confirmation token."),
                     response_type=ResponseType.CONFIRMATION,
                     severity="warning",
                 )

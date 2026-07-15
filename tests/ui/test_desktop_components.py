@@ -9,7 +9,7 @@ pytest.importorskip("pytestqt")
 
 from assistant.bootstrap import build_container
 from assistant.storage.database import SettingsStore
-from assistant.ui.desktop.app import run_desktop
+from assistant.ui.desktop.app import _demo_arguments, run_desktop
 from assistant.ui.desktop.controller import DesktopController
 from assistant.ui.desktop.state import DesktopWindowState, WindowGeometry
 from assistant.ui.desktop.tabs import TAB_GROUPS, TAB_LABELS
@@ -31,6 +31,14 @@ def test_async_worker_reports_completion(qtbot):
 
     assert signal.args == ["done"]
     assert worker.wait(2000)
+
+
+def test_skill_demo_arguments_are_generated_from_the_declared_schema():
+    from assistant.skills.builtin import CalculatorSkill
+
+    assert _demo_arguments(CalculatorSkill.manifest.input_schema) == {
+        "expression": "2 + 2"
+    }
 
 
 @pytest.mark.ui
@@ -76,8 +84,7 @@ def test_compact_companion_switches_views_renders_and_hides_to_tray(
         captured_windows.extend(
             widget
             for widget in QApplication.topLevelWidgets()
-            if widget.objectName() == "localAssistantWindow"
-            and id(widget) not in existing_windows
+            if widget.objectName() == "localAssistantWindow" and id(widget) not in existing_windows
         )
         return 0
 
@@ -128,7 +135,10 @@ def test_compact_companion_switches_views_renders_and_hides_to_tray(
         for index in range(window.tabs.count())
     )
     assert tab_bar.width() >= longest_tab_width
-    assert tab_bar.tabRect(window.tabs.indexOf(window.permission_table.parentWidget())).width() >= longest_tab_width
+    assert (
+        tab_bar.tabRect(window.tabs.indexOf(window.permission_table.parentWidget())).width()
+        >= longest_tab_width
+    )
     compose_layout = window.response.parentWidget().layout()
     assert compose_layout.indexOf(window.response) < compose_layout.indexOf(window.transcript)
     assert not window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
@@ -141,8 +151,7 @@ def test_compact_companion_switches_views_renders_and_hides_to_tray(
         for column in range(window.audit_table.columnCount())
     )
     assert all(
-        window.audit_table.columnWidth(column)
-        >= window.audit_table.sizeHintForColumn(column)
+        window.audit_table.columnWidth(column) >= window.audit_table.sizeHintForColumn(column)
         for column in range(window.audit_table.columnCount())
     )
     for table in (
@@ -185,4 +194,67 @@ def test_compact_companion_switches_views_renders_and_hides_to_tray(
     window.shutdown()
     window.shutdown()
     assert window._shutdown_started is True
+    window.hide()
+
+
+@pytest.mark.ui
+def test_skills_tab_shows_details_permissions_security_and_runs_demo(
+    qtbot, settings, monkeypatch
+):
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    monkeypatch.setattr(QMessageBox, "information", lambda *args: None)
+    monkeypatch.setattr(QMessageBox, "critical", lambda *args: None)
+    captured_windows = []
+    existing_windows = {id(widget) for widget in QApplication.topLevelWidgets()}
+
+    def capture_window(self):
+        captured_windows.extend(
+            widget
+            for widget in QApplication.topLevelWidgets()
+            if widget.objectName() == "localAssistantWindow" and id(widget) not in existing_windows
+        )
+        return 0
+
+    monkeypatch.setattr(QApplication, "exec", capture_window)
+    container = build_container(settings)
+    SettingsStore(container.database).set("first_run_complete", True)
+
+    assert run_desktop(container) == 0
+    window = captured_windows[-1]
+    qtbot.addWidget(window)
+
+    def select_skill(skill_id: str) -> None:
+        for row in range(window.skill_list.count()):
+            item = window.skill_list.item(row)
+            if item.data(Qt.ItemDataRole.UserRole) == skill_id:
+                window.skill_list.setCurrentItem(item)
+                return
+        raise AssertionError(f"Skill not found: {skill_id}")
+
+    select_skill("windows.file_search")
+    assert window.skill_category_value.text() == "Files & Folders"
+    assert "Search filenames" in window.skill_description.text()
+    assert "Read files" in window.skill_permission_table.item(0, 0).text()
+    assert "selected folder" in window.skill_permission_table.item(0, 2).text()
+
+    select_skill("windows.launcher")
+    assert window.skill_security_value.text().startswith("Medium")
+
+    select_skill("core.calculator")
+    assert window.skill_category_value.text() == "Productivity"
+    assert "no special permissions" in window.skill_permissions_summary.text()
+    assert '"expression": "2 + 2"' in window.skill_demo_input.toPlainText()
+
+    window._run_skill_demo()
+    qtbot.waitUntil(
+        lambda: "The result is 4" in window.skill_demo_output.toPlainText(),
+        timeout=5000,
+    )
+    assert container.audit.query(event_type="skill_execution")[0]["skill_id"] == (
+        "core.calculator"
+    )
+
+    window.shutdown()
     window.hide()

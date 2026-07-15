@@ -38,3 +38,26 @@ When a command needs permission, the Assistant tab shows the capability,
 reason, and exact target and offers to grant it directly. Normally you do not
 need to type a capability in Settings. Use the Permissions tab only to review,
 revoke, deny, or preconfigure grants.
+
+## Background authorization
+
+An interactive permission grant never authorizes a future unattended action.
+Likewise, a schedule-specific background authorization cannot be used by an
+interactive command. A background authorization is stored separately and binds
+one schedule ID and revision to its exact frozen action digest, policy digest,
+skill IDs, capabilities, resolved targets, risk ceiling, expiry, user, and local
+machine identity.
+
+Creating a fixed-action or frozen-macro schedule requires an immediate
+interactive confirmation even when the future action is low risk. At every
+occurrence the assistant rechecks the current skill version, input schema,
+permissions, risk, file policy, target scope, run-rate/runtime/step budgets,
+network allowance, lock state, authorization expiry, and action arguments.
+Material edits create a new revision and revoke the previous authorization.
+
+Only low-risk frozen work can run unattended. Medium, high, and critical work
+waits in the Automations approval inbox. Approval creates a fresh exact preview
+and single-use confirmation for that occurrence; critical work still requires
+the displayed typed token. Schedules cannot invoke schedule management, macros,
+or file-access-policy management in the background and cannot persist embedded
+password, token, secret, API-key, or PIN fields.

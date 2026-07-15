@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 
 from assistant.contracts import ResultStatus, SkillCall, SkillResult
+from assistant.scheduling.store import ScheduleStore
 from assistant.skills.base import Skill
 from assistant.skills.builtin import manifest
 from assistant.storage.database import Database, ItemRow, now
@@ -147,20 +148,28 @@ class NoteSkill(Skill):
 
 class ReminderInput(BaseModel):
     title: str
-    due_at: datetime
+    due_at: datetime | None = None
+    delay_seconds: float | None = Field(default=None, gt=0, le=31_536_000)
+
+    @model_validator(mode="after")
+    def _requires_one_time_source(self) -> ReminderInput:
+        if (self.due_at is None) == (self.delay_seconds is None):
+            raise ValueError("Provide exactly one of due_at or delay_seconds")
+        return self
 
 
 class ReminderOutput(BaseModel):
-    item_id: int
+    schedule_id: str
     due_at: datetime
+    status: str
 
 
 class ReminderSkill(Skill):
     input_model = ReminderInput
     output_model = ReminderOutput
 
-    def __init__(self, database: Database) -> None:
-        self.database = database
+    def __init__(self, store: ScheduleStore | Database) -> None:
+        self.store = store if isinstance(store, ScheduleStore) else ScheduleStore(store)
         self.manifest = manifest(
             skill_id="core.reminder",
             display_name="Reminder",
@@ -171,26 +180,29 @@ class ReminderSkill(Skill):
 
     async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult:
         args = self.validate(call.arguments)
-        due = args.due_at
+        due = (
+            self.store.clock.now() + timedelta(seconds=args.delay_seconds)
+            if args.delay_seconds is not None
+            else args.due_at
+        )
+        assert due is not None
         if due.tzinfo is None:
             due = due.astimezone()
         if due <= datetime.now(UTC).astimezone(due.tzinfo):
             raise ValueError("Reminder time must be in the future")
-        with self.database.session() as session:
-            row = ItemRow(
-                kind="reminder",
-                title=args.title,
-                body="",
-                due_at=due,
-                created_at=now(),
-            )
-            session.add(row)
-            session.flush()
-            item_id = row.id
+        schedule = self.store.create_notification(
+            name=args.title,
+            message=args.title,
+            run_at=due,
+        )
         return SkillResult(
             status=ResultStatus.COMPLETED,
             summary=f"Reminder set for {due.strftime('%c')}.",
-            data=ReminderOutput(item_id=item_id, due_at=due).model_dump(mode="json"),
+            data=ReminderOutput(
+                schedule_id=str(schedule.schedule_id),
+                due_at=due,
+                status=schedule.status.value,
+            ).model_dump(mode="json"),
         )
 
 
@@ -263,8 +275,7 @@ def _task_display(
     if not items:
         return heading if operation == "delete" else "There are no tasks in the local list."
     lines = [
-        f"- [{'x' if item['completed'] else ' '}] {item['id']}: {item['title']}"
-        for item in items
+        f"- [{'x' if item['completed'] else ' '}] {item['id']}: {item['title']}" for item in items
     ]
     return heading + "\n" + "\n".join(lines)
 

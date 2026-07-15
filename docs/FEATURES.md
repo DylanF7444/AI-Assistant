@@ -22,6 +22,7 @@ the relevant setting, credential, local service, or device to be configured.
 | Core | `core.macro` | Extensible | Low | Per macro step | Run an existing configured sequence by its exact saved name without bypassing validation, permissions, or confirmations. |
 | Core | `core.notes` | Implemented | Low | None | Add, search, list, and delete local notes. |
 | Core | `core.reminder` | Implemented | Low | None | Create local reminders or alarms. |
+| Core | `core.schedule` | Implemented | Dynamic | None | Create recurring reminders or reviewed frozen actions/macros; list, inspect, pause, resume, revise, delete, snooze, run now, and inspect or clear run history. |
 | Core | `core.tasks` | Implemented | Low | None | Add, list, complete, and delete local tasks. |
 | Core | `core.timer` | Implemented | Low | None | Run a cancellable local timer. |
 | Core | `core.unit_conversion` | Implemented | Low | None | Convert common distance, weight, volume, and temperature units locally. |
@@ -60,6 +61,14 @@ the relevant setting, credential, local service, or device to be configured.
   new capabilities, macro composition, and offline lock enforcement.
 - Optional MQTT, Home Assistant, Wyoming, web search/fetch, and cloud-model
   integrations behind explicit configuration and permissions.
+- Durable one-time and recurring schedules with SQLite persistence, IANA time
+  zones, DST handling, bounded misfire catch-up, multi-instance leases, restart
+  reconciliation, nonblocking tray notifications, and an Automations control
+  center.
+- Revocable schedule-scoped background authorization for exact low-risk fixed
+  skills and frozen macro plans, with capability/target/risk/runtime/rate bounds,
+  skill drift detection, machine-bound restores, locked-session gating, and
+  fresh approval for every higher-risk occurrence.
 
 ## Not Yet Claimed Complete
 

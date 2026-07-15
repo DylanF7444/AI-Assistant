@@ -385,9 +385,7 @@ class LocalPlanner:
                 if question := self._clarification_from_invalid_action(output):
                     return PlannerDecision(clarification=question)
                 if attempt:
-                    return PlannerDecision(
-                        clarification=self._grounding_clarification(output)
-                    )
+                    return PlannerDecision(clarification=self._grounding_clarification(output))
                 prompt += self._repair_prompt_fragment(exc, output)
         raise RuntimeError("Planner validation retry was exhausted")
 
@@ -457,9 +455,7 @@ class LocalPlanner:
                 if question := self._clarification_from_invalid_action(output):
                     return PlannerDecision(clarification=question)
                 if attempt:
-                    return PlannerDecision(
-                        clarification=self._grounding_clarification(output)
-                    )
+                    return PlannerDecision(clarification=self._grounding_clarification(output))
                 prompt += self._repair_prompt_fragment(exc, output)
         raise RuntimeError("Planner interpretation planning retry was exhausted")
 
@@ -854,10 +850,6 @@ class LocalPlanner:
         output = await self.provider.structured_completion(
             prompt, schema, timeout_seconds=self.timeout_seconds
         )
-        print(
-            f"Planner response: {json.dumps(output, separators=(',', ':'))}",
-            flush=True,
-        )
         return self._normalize_planner_output(output)
 
     async def _repair_conversational_response(
@@ -1206,9 +1198,7 @@ class LocalPlanner:
         try:
             self.argument_validator(manifest.skill_id, arguments)
         except (KeyError, PydanticValidationError, TypeError, ValueError) as exc:
-            raise ValidationError(
-                f"Invalid arguments for {manifest.skill_id}: {exc}"
-            ) from exc
+            raise ValidationError(f"Invalid arguments for {manifest.skill_id}: {exc}") from exc
 
     def _ground_skill_intent(
         self,
@@ -1286,9 +1276,7 @@ class LocalPlanner:
     ) -> UserIntentInterpretation | None:
         if "\n" in text:
             return None
-        normalized = " ".join(
-            re.sub(r"[^a-z0-9/]+", " ", text.casefold()).split()
-        )
+        normalized = " ".join(re.sub(r"[^a-z0-9/]+", " ", text.casefold()).split())
         patterns = (
             (
                 r"(?:please )?clean up (?:my |the )?downloads",
@@ -1393,9 +1381,7 @@ class LocalPlanner:
                 application.strip(),
                 flags=re.IGNORECASE,
             ):
-                normalized["application"] = normalize_process_name(
-                    application.strip()
-                )[:-4]
+                normalized["application"] = normalize_process_name(application.strip())[:-4]
             return normalized
         if manifest.skill_id == "windows.application_window" and isinstance(
             arguments.get("process_name"), str

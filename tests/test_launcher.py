@@ -83,9 +83,7 @@ async def test_registered_applications_skill_lists_assistant_registrations(tmp_p
     notepad = tmp_path / "notepad.exe"
     skill = RegisteredApplicationsSkill(lambda: {"brave": str(brave), "notepad": str(notepad)})
 
-    result = await skill.execute(
-        registered_call({"include_paths": True}), asyncio.Event()
-    )
+    result = await skill.execute(registered_call({"include_paths": True}), asyncio.Event())
 
     assert result.summary == "2 applications are registered."
     assert "brave" in result.display_text

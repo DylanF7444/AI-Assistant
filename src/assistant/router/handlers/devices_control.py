@@ -180,9 +180,7 @@ class DeviceControlHandler:
                     source="rule",
                 )
             )
-        performance_metric = (
-            r"(?:memory/cpu|cpu/memory|memory and cpu|cpu and memory|memory|cpu)"
-        )
+        performance_metric = r"(?:memory/cpu|cpu/memory|memory and cpu|cpu and memory|memory|cpu)"
         if re.fullmatch(
             rf"(?:(?:show|check|read|report)(?: me)? (?:my |the )?|"
             rf"what(?:'s|s| is| are) (?:my |the )?|)"

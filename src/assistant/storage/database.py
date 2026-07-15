@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from sqlalchemy import (
     Boolean,
@@ -17,7 +19,9 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
     event,
+    inspect,
     select,
+    text,
 )
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
@@ -187,8 +191,96 @@ class MemoryItemRow(Base):
     )
 
 
+class ScheduleRow(Base):
+    __tablename__ = "schedules"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(String(500), default="")
+    status: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    trigger_json: Mapped[str] = mapped_column(Text, nullable=False)
+    trigger_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    timezone: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    action_json: Mapped[str] = mapped_column(Text, nullable=False)
+    action_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    action_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    autonomy_policy_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    run_policy_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    delivery_policy_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    skill_snapshot_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    next_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    authorized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    paused_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    review_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ScheduleRunRow(Base):
+    __tablename__ = "schedule_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    schedule_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    schedule_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    occurrence_key: Mapped[str] = mapped_column(String(300), nullable=False, unique=True)
+    scheduled_for: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    state: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lateness_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    lease_owner: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    correlation_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(400), nullable=False, unique=True)
+    action_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    result_status: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    approval_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class BackgroundAuthorizationRow(Base):
+    __tablename__ = "background_authorizations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    schedule_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    schedule_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    user_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    machine_identity: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    action_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    policy_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    allowed_skill_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    allowed_capabilities_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    allowed_targets_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    max_risk: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    confirmation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    __table_args__ = (
+        UniqueConstraint(
+            "schedule_id",
+            "schedule_revision",
+            name="uq_background_authorization_schedule_revision",
+        ),
+    )
+
+
 class Database:
-    CURRENT_SCHEMA_VERSION = 6
+    CURRENT_SCHEMA_VERSION = 8
 
     def __init__(self, url: str) -> None:
         self.url = url
@@ -240,8 +332,140 @@ class Database:
                 VectorItemRow.__table__.create(self.engine, checkfirst=True)
             if version == 5:
                 MemoryItemRow.__table__.create(self.engine, checkfirst=True)
+            if version == 6:
+                ScheduleRow.__table__.create(self.engine, checkfirst=True)
+                ScheduleRunRow.__table__.create(self.engine, checkfirst=True)
+                BackgroundAuthorizationRow.__table__.create(self.engine, checkfirst=True)
+                self._migrate_legacy_reminders(session)
+            if version == 7:
+                columns = {
+                    column["name"]
+                    for column in inspect(self.engine).get_columns(
+                        BackgroundAuthorizationRow.__tablename__
+                    )
+                }
+                if "machine_identity" not in columns:
+                    session.execute(
+                        text(
+                            "ALTER TABLE background_authorizations "
+                            "ADD COLUMN machine_identity VARCHAR(64) NOT NULL DEFAULT ''"
+                        )
+                    )
             version += 1
         session.get(SchemaVersionRow, 1).version = version  # type: ignore[union-attr]
+
+    @staticmethod
+    def _migrate_legacy_reminders(session: Session) -> None:
+        reminders = list(
+            session.scalars(
+                select(ItemRow).where(
+                    ItemRow.kind == "reminder",
+                    ItemRow.completed.is_(False),
+                    ItemRow.due_at.is_not(None),
+                )
+            )
+        )
+        for reminder in reminders:
+            assert reminder.due_at is not None
+            due = (
+                reminder.due_at.replace(tzinfo=UTC)
+                if reminder.due_at.tzinfo is None
+                else reminder.due_at.astimezone(UTC)
+            )
+            created = (
+                reminder.created_at.replace(tzinfo=UTC)
+                if reminder.created_at.tzinfo is None
+                else reminder.created_at.astimezone(UTC)
+            )
+            schedule_id = str(
+                uuid5(NAMESPACE_URL, f"local-assistant:legacy-reminder:{reminder.id}")
+            )
+            action = {
+                "contract_version": "1.0",
+                "kind": "notify_only",
+                "title": "Reminder",
+                "message": reminder.title,
+            }
+            policy: dict[str, Any] = {
+                "contract_version": "1.0",
+                "allowed_skill_ids": [],
+                "allowed_capabilities": [],
+                "allowed_targets": [],
+                "max_risk": "low",
+                "max_steps": 1,
+                "max_runtime_seconds": 30,
+                "max_runs_per_hour": 4,
+                "max_runs_per_day": 24,
+                "expires_at": None,
+                "requires_unlocked_session": False,
+                "allow_network": False,
+                "allow_planning": False,
+                "max_replans": 0,
+            }
+            action_payload = json.dumps(action, sort_keys=True, separators=(",", ":"))
+            action_digest = hashlib.sha256(action_payload.encode("utf-8")).hexdigest()
+            policy_payload = json.dumps(policy, sort_keys=True, separators=(",", ":"))
+            policy_digest = hashlib.sha256(policy_payload.encode("utf-8")).hexdigest()
+            if session.get(ScheduleRow, schedule_id) is None:
+                session.add(
+                    ScheduleRow(
+                        id=schedule_id,
+                        user_id="local-user",
+                        name=reminder.title[:200],
+                        description="Migrated local reminder",
+                        status="active",
+                        revision=1,
+                        trigger_json=json.dumps(
+                            {
+                                "contract_version": "1.0",
+                                "kind": "one_time",
+                                "run_at": due.isoformat(),
+                            }
+                        ),
+                        trigger_version=1,
+                        timezone=None,
+                        action_json=action_payload,
+                        action_version=1,
+                        action_digest=action_digest,
+                        autonomy_policy_json=policy_payload,
+                        run_policy_json="{}",
+                        delivery_policy_json="{}",
+                        skill_snapshot_json="[]",
+                        next_run_at=due,
+                        created_at=created,
+                        updated_at=created,
+                        authorized_at=created,
+                    )
+                )
+                session.add(
+                    BackgroundAuthorizationRow(
+                        id=str(uuid4()),
+                        schedule_id=schedule_id,
+                        schedule_revision=1,
+                        user_id="local-user",
+                        action_digest=action_digest,
+                        policy_digest=policy_digest,
+                        allowed_skill_ids_json="[]",
+                        allowed_capabilities_json="[]",
+                        allowed_targets_json="[]",
+                        max_risk="low",
+                        created_at=created,
+                    )
+                )
+                session.add(
+                    AuditRow(
+                        timestamp=now(),
+                        correlation_id=str(uuid4()),
+                        event_type="schedule_migrated",
+                        skill_id="core.reminder",
+                        decision="active",
+                        permissions_json="[]",
+                        details_json=json.dumps(
+                            {"schedule_id": schedule_id, "legacy_item_id": reminder.id}
+                        ),
+                    )
+                )
+            reminder.completed = True
 
     @contextmanager
     def session(self):

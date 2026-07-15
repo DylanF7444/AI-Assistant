@@ -674,6 +674,42 @@ Keep planned actions trustworthy when real conditions change.
 - Restart never silently resumes a destructive operation.
 - Audit history contains enough detail for manual recovery.
 
+## Durable Scheduling and Bounded Autonomy
+
+### Automated lane
+
+1. Create a reminder, restart the scheduler runtime, advance an injected clock
+   past its due time, and verify one durable occurrence and one notification.
+2. Exercise minute/hour/day/week/month recurrence across month ends, leap days,
+   DST gaps and folds, and a 30-day simulated clock run.
+3. Start two store instances against the same SQLite database and verify one
+   occurrence and one lease claim.
+4. Authorize one exact low-risk skill and frozen macro, then change arguments,
+   file policy, skill availability, schema/version snapshot, schedule revision,
+   and machine identity; every changed envelope must block or require review.
+5. Verify medium/high/critical occurrences wait, reject and expire without side
+   effects, and execute only after fresh confirmation; critical work retains the
+   typed token.
+6. Crash-reconcile leased/evaluating work to pending and running work to unknown;
+   verify unsafe work is not replayed and safe retry never exceeds its cap.
+
+### Packaged Windows lane
+
+1. Install with **Start Local Assistant with Windows**, sign out/in, and verify
+   the tray runtime starts without administrator rights.
+2. Create a reminder, hide the window, and verify a nonblocking tray notification.
+3. Restart before a second reminder and sleep past a third; verify the configured
+   run-once/misfire behavior and no duplicate notification.
+4. Review, approve, reject, revoke, pause, resume, run now, delete, and clear
+   completed history from **Automations** using keyboard and mouse.
+5. Trigger Emergency Stop during a cancellable background job and verify new
+   claims pause before the active job is canceled.
+6. Run the 24-hour soak and record memory, queue depth, duplicate count, database
+   growth, notification behavior, and shutdown thread/task state in the run log.
+
+The packaged, sleep, notification, startup, accessibility, and real-time soak
+steps require the target Windows session and remain manual release evidence.
+
 ## Recommended Execution Order
 
 ### P0: Product credibility

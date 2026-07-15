@@ -37,6 +37,12 @@ from assistant.policy.confirmations import ConfirmationManager
 from assistant.policy.file_access import FileAccessPolicyStore
 from assistant.policy.permissions import PermissionManager
 from assistant.router.deterministic import DeterministicRouter
+from assistant.scheduling.authoring import ScheduleAuthoringService
+from assistant.scheduling.notifications import NotificationCenter
+from assistant.scheduling.runner import BackgroundRunner
+from assistant.scheduling.runtime import BackgroundRuntime
+from assistant.scheduling.service import SchedulerService
+from assistant.scheduling.store import ScheduleStore
 from assistant.skills.builtin import (
     CalculatorSkill,
     ClipboardSkill,
@@ -60,6 +66,7 @@ from assistant.skills.productivity import (
     UnitConversionSkill,
 )
 from assistant.skills.registry import SkillRegistry
+from assistant.skills.scheduling import ScheduleSkill
 from assistant.skills.windows import (
     ApplicationWindowSkill,
     BrowserNavigateSkill,
@@ -120,6 +127,10 @@ class Container:
     memory_semantic_indexer: MemorySemanticIndexer
     workflow_template_indexer: WorkflowTemplateSemanticIndexer
     memory_store: MemoryStore
+    schedule_store: ScheduleStore
+    notification_center: NotificationCenter
+    scheduler: SchedulerService
+    background_runtime: BackgroundRuntime
 
 
 def _decode_trusted_keys(encoded_keys: dict[str, str]) -> dict[str, bytes]:
@@ -244,11 +255,23 @@ def _register_windows_skills(
 
 
 def _register_productivity_skills(
-    registry: SkillRegistry, database: Database, memory_store: MemoryStore
+    registry: SkillRegistry,
+    database: Database,
+    memory_store: MemoryStore,
+    schedule_store: ScheduleStore,
+    default_timezone: str,
+    macro_store: MacroStore,
 ) -> None:
     registry.register(TaskSkill(database))
     registry.register(NoteSkill(database))
-    registry.register(ReminderSkill(database))
+    registry.register(ReminderSkill(schedule_store))
+    registry.register(
+        ScheduleSkill(
+            schedule_store,
+            default_timezone,
+            ScheduleAuthoringService(schedule_store, registry, macro_store),
+        )
+    )
     registry.register(UnitConversionSkill())
     registry.register(MemorySkill(memory_store))
 
@@ -285,6 +308,7 @@ class _StorageServices:
     memory_store: MemoryStore
     vector_index: VectorIndex
     secret_vault: SecretVault
+    schedule_store: ScheduleStore
 
 
 @dataclass
@@ -319,6 +343,7 @@ def _build_storage_services(settings: Settings, database: Database) -> _StorageS
         memory_store=MemoryStore(database),
         vector_index=VectorIndex(database),
         secret_vault=SecretVault(settings.data_dir / "secrets"),
+        schedule_store=ScheduleStore(database, audit=audit),
     )
 
 
@@ -361,9 +386,16 @@ def _build_registry(
     )
     _register_core_skills(registry, storage.file_access_policy)
     _register_windows_skills(registry, storage.aliases, storage.memory_store)
-    _register_productivity_skills(registry, database, storage.memory_store)
-    _register_network_skills(registry, settings, storage.secret_vault)
     macro_store = MacroStore(database)
+    _register_productivity_skills(
+        registry,
+        database,
+        storage.memory_store,
+        storage.schedule_store,
+        settings.default_timezone,
+        macro_store,
+    )
+    _register_network_skills(registry, settings, storage.secret_vault)
     registry.register(MacroSkill(macro_store, registry, storage.permissions, storage.audit))
     registry.register(HelpSkill(registry.list))
     return registry, macro_store
@@ -467,6 +499,27 @@ def build_container(settings: Settings | None = None) -> Container:
         storage.metrics,
         confirmation_overrides=settings.confirmation_overrides,
     )
+    notification_center = NotificationCenter()
+    scheduler = SchedulerService(
+        storage.schedule_store,
+        BackgroundRunner(
+            storage.schedule_store,
+            notification_center,
+            storage.audit,
+            metrics=storage.metrics,
+            engine=engine,
+            registry=registry,
+            background_actions_enabled=settings.background_actions_enabled,
+            pause_while_locked=settings.pause_background_while_locked,
+            notify_on_success=settings.notify_on_background_success,
+            notify_on_failure=settings.notify_on_background_failure,
+        ),
+        enabled=settings.scheduler_enabled,
+        max_concurrency=settings.max_background_concurrency,
+    )
+    if settings.automations_paused:
+        scheduler.pause()
+    background_runtime = BackgroundRuntime(scheduler)
     llm = OllamaProvider(settings.llm_model) if settings.llm_provider == "ollama" else None
     planner = (
         LocalPlanner(
@@ -480,9 +533,9 @@ def build_container(settings: Settings | None = None) -> Container:
             ),
             storage.knowledge_bases,
             timeout_seconds=settings.planner_timeout_seconds,
-            argument_validator=lambda skill_id, arguments: registry.get(
-                skill_id
-            ).validate(arguments),
+            argument_validator=lambda skill_id, arguments: registry.get(skill_id).validate(
+                arguments
+            ),
         )
         if llm
         else None
@@ -514,7 +567,12 @@ def build_container(settings: Settings | None = None) -> Container:
     registry.register(
         DiagnosticSkill(
             registry,
-            {"stt": audio.stt, "llm": llm, "tts": audio.tts},
+            {
+                "stt": audio.stt,
+                "llm": llm,
+                "tts": audio.tts,
+                "scheduler": scheduler,
+            },
         )
     )
     return Container(
@@ -542,4 +600,8 @@ def build_container(settings: Settings | None = None) -> Container:
         memory_semantic_indexer=retrieval.memory_indexer,
         workflow_template_indexer=retrieval.workflow_indexer,
         memory_store=storage.memory_store,
+        schedule_store=storage.schedule_store,
+        notification_center=notification_center,
+        scheduler=scheduler,
+        background_runtime=background_runtime,
     )

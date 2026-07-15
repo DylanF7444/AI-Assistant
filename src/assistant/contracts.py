@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 CONTRACT_VERSION = "1.0"
 
@@ -128,6 +128,7 @@ class SkillManifest(StrictModel):
     version: str
     api_version: Literal["1.0"] = "1.0"
     display_name: str
+    category: str = Field(default="General", min_length=1, max_length=80)
     description: str
     input_schema: dict[str, Any]
     output_schema: dict[str, Any]
@@ -142,15 +143,37 @@ class PermissionContext(StrictModel):
     user_id: str = "local-user"
     session_id: str
     granted_capabilities: tuple[str, ...] = ()
+    invocation: Literal["interactive", "background"] = "interactive"
+    schedule_id: UUID | None = None
+    schedule_revision: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def _background_context_requires_schedule(self) -> PermissionContext:
+        has_schedule = self.schedule_id is not None or self.schedule_revision is not None
+        if self.invocation == "background" and (
+            self.schedule_id is None or self.schedule_revision is None
+        ):
+            raise ValueError("Background permission context requires a schedule and revision")
+        if self.invocation == "interactive" and has_schedule:
+            raise ValueError("Interactive permission context cannot name a schedule")
+        return self
 
 
 class SkillCall(StrictModel):
     skill_id: str
-    caller: Literal["user", "router", "planner", "macro"] = "router"
+    caller: Literal["user", "router", "planner", "macro", "scheduler"] = "router"
     arguments: dict[str, Any] = Field(default_factory=dict)
     permission_context: PermissionContext
     correlation_id: UUID = Field(default_factory=uuid4)
     idempotency_key: str = Field(default_factory=lambda: str(uuid4()))
+
+    @model_validator(mode="after")
+    def _scheduler_calls_require_background_context(self) -> SkillCall:
+        if self.caller == "scheduler" and self.permission_context.invocation != "background":
+            raise ValueError("Scheduler calls require a background permission context")
+        if self.permission_context.invocation == "background" and self.caller != "scheduler":
+            raise ValueError("Background calls must identify the scheduler as caller")
+        return self
 
 
 class SkillError(StrictModel):

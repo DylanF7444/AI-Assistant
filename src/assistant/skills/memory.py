@@ -146,9 +146,12 @@ def _memory_display(operation: str, summary: str, memories: list[dict]) -> str:
         return summary
     if not memories:
         return "No enabled memories matched."
-    return summary + "\nEnabled memories:\n" + "\n".join(
-        f"- {item['id']} [{item['type']}] {item['key']}: {item['value']}"
-        for item in memories
+    return (
+        summary
+        + "\nEnabled memories:\n"
+        + "\n".join(
+            f"- {item['id']} [{item['type']}] {item['key']}: {item['value']}" for item in memories
+        )
     )
 
 

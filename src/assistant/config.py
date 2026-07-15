@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from platformdirs import user_data_path
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -66,6 +67,15 @@ class Settings(BaseModel):
     audio_output_device: str | None = None
     silence_timeout_seconds: float = Field(default=1.0, gt=0)
     max_utterance_seconds: float = Field(default=30.0, gt=0)
+    scheduler_enabled: bool = True
+    automations_paused: bool = False
+    background_actions_enabled: bool = False
+    max_background_concurrency: int = Field(default=1, ge=1, le=8)
+    minimum_recurrence_seconds: int = Field(default=60, ge=60)
+    default_timezone: str = "UTC"
+    notify_on_background_success: bool = True
+    notify_on_background_failure: bool = True
+    pause_background_while_locked: bool = True
 
     @field_validator("voice_activation_keyword")
     @classmethod
@@ -84,6 +94,15 @@ class Settings(BaseModel):
         ):
             raise ValueError("keyword/clap voice activation needs a keyword or clap trigger")
         return self
+
+    @field_validator("default_timezone")
+    @classmethod
+    def _default_timezone_must_exist(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"Unknown IANA time zone: {value}") from exc
+        return value
 
     @property
     def database_path(self) -> Path:

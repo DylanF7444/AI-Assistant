@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -10,7 +11,14 @@ from sqlalchemy import select
 
 from assistant.contracts import PermissionScope, SkillCall
 from assistant.policy.file_access import FileAccessPolicyStore
-from assistant.storage.database import AuditStore, Database, PermissionRow
+from assistant.storage.database import (
+    AuditStore,
+    BackgroundAuthorizationRow,
+    Database,
+    PermissionRow,
+    ScheduleRow,
+)
+from assistant.windows.identity import current_machine_identity
 
 
 class GrantType(StrEnum):
@@ -182,6 +190,8 @@ class PermissionManager:
         *,
         consume_once: bool = True,
     ) -> PermissionDecision:
+        if call.permission_context.invocation == "background":
+            return self._authorize_background(call, required)
         missing: list[PermissionScope] = []
         policy_denied: list[PermissionScope] = []
         now = datetime.now(UTC)
@@ -264,6 +274,122 @@ class PermissionManager:
             },
         )
         return decision
+
+    def _authorize_background(
+        self,
+        call: SkillCall,
+        required: tuple[PermissionScope, ...],
+    ) -> PermissionDecision:
+        context = call.permission_context
+        assert context.schedule_id is not None
+        assert context.schedule_revision is not None
+        now = datetime.now(UTC)
+        policy = self.file_policy_store.get() if self.file_policy_store else None
+        with self.database.session() as session:
+            authorization = session.scalar(
+                select(BackgroundAuthorizationRow).where(
+                    BackgroundAuthorizationRow.schedule_id == str(context.schedule_id),
+                    BackgroundAuthorizationRow.schedule_revision == context.schedule_revision,
+                    BackgroundAuthorizationRow.user_id == context.user_id,
+                    BackgroundAuthorizationRow.revoked_at.is_(None),
+                )
+            )
+            schedule = session.get(ScheduleRow, str(context.schedule_id))
+        missing: list[PermissionScope] = []
+        policy_denied: list[PermissionScope] = []
+        reason = ""
+        if authorization is None or (
+            authorization.expires_at is not None and _aware(authorization.expires_at) <= now
+        ):
+            missing.extend(required)
+            reason = "Matching background authorization is missing or expired"
+            allowed = False
+        elif (
+            schedule is None
+            or authorization.machine_identity != current_machine_identity()
+            or schedule.revision != context.schedule_revision
+            or schedule.status not in {"active", "completed"}
+            or schedule.action_digest != authorization.action_digest
+            or hashlib.sha256(schedule.autonomy_policy_json.encode("utf-8")).hexdigest()
+            != authorization.policy_digest
+            or not self._background_call_matches(schedule.action_json, call)
+        ):
+            missing.extend(required)
+            reason = "Call does not match the authorized schedule action"
+            allowed = False
+        else:
+            skill_ids = set(json.loads(authorization.allowed_skill_ids_json))
+            capabilities = set(json.loads(authorization.allowed_capabilities_json))
+            targets = tuple(json.loads(authorization.allowed_targets_json))
+            if call.skill_id not in skill_ids:
+                missing.extend(required)
+                reason = "Skill is outside the background authorization"
+            else:
+                for scope in required:
+                    policy_reason = None
+                    if policy and scope.capability in {
+                        "filesystem.read",
+                        "filesystem.write",
+                    }:
+                        for target in scope.targets:
+                            policy_reason = policy.denial_reason(scope.capability, target)
+                            if policy_reason:
+                                break
+                    if policy_reason:
+                        policy_denied.append(scope.model_copy(update={"reason": policy_reason}))
+                        continue
+                    target_allowed = not scope.targets or (
+                        bool(targets)
+                        and all(
+                            any(_target_in_scope(requested, granted) for granted in targets)
+                            for requested in scope.targets
+                        )
+                    )
+                    if scope.capability not in capabilities or not target_allowed:
+                        missing.append(scope)
+            allowed = not missing and not policy_denied and call.skill_id in skill_ids
+            if not reason and policy_denied:
+                reason = policy_denied[0].reason
+            elif not reason and missing:
+                reason = "Action is outside the background authorization scope"
+        decision = PermissionDecision(
+            allowed=allowed,
+            missing=tuple(missing),
+            policy_denied=tuple(policy_denied),
+            reason=reason,
+        )
+        self.audit.record(
+            correlation_id=str(call.correlation_id),
+            event_type="authorization",
+            skill_id=call.skill_id,
+            decision="allowed" if decision.allowed else "denied",
+            permissions=[scope.capability for scope in required],
+            details={
+                "background": True,
+                "schedule_id": str(context.schedule_id),
+                "schedule_revision": context.schedule_revision,
+                "missing": [scope.model_dump() for scope in missing],
+                "policy_denied": [scope.model_dump() for scope in policy_denied],
+            },
+        )
+        return decision
+
+    @staticmethod
+    def _background_call_matches(action_json: str, call: SkillCall) -> bool:
+        action = json.loads(action_json)
+        if action.get("kind") == "fixed_skill":
+            templates = (action.get("call", {}),)
+        elif action.get("kind") == "frozen_plan":
+            templates = tuple(
+                step.get("call", {}) for step in action.get("plan", {}).get("steps", ())
+            )
+        else:
+            return False
+        return any(
+            template.get("skill_id") == call.skill_id
+            and template.get("arguments", {}) == call.arguments
+            for template in templates
+        )
 
 
 def _aware(value: datetime) -> datetime:

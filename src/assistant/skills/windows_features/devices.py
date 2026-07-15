@@ -240,16 +240,9 @@ class WindowsDeviceControlSkill(Skill):
             result = await self.adapter.performance_status()
             cpu_percent = result.get("cpu_percent") if isinstance(result, dict) else None
             memory = result.get("memory") if isinstance(result, dict) else None
-            memory_percent = (
-                memory.get("percent_used") if isinstance(memory, dict) else None
-            )
-            if isinstance(cpu_percent, (int, float)) and isinstance(
-                memory_percent, (int, float)
-            ):
-                summary = (
-                    f"CPU usage: {cpu_percent:g}%. "
-                    f"Memory usage: {memory_percent:g}%."
-                )
+            memory_percent = memory.get("percent_used") if isinstance(memory, dict) else None
+            if isinstance(cpu_percent, (int, float)) and isinstance(memory_percent, (int, float)):
+                summary = f"CPU usage: {cpu_percent:g}%. Memory usage: {memory_percent:g}%."
             else:
                 summary = "CPU and memory usage retrieved."
         elif args.operation == "connected_devices":

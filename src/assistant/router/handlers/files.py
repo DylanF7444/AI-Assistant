@@ -51,9 +51,7 @@ class FileSearchHandler:
                         confidence=0.9,
                         source="rule",
                         ambiguous=True,
-                        ambiguity_reasons=(
-                            "filesystem path must be resolved and approved",
-                        ),
+                        ambiguity_reasons=("filesystem path must be resolved and approved",),
                     )
                 )
         return None
@@ -76,9 +74,7 @@ def _is_explicit_file_search_root(root: str) -> bool:
         "video",
     }:
         return True
-    return bool(
-        re.match(r"^(?:[a-z]:[\\/]|\\\\|/|~[\\/]|\$\{user_[a-z]+\})", normalized, re.I)
-    )
+    return bool(re.match(r"^(?:[a-z]:[\\/]|\\\\|/|~[\\/]|\$\{user_[a-z]+\})", normalized, re.I))
 
 
 def _normalized_file_search_root(root: str) -> str | None:
@@ -91,9 +87,7 @@ def _normalized_file_search_root(root: str) -> str | None:
     if _is_explicit_file_search_root(value):
         return re.sub(r"^(?:my|the)\s+", "", value, flags=re.IGNORECASE)
 
-    known_folder = (
-        r"desktop|documents?|downloads?|pictures?|music|videos?"
-    )
+    known_folder = r"desktop|documents?|downloads?|pictures?|music|videos?"
     relative_patterns = (
         rf"(?:my |the )?(?P<child>.+?)\s+folder\s+"
         rf"(?:in|on|inside|under)\s+(?:my |the )?(?P<parent>{known_folder})",

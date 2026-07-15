@@ -708,9 +708,7 @@ async def test_planner_repairs_invented_macro_into_registered_file_organization_
         argument_validator=validate_arguments,
     )
 
-    decision = await planner.plan_decision(
-        "Roblox Places: .rbxl and .rbxlx; Macro Files: .ahk"
-    )
+    decision = await planner.plan_decision("Roblox Places: .rbxl and .rbxlx; Macro Files: .ahk")
 
     assert provider.calls == 2
     assert decision.intent is not None
@@ -1017,9 +1015,7 @@ async def test_planner_repairs_arguments_rejected_by_real_skill_validation():
     planner = LocalPlanner(
         provider,
         SkillRetriever(tuple(skill.manifest for skill in skills.values())),
-        argument_validator=lambda skill_id, arguments: skills[skill_id].validate(
-            arguments
-        ),
+        argument_validator=lambda skill_id, arguments: skills[skill_id].validate(arguments),
     )
 
     decision = await planner.plan_decision("I need a blank Notepad window")
@@ -1204,9 +1200,7 @@ async def test_complex_planner_replaces_internal_clarification_label_with_real_q
         SkillRetriever((FileOperationSkill(object()).manifest,)),
     )
 
-    decision = await planner.plan_decision(
-        "Move the files based on file type, not name."
-    )
+    decision = await planner.plan_decision("Move the files based on file type, not name.")
 
     assert decision.clarification == (
         "To clarify further, can you please specify which file types belong in the "
@@ -1247,9 +1241,7 @@ async def test_action_with_internal_clarification_label_uses_question_from_answe
 
     assert decision.intent is None
     assert decision.steps == ()
-    assert decision.clarification == (
-        "Do you have specific preferences for the folder structure?"
-    )
+    assert decision.clarification == ("Do you have specific preferences for the folder structure?")
 
 
 @pytest.mark.asyncio

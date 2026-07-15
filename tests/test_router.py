@@ -47,6 +47,74 @@ def test_timer_normalizes_spoken_number():
     assert result.intent.arguments["seconds"] == 1500
 
 
+def test_relative_reminder_routes_to_durable_reminder_skill():
+    result = DeterministicRouter().route("remind me in twenty five minutes to check the oven")
+
+    assert not result.needs_llm
+    assert result.intent.name == "core.reminder"
+    assert result.intent.arguments == {
+        "title": "check the oven",
+        "delay_seconds": 1500,
+    }
+
+
+@pytest.mark.parametrize(
+    ("text", "recurrence"),
+    [
+        (
+            "remind me every weekday at 8:30 am to review tasks",
+            {
+                "frequency": "weekly",
+                "interval": 1,
+                "local_time": "08:30:00",
+                "weekdays": (0, 1, 2, 3, 4),
+            },
+        ),
+        (
+            "remind me every monday at 9 pm to take out the trash",
+            {
+                "frequency": "weekly",
+                "interval": 1,
+                "local_time": "21:00:00",
+                "weekdays": (0,),
+            },
+        ),
+        (
+            "remind me every two hours to stretch",
+            {"frequency": "hours", "interval": 2},
+        ),
+    ],
+)
+def test_recurring_reminder_routes_to_schedule_skill(text, recurrence):
+    result = DeterministicRouter().route(text)
+
+    assert not result.needs_llm
+    assert result.intent.name == "core.schedule"
+    assert result.intent.arguments["recurrence"] == recurrence
+
+
+@pytest.mark.parametrize(
+    ("text", "arguments"),
+    [
+        ("list schedules", {"operation": "list"}),
+        ("pause reminder stretch", {"operation": "pause", "schedule": "stretch"}),
+        ("resume schedule stretch", {"operation": "resume", "schedule": "stretch"}),
+        ("delete schedule stretch", {"operation": "delete", "schedule": "stretch"}),
+        ("run schedule stretch now", {"operation": "run_now", "schedule": "stretch"}),
+        (
+            "snooze reminder stretch for ten minutes",
+            {"operation": "snooze", "schedule": "stretch", "delay_seconds": 600},
+        ),
+    ],
+)
+def test_schedule_management_routes(text, arguments):
+    result = DeterministicRouter().route(text)
+
+    assert not result.needs_llm
+    assert result.intent.name == "core.schedule"
+    assert result.intent.arguments == arguments
+
+
 @pytest.mark.parametrize(
     ("text", "canonical", "application"),
     [

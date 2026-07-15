@@ -33,7 +33,7 @@ Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: startup
 
 [Tasks]
-Name: "startup"; Description: "Start Local Assistant with Windows"; Flags: unchecked
+Name: "startup"; Description: "Start Local Assistant with Windows (required for on-time schedules after sign-in)"; Flags: unchecked
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch Local Assistant"; Flags: nowait postinstall skipifsilent

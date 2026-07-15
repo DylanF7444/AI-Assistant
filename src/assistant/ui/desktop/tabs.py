@@ -2,7 +2,7 @@ from __future__ import annotations
 
 TAB_LABELS = (
     "Assistant",
-    "Active Scripts",
+    "Automations",
     "Skills",
     "Permissions",
     "File Access",
@@ -18,7 +18,7 @@ TAB_LABELS = (
 )
 
 TAB_GROUPS = {
-    "assistant": ("Assistant", "Active Scripts"),
+    "assistant": ("Assistant", "Automations"),
     "extensions": ("Skills", "Macros"),
     "security": ("Permissions", "File Access", "Audit Log", "Privacy"),
     "knowledge": ("Knowledge", "Memories"),

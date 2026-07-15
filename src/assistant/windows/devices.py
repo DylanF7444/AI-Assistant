@@ -102,9 +102,7 @@ class LocalWindowsDeviceAdapter:
         if not root.is_dir():
             return None
         candidates = [
-            path
-            for path in root.glob("*.exe")
-            if cls._is_launchable_application_executable(path)
+            path for path in root.glob("*.exe") if cls._is_launchable_application_executable(path)
         ]
         if not candidates:
             return None

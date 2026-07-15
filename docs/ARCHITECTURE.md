@@ -15,6 +15,32 @@
 8. Structured results produce display and optional speech responses.
 9. Permission decisions and outcomes are written to a separate audit log.
 
+## Durable scheduling and background execution
+
+`assistant.scheduling` owns a deterministic, SQLite-backed scheduler. Schedule
+definitions contain a typed trigger, frozen action or plan, explicit autonomy
+bounds, delivery policy, run policy, skill snapshots, and a monotonically
+increasing revision. Before any side effect, the scheduler durably creates an
+occurrence, claims it with a lease, validates its action and policy digests, and
+re-enters the normal registry, schema, file-policy, permission, confirmation,
+execution, cancellation, audit, and metrics pipeline.
+
+The desktop owns one long-lived background asyncio loop. SQLite occurrence keys
+and compare-and-set leases prevent duplicate claims across processes; a Windows
+per-user mutex prevents duplicate desktop runtimes. Lease heartbeats protect
+long jobs, and startup reconciliation marks an interrupted running action as an
+unknown outcome instead of replaying it. Missed runs follow stored skip,
+run-once, or bounded catch-up policies using IANA time zones and explicit DST
+gap/fold rules.
+
+Low-risk fixed calls and frozen macro snapshots may run unattended only with a
+matching schedule-specific background authorization. Medium, high, and critical
+occurrences stop in `awaiting_approval`; reviewing them creates fresh,
+occurrence-bound engine confirmations, including the existing typed token for
+critical work. Background authorizations are revision-, digest-, target-,
+capability-, risk-, expiry-, and machine-bound and are separate from interactive
+permission grants.
+
 For unmatched conversational requests, enabled local knowledge bases are
 searched with bounded lexical retrieval. Relevant excerpts are included as
 untrusted reference data in the schema-constrained planner prompt. Knowledge
@@ -52,6 +78,9 @@ migration. Stable skill IDs are never inferred from display names.
   controller, tab metadata, and application startup are independently testable.
 - `assistant.bootstrap` is the composition root and uses named builders for
   storage, retrieval, registry, context, and audio services.
+- `assistant.scheduling` owns trigger calculation, durable definitions and runs,
+  background authorization, notification delivery, leasing, approvals, and the
+  background runtime. It invokes skills only through `ExecutionEngine`.
 
 The dependency direction remains contracts/interfaces -> policy and domain
 services -> orchestration -> UI/composition. Model output never calls platform

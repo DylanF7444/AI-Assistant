@@ -28,6 +28,26 @@ transcripts, permissions, and the integrity of audit records.
   still required before accepting hostile native third-party code.
 - Compromised device: pairing requires local approval; commands expire, use
   nonces and authenticated signatures, and identities can be revoked.
+- Unattended execution: the scheduler can execute only registered frozen calls
+  through the normal engine. A separate background authorization binds the
+  schedule revision, action and policy digests, skills, capabilities, exact
+  targets, risk, expiry, and machine identity. Interactive grants are not
+  accepted as background authority.
+- Stored-action tampering and prompt injection: schedule payloads are typed data,
+  never prompts interpreted at fire time. Action/policy digest mismatches,
+  changed arguments, schema/permission/risk/version drift, disabled skills, and
+  file-policy changes block execution and can revoke authority.
+- Crash replay: every occurrence and transition is durable. Leases are renewed
+  during execution; a crash after execution begins becomes
+  `unknown_after_crash`. Unsafe failures and unknown outcomes are never retried;
+  only skills explicitly marked safe may use the bounded durable retry policy.
+- Resource abuse: recurrence has a one-minute minimum, catch-up and concurrent
+  queues are capped, schedules have hourly/daily/step/runtime limits, repeated
+  failures disable the schedule, and emergency stop pauses new claims before
+  canceling active jobs.
+- Restored data: background authorizations are tied to a non-secret digest of
+  the local machine identity. A database restored elsewhere moves affected
+  schedules to pending review.
 
 ## Non-guarantees
 
@@ -35,3 +55,6 @@ Speech alone cannot prove who is speaking. Rollback is offered only by skills
 that can actually guarantee it. Python process and Job Object controls are not
 a complete security sandbox against hostile native code; an OS-enforced
 boundary is required before accepting arbitrary marketplace packages.
+The scheduler cannot run while Windows is powered off, and this release does not
+install a privileged service or request OS wake timers. Missed occurrences are
+reconciled conservatively when the per-user desktop process next starts.

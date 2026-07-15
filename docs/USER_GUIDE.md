@@ -33,6 +33,41 @@ Closing the window hides it to the system tray while voice activation and global
 hotkeys continue running. Double-click the tray icon or choose **Show Companion**
 to restore it. Use **Open Full Assistant** for the management interface,
 **Emergency Stop** to cancel active work, and **Quit** to stop the assistant.
+Quit also stops on-time reminder and automation delivery until the app starts
+again. Select the installer's **Start Local Assistant with Windows** option when
+you want schedules reconciled automatically after sign-in.
+
+## Reminders and automations
+
+Commands such as `remind me in twenty five minutes to check the oven` create a
+durable one-time reminder. Recurring forms include `every weekday at 8:30 AM
+remind me to review my tasks` and `every 2 hours remind me to stretch`. Use
+`list my schedules`, `pause schedule NAME`, `resume schedule NAME`, `run schedule
+NAME now`, `snooze schedule NAME for ten minutes`, or `delete schedule NAME` to
+manage them. Calendar schedules use the configured IANA time zone and preserve
+their local wall-clock time across daylight-saving changes.
+
+The full **Automations** tab shows live jobs, active/paused/pending schedules,
+their next run and risk, pending approvals, and recent run history. From there
+you can pause or resume one schedule, run it now, revoke its background
+authority, delete it, review exact higher-risk work, reject or approve an
+occurrence, clear completed history, or persistently pause all automations.
+Emergency Stop applies an immediate volatile pause before canceling active work;
+use **Resume all** when it is safe to continue.
+
+Settings keeps durable reminders enabled by default while background skill
+actions are off by default. Enabling background actions does not grant broad
+authority: each fixed action or frozen macro is separately reviewed and bound to
+its exact schedule revision. Low-risk work may then run unattended. Medium,
+high, and critical occurrences always wait for approval, and critical approval
+requires the final six characters of the displayed confirmation ID.
+
+Closing the window to the tray keeps scheduling active. Sleep, restart, or an
+ordinary crash is handled on next start according to the schedule's missed-run
+policy. The assistant does not run while the computer is powered off and does
+not wake it from sleep. If a skill, target, policy, schema, permission, risk, or
+machine identity changes, the occurrence stops and the schedule may require
+review rather than silently expanding its authority.
 
 ## Local models
 

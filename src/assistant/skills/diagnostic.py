@@ -93,9 +93,7 @@ class DiagnosticSkill(Skill):
             status=ResultStatus.COMPLETED,
             summary=summary,
             display_text=(
-                summary
-                if healthy
-                else summary + "\n" + "\n".join(f"- {item}" for item in guidance)
+                summary if healthy else summary + "\n" + "\n".join(f"- {item}" for item in guidance)
             ),
             data=output.model_dump(),
         )

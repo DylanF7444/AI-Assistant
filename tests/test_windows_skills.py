@@ -963,9 +963,10 @@ def test_installed_application_executable_rejects_installers(tmp_path):
     redistributable.write_bytes(b"")
 
     assert LocalWindowsDeviceAdapter._display_icon_executable(f'"{installer}",0') is None
-    assert LocalWindowsDeviceAdapter._application_executable_path(
-        "Example App", None, str(install)
-    ) is None
+    assert (
+        LocalWindowsDeviceAdapter._application_executable_path("Example App", None, str(install))
+        is None
+    )
 
 
 def test_default_browser_command_executable_path_is_parsed():
@@ -1087,9 +1088,7 @@ async def test_windows_device_control_covers_status_and_local_controls():
     assert result.data["result"]["percent"] == 80
     assert skill.required_permissions(battery_call)[0].capability == "device.read"
 
-    performance_call = call(
-        "windows.device_control", {"operation": "performance_status"}
-    )
+    performance_call = call("windows.device_control", {"operation": "performance_status"})
     result = await skill.execute(performance_call, __import__("asyncio").Event())
     assert result.summary == "CPU usage: 10%. Memory usage: 40%."
     assert result.data["result"]["cpu_percent"] == 10

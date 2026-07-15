@@ -1,13 +1,17 @@
 # Durable Scheduling and Bounded Background Autonomy Plan
 
-Updated July 13, 2026.
+Updated July 14, 2026.
 
 ## Status
 
-Proposed implementation roadmap. This document defines the target architecture,
-safety invariants, delivery phases, tests, migration work, and acceptance gates
-for durable reminders, recurring schedules, and user-authorized background
-execution.
+Implemented through Phase 5 in source and automated tests. Durable reminders,
+recurrence, schedule management, schedule-scoped fixed/frozen execution,
+pending approvals and control UI, crash-conservative recovery, bounded retry,
+multi-instance leasing, machine-bound restore review, audit/metrics, and privacy
+controls are present. Phase 6 bounded-goal autonomy and Phase 7 event triggers
+remain intentionally optional and are not part of the completed bounded
+scheduling milestone. Packaged Windows sleep/startup/notification acceptance and
+the 24-hour real-time soak remain external release evidence.
 
 ## Executive Summary
 

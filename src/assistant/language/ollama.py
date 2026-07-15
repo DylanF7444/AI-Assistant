@@ -4,6 +4,7 @@ import asyncio
 import json
 import shutil
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -18,12 +19,32 @@ class OllamaProvider:
         model: str,
         endpoint: str = "http://127.0.0.1:11434/api/generate",
         max_tokens: int = 256,
+        terminal_debug: bool = False,
     ) -> None:
         self.model = model
         self.endpoint = endpoint
         self.max_tokens = max_tokens
+        self.terminal_debug = terminal_debug
         self._task: asyncio.Task | None = None
         self._server_process: subprocess.Popen | None = None
+
+    def _print_completion_debug(self, prompt: str, response: str) -> None:
+        if not self.terminal_debug:
+            return
+        print(
+            "\n".join(
+                (
+                    "[assistant ai debug]",
+                    f"model={self.model}",
+                    "prompt:",
+                    prompt,
+                    "response:",
+                    response,
+                )
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
 
     def _start_local_server(self) -> bool:
         executable = shutil.which("ollama")
@@ -85,7 +106,9 @@ class OllamaProvider:
                 if not self._start_local_server():
                     raise
                 body = send()
-            result = json.loads(body["response"])
+            raw_response = body["response"]
+            self._print_completion_debug(payload["prompt"], raw_response)
+            result = json.loads(raw_response)
             TypeAdapter(dict[str, Any]).validate_python(result)
             return result
 
