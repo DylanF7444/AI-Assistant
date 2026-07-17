@@ -27,6 +27,28 @@ class NetworkHandler:
                     source="rule",
                 )
             )
+        headless_patterns = (
+            r"(?:read|render|fetch) (https://\S+) "
+            r"(?:in the background|headlessly|with (?:a )?headless browser)",
+            r"(?:headlessly|in the background) (?:read|render|fetch) (https://\S+)",
+            r"(?:read|render|fetch) (?:the )?rendered page (https://\S+)",
+        )
+        for pattern in headless_patterns:
+            if match := re.fullmatch(pattern, text.strip(), re.I):
+                return RouteResult(
+                    Intent(
+                        name="web.headless_read",
+                        arguments={
+                            "url": match.group(1),
+                            "max_characters": 12000,
+                            "max_links": 30,
+                            "timeout_seconds": 30,
+                            "wait_after_load_ms": 250,
+                        },
+                        confidence=0.99,
+                        source="rule",
+                    )
+                )
         if match := re.fullmatch(r"(?:read|fetch) (https://\S+)", text.strip(), re.I):
             return RouteResult(
                 Intent(

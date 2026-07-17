@@ -206,6 +206,11 @@ class FileOperationSkill(Skill):
                     targets=(source,),
                     reason="Open this exact approved file.",
                 ),
+                PermissionScope(
+                    capability="process.launch",
+                    targets=(source,),
+                    reason="Open the file in its registered visible application.",
+                ),
             )
         if args.operation == "copy":
             assert destination_path

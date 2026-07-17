@@ -7,7 +7,14 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from assistant.contracts import PermissionScope, ResultStatus, SkillCall, SkillResult
+from assistant.contracts import (
+    BackgroundMode,
+    PermissionScope,
+    ResultStatus,
+    SkillCall,
+    SkillResult,
+)
+from assistant.integrations.headless_browser import HeadlessBrowser
 from assistant.integrations.web import CloudModelClient, CodexExecClient, WebClient
 from assistant.skills.base import Skill
 from assistant.skills.builtin import manifest
@@ -125,6 +132,87 @@ class WebFetchSkill(Skill):
         )
 
 
+class HeadlessReadInput(BaseModel):
+    url: str = Field(min_length=8, max_length=2000)
+    max_characters: int = Field(default=12000, ge=500, le=50000)
+    max_links: int = Field(default=30, ge=0, le=100)
+    timeout_seconds: float = Field(default=30, ge=5, le=60)
+    wait_after_load_ms: int = Field(default=250, ge=0, le=5000)
+
+
+class HeadlessReadOutput(BaseModel):
+    url: str
+    title: str
+    text: str
+    links: list[dict[str, str]]
+
+
+class HeadlessReadSkill(Skill):
+    input_model = HeadlessReadInput
+    output_model = HeadlessReadOutput
+
+    def __init__(self, browser: HeadlessBrowser) -> None:
+        self.browser = browser
+        self.manifest = manifest(
+            skill_id="web.headless_read",
+            display_name="Headless Web Read",
+            description=(
+                "Render a public HTTPS page in a private headless browser context and "
+                "return its visible text and links without opening a user window."
+            ),
+            input_model=self.input_model,
+            output_model=self.output_model,
+            permissions=NETWORK_PERMISSION,
+            safe_to_retry=True,
+            background_mode=BackgroundMode.SAFE,
+        )
+
+    def required_permissions(self, call: SkillCall):
+        args = self.validate(call.arguments)
+        return (
+            PermissionScope(
+                capability="network",
+                targets=(args.url,),
+                reason="Load this public HTTPS page in an isolated headless browser.",
+            ),
+        )
+
+    async def preview(self, call: SkillCall) -> str:
+        args = self.validate(call.arguments)
+        return f"Read {args.url} in an isolated headless browser"
+
+    async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult:
+        args = self.validate(call.arguments)
+        if cancel_event.is_set():
+            return SkillResult(
+                status=ResultStatus.CANCELLED, summary="Headless browsing cancelled."
+            )
+        page = await self.browser.read_page(
+            args.url,
+            max_characters=args.max_characters,
+            max_links=args.max_links,
+            timeout_seconds=args.timeout_seconds,
+            wait_after_load_ms=args.wait_after_load_ms,
+        )
+        output = HeadlessReadOutput(
+            url=page.url,
+            title=page.title,
+            text=page.text,
+            links=list(page.links),
+        )
+        display = page.text
+        if page.links:
+            display += "\n\nLinks:\n" + "\n".join(
+                f"- {item['text'] or item['url']}: {item['url']}" for item in page.links
+            )
+        return SkillResult(
+            status=ResultStatus.COMPLETED,
+            summary=f"Rendered {page.title or page.url} without opening a window.",
+            display_text=display,
+            data=output.model_dump(),
+        )
+
+
 class CloudAskInput(BaseModel):
     provider: Literal["openai", "codex", "anthropic"]
     question: str = Field(min_length=1, max_length=20000)
@@ -163,6 +251,7 @@ class CloudAskSkill(Skill):
             input_model=self.input_model,
             output_model=self.output_model,
             permissions=NETWORK_PERMISSION,
+            background_mode=BackgroundMode.SAFE,
         )
 
     def required_permissions(self, call: SkillCall):

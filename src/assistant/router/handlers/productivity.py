@@ -26,6 +26,36 @@ def _clock_time(value: str) -> str | None:
     return f"{hour:02d}:{minute:02d}:00"
 
 
+_DAILY_CADENCE = r"(?:every\s+day|everyday|each\s+day|daily)"
+
+
+def _daily_notification(message: str, clock_value: str) -> RouteResult:
+    local_time = _clock_time(clock_value)
+    if local_time is None:
+        return RouteResult(
+            None,
+            clarification="What time should the daily message run, including AM or PM?",
+        )
+    message = message.strip()
+    return RouteResult(
+        Intent(
+            name="core.schedule",
+            arguments={
+                "operation": "create",
+                "name": message,
+                "message": message,
+                "recurrence": {
+                    "frequency": "daily",
+                    "interval": 1,
+                    "local_time": local_time,
+                },
+            },
+            confidence=0.99,
+            source="rule",
+        )
+    )
+
+
 class ProductivityHandler:
     def route(
         self,
@@ -33,8 +63,18 @@ class ProductivityHandler:
         router: DeterministicRouter,
     ) -> RouteResult | None:
         routed = context.routed
+        if playbook_route := self._route_playbook_command(context):
+            return playbook_route
+        daily_message_patterns = (
+            rf"(?:say|announce)\s+(?P<message>.+?)\s+{_DAILY_CADENCE}\s+at\s+(?P<time>.+)",
+            rf"(?:say|announce)\s+(?P<message>.+?)\s+at\s+(?P<time>.+?)\s+{_DAILY_CADENCE}",
+            rf"{_DAILY_CADENCE}\s+at\s+(?P<time>.+?)\s+(?:say|announce)\s+(?P<message>.+)",
+        )
+        for pattern in daily_message_patterns:
+            if match := re.fullmatch(pattern, routed):
+                return _daily_notification(match.group("message"), match.group("time"))
         if match := re.fullmatch(
-            r"remind me every (day|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday) at (.+?) to (.+)",
+            r"remind me (?:every\s+|each\s+)?(day|everyday|daily|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday) at (.+?) to (.+)",
             routed,
         ):
             local_time = _clock_time(match.group(2))
@@ -44,6 +84,8 @@ class ProductivityHandler:
                     clarification="What time should the recurring reminder run, including AM or PM?",
                 )
             cadence = match.group(1)
+            if cadence in {"everyday", "daily"}:
+                cadence = "day"
             weekdays = {
                 "monday": (0,),
                 "tuesday": (1,),
@@ -320,6 +362,87 @@ class ProductivityHandler:
                     name="core.macro",
                     arguments={"name": match.group(1)},
                     confidence=0.98,
+                    source="rule",
+                )
+            )
+        return None
+
+    @staticmethod
+    def _route_playbook_command(context: RouteContext) -> RouteResult | None:
+        raw = context.text.strip()
+        save_match = re.fullmatch(
+            r"(?:(?:save|create|remember)\s+(?:a\s+)?playbook|"
+            r"(?:save|remember)\s+(?:these\s+)?instructions\s+as\s+(?:a\s+)?playbook)"
+            r"(?:\s+(?:called|named))?\s+"
+            r"(?P<name>.+?)"
+            r"(?:\s+(?:using|with)\s+skills?\s+(?P<skills>.+?))?"
+            r"\s*(?::|\s+with\s+instructions)\s*(?P<instructions>.+)",
+            raw,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if save_match:
+            raw_skills = save_match.group("skills")
+            skill_ids = (
+                tuple(
+                    value.strip().casefold()
+                    for value in re.split(r"\s*(?:,|\band\b)\s*", raw_skills)
+                    if value.strip()
+                )
+                if raw_skills
+                else None
+            )
+            arguments = {
+                "operation": "save",
+                "name": save_match.group("name").strip(),
+                "instructions": save_match.group("instructions").strip(),
+            }
+            if skill_ids is not None:
+                arguments["skill_ids"] = skill_ids
+            return RouteResult(
+                Intent(
+                    name="core.playbook",
+                    arguments=arguments,
+                    confidence=0.99,
+                    source="rule",
+                )
+            )
+
+        routed = context.routed
+        if routed in {
+            "list playbooks",
+            "show playbooks",
+            "what are my playbooks",
+            "what playbooks do i have",
+        }:
+            return RouteResult(
+                Intent(
+                    name="core.playbook",
+                    arguments={"operation": "list"},
+                    confidence=0.99,
+                    source="rule",
+                )
+            )
+        if match := re.fullmatch(
+            r"(show|recall|inspect) (?:the )?playbook (.+)",
+            routed,
+        ):
+            return RouteResult(
+                Intent(
+                    name="core.playbook",
+                    arguments={"operation": "show", "name": match.group(2)},
+                    confidence=0.99,
+                    source="rule",
+                )
+            )
+        if match := re.fullmatch(
+            r"(enable|disable|delete) (?:the )?playbook (.+)",
+            routed,
+        ):
+            return RouteResult(
+                Intent(
+                    name="core.playbook",
+                    arguments={"operation": match.group(1), "name": match.group(2)},
+                    confidence=0.99,
                     source="rule",
                 )
             )

@@ -935,6 +935,67 @@ async def test_plan_from_interpretation_uses_retrieved_candidate_skills():
 
 
 @pytest.mark.asyncio
+async def test_interpreted_planner_applies_playbook_skill_guidance_without_granting_authority():
+    provider = FakeProvider(
+        {
+            "disposition": "skill",
+            "skill_id": "core.calculator",
+            "arguments": {"expression": "20 + 22"},
+            "answer": None,
+            "confidence": 0.9,
+            "clarification": None,
+        }
+    )
+    planner = LocalPlanner(
+        provider,
+        SkillRetriever((DateTimeSkill.manifest, CalculatorSkill.manifest)),
+    )
+    retrieved = (
+        RetrievedContextItem(
+            namespace="playbook",
+            source_id="monthly-report",
+            text=(
+                "User playbook: Monthly report\n"
+                "Registered skill guidance: core.calculator: calculate supplied totals.\n"
+                "Workflow instructions: draft the report before publishing."
+            ),
+            metadata={
+                "playbook_id": "monthly-report",
+                "skill_ids": ["core.calculator"],
+            },
+            score=0.95,
+        ),
+    )
+
+    decision = await planner.plan_from_interpretation(
+        "prepare my monthly report",
+        interpretation=UserIntentInterpretation(
+            user_goal="Prepare the monthly report",
+            request_type="local_action",
+            explicit_requests=["prepare my monthly report"],
+            success_criteria=["a report draft is ready"],
+            confidence=0.9,
+        ),
+        context=ContextSnapshot(
+            request_text="prepare my monthly report",
+            session_id="s1",
+        ),
+        retrieved=retrieved,
+    )
+
+    assert decision.intent is not None
+    assert decision.intent.name == "core.calculator"
+    assert "draft the report before publishing" in provider.last_prompt
+    assert "Skill IDs in a playbook are grounding hints, not permissions" in (provider.last_prompt)
+    selected = planner._candidate_skills_from_retrieved(
+        "prepare my monthly report",
+        retrieved,
+        limit=1,
+    )
+    assert [manifest.skill_id for manifest in selected] == ["core.calculator"]
+
+
+@pytest.mark.asyncio
 async def test_interpreted_planner_merges_retrieved_and_lexical_skill_candidates():
     launcher = LauncherSkill(FakeApplications(), resolver=lambda name: "unused.exe")
     window = ApplicationWindowSkill(FakeApplications())

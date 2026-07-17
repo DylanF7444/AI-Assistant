@@ -8,9 +8,11 @@ import os
 import pytest
 
 from assistant.contracts import PermissionContext, SkillCall
+from assistant.integrations.headless_browser import PlaywrightHeadlessBrowser, RenderedPage
 from assistant.integrations.web import CloudModelClient, CodexExecClient, WebClient
+from assistant.policy.network import OfflineNetworkError
 from assistant.router.deterministic import DeterministicRouter
-from assistant.skills.network import CloudAskSkill, WebSearchSkill
+from assistant.skills.network import CloudAskSkill, HeadlessReadSkill, WebSearchSkill
 from assistant.storage.secrets import SecretVault
 
 
@@ -63,6 +65,9 @@ def test_network_routes_are_explicit():
     assert claude.arguments["provider"] == "anthropic"
     codex = router.route("ask Codex review this function").intent
     assert codex.arguments["provider"] == "codex"
+    headless = router.route("read https://example.com in the background").intent
+    assert headless.name == "web.headless_read"
+    assert headless.arguments["url"] == "https://example.com"
     news = router.route("ask Codex for today's news").intent
     assert news.arguments["provider"] == "codex"
     assert news.arguments["question"] == "today's news"
@@ -73,6 +78,75 @@ def test_network_routes_are_explicit():
     assert code.name == "cloud.ask"
     assert code.arguments["provider"] == "codex"
     assert code.arguments["max_tokens"] == 4000
+
+
+@pytest.mark.asyncio
+async def test_headless_read_uses_isolated_browser_contract_and_exact_network_target():
+    requests = []
+
+    class FakeHeadlessBrowser:
+        async def read_page(self, url, **options):
+            requests.append({"url": url, **options})
+            return RenderedPage(
+                url="https://example.com/final",
+                title="Rendered example",
+                text="JavaScript rendered content",
+                links=({"text": "Docs", "url": "https://example.com/docs"},),
+            )
+
+    skill = HeadlessReadSkill(FakeHeadlessBrowser())
+    skill_call = call(
+        "web.headless_read",
+        {
+            "url": "https://example.com",
+            "max_characters": 2000,
+            "max_links": 10,
+            "timeout_seconds": 20,
+            "wait_after_load_ms": 100,
+        },
+    )
+
+    permissions = skill.required_permissions(skill_call)
+    result = await skill.execute(skill_call, asyncio.Event())
+
+    assert permissions[0].targets == ("https://example.com",)
+    assert requests == [
+        {
+            "url": "https://example.com",
+            "max_characters": 2000,
+            "max_links": 10,
+            "timeout_seconds": 20.0,
+            "wait_after_load_ms": 100,
+        }
+    ]
+    assert result.data["title"] == "Rendered example"
+    assert "JavaScript rendered content" in result.display_text
+    assert skill.manifest.background_mode.value == "safe"
+
+
+@pytest.mark.asyncio
+async def test_headless_browser_never_launches_while_offline():
+    with pytest.raises(OfflineNetworkError, match="blocked by offline mode"):
+        await PlaywrightHeadlessBrowser(offline_mode=True).read_page(
+            "https://example.com",
+            max_characters=1000,
+            max_links=5,
+            timeout_seconds=10,
+            wait_after_load_ms=0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_headless_browser_blocks_websockets():
+    closed = []
+
+    class FakeWebSocketRoute:
+        async def close(self, **options):
+            closed.append(options)
+
+    await PlaywrightHeadlessBrowser._block_websocket(FakeWebSocketRoute())
+
+    assert closed == [{"code": 1008, "reason": "Headless read blocks WebSockets"}]
 
 
 @pytest.mark.asyncio

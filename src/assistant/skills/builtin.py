@@ -15,6 +15,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 from assistant.contracts import (
+    BackgroundMode,
     PermissionScope,
     ResultStatus,
     RiskLevel,
@@ -49,6 +50,7 @@ def manifest(
     risk: RiskLevel = RiskLevel.LOW,
     supports_rollback: bool = False,
     safe_to_retry: bool = False,
+    background_mode: BackgroundMode = BackgroundMode.CAPABILITY_GATED,
 ) -> SkillManifest:
     return SkillManifest(
         skill_id=skill_id,
@@ -63,6 +65,7 @@ def manifest(
         entry_point=f"{__name__}:{display_name.replace(' ', '')}Skill",
         supports_rollback=supports_rollback,
         safe_to_retry=safe_to_retry,
+        background_mode=background_mode,
     )
 
 
@@ -85,6 +88,7 @@ def _category_for_skill(skill_id: str) -> str:
         "core.unit_conversion",
         "core.schedule",
         "core.macro",
+        "core.playbook",
     }:
         return "Productivity"
     if skill_id.startswith("core."):
@@ -550,6 +554,7 @@ class LauncherSkill(Skill):
                 ),
             ),
             risk=RiskLevel.MEDIUM,
+            background_mode=BackgroundMode.FOREGROUND_ONLY,
         )
 
     async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult:
@@ -707,6 +712,7 @@ class ClipboardSkill(Skill):
             output_model=self.output_model,
             permissions=(),
             risk=RiskLevel.MEDIUM,
+            background_mode=BackgroundMode.FOREGROUND_ONLY,
         )
 
     def required_permissions(self, call: SkillCall):

@@ -15,6 +15,7 @@ from assistant.context.providers import (
 )
 from assistant.events import EventBus
 from assistant.execution.engine import ExecutionEngine
+from assistant.integrations.headless_browser import PlaywrightHeadlessBrowser
 from assistant.integrations.web import CloudModelClient, WebClient
 from assistant.language.embeddings import (
     FallbackEmbeddingProvider,
@@ -58,7 +59,8 @@ from assistant.skills.builtin import (
 from assistant.skills.diagnostic import DiagnosticSkill
 from assistant.skills.macros import MacroSkill
 from assistant.skills.memory import MemorySkill
-from assistant.skills.network import CloudAskSkill, WebFetchSkill, WebSearchSkill
+from assistant.skills.network import CloudAskSkill, HeadlessReadSkill, WebFetchSkill, WebSearchSkill
+from assistant.skills.playbooks import PlaybookSkill
 from assistant.skills.productivity import (
     NoteSkill,
     ReminderSkill,
@@ -84,6 +86,7 @@ from assistant.storage.history import HistoryStore
 from assistant.storage.knowledge import KnowledgeBaseStore
 from assistant.storage.macros import MacroStore
 from assistant.storage.memory import MemoryStore
+from assistant.storage.playbooks import PlaybookStore
 from assistant.storage.secrets import SecretVault
 from assistant.storage.vector_index import VectorIndex
 from assistant.stt.faster_whisper import FasterWhisperProvider
@@ -120,6 +123,7 @@ class Container:
     metrics: MetricsStore
     aliases: AliasStore
     knowledge_bases: KnowledgeBaseStore
+    playbook_store: PlaybookStore
     file_access_policy: FileAccessPolicyStore
     vector_index: VectorIndex
     semantic_retriever: SemanticRetriever
@@ -261,6 +265,7 @@ def _register_productivity_skills(
     schedule_store: ScheduleStore,
     default_timezone: str,
     macro_store: MacroStore,
+    playbook_store: PlaybookStore,
 ) -> None:
     registry.register(TaskSkill(database))
     registry.register(NoteSkill(database))
@@ -274,6 +279,7 @@ def _register_productivity_skills(
     )
     registry.register(UnitConversionSkill())
     registry.register(MemorySkill(memory_store))
+    registry.register(PlaybookSkill(playbook_store, registry))
 
 
 def _register_network_skills(
@@ -284,6 +290,9 @@ def _register_network_skills(
     web_client = WebClient()
     registry.register(WebSearchSkill(web_client, secret_vault.get, settings.search_provider))
     registry.register(WebFetchSkill(web_client))
+    registry.register(
+        HeadlessReadSkill(PlaywrightHeadlessBrowser(offline_mode=settings.offline_lock))
+    )
     registry.register(
         CloudAskSkill(
             CloudModelClient(),
@@ -305,6 +314,7 @@ class _StorageServices:
     permissions: PermissionManager
     aliases: AliasStore
     knowledge_bases: KnowledgeBaseStore
+    playbook_store: PlaybookStore
     memory_store: MemoryStore
     vector_index: VectorIndex
     secret_vault: SecretVault
@@ -340,6 +350,7 @@ def _build_storage_services(settings: Settings, database: Database) -> _StorageS
         permissions=PermissionManager(database, audit, file_access_policy),
         aliases=AliasStore(database),
         knowledge_bases=KnowledgeBaseStore(database),
+        playbook_store=PlaybookStore(settings.data_dir / "playbooks"),
         memory_store=MemoryStore(database),
         vector_index=VectorIndex(database),
         secret_vault=SecretVault(settings.data_dir / "secrets"),
@@ -371,6 +382,7 @@ def _build_retrieval_services(
         workflow_indexer=WorkflowTemplateSemanticIndexer(
             storage.vector_index,
             embedding_provider,
+            playbook_store=storage.playbook_store,
         ),
     )
 
@@ -394,6 +406,7 @@ def _build_registry(
         storage.schedule_store,
         settings.default_timezone,
         macro_store,
+        storage.playbook_store,
     )
     _register_network_skills(registry, settings, storage.secret_vault)
     registry.register(MacroSkill(macro_store, registry, storage.permissions, storage.audit))
@@ -559,6 +572,7 @@ def build_container(settings: Settings | None = None) -> Container:
         memory_store=storage.memory_store,
         memory_semantic_indexer=retrieval.memory_indexer,
         workflow_template_indexer=retrieval.workflow_indexer,
+        playbook_store=storage.playbook_store,
         context_providers=context_providers,
     )
     audio = _build_audio_services(settings)
@@ -593,6 +607,7 @@ def build_container(settings: Settings | None = None) -> Container:
         metrics=storage.metrics,
         aliases=storage.aliases,
         knowledge_bases=storage.knowledge_bases,
+        playbook_store=storage.playbook_store,
         file_access_policy=storage.file_access_policy,
         vector_index=storage.vector_index,
         semantic_retriever=retrieval.semantic_retriever,

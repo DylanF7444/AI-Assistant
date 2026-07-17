@@ -27,6 +27,21 @@ powershell -ExecutionPolicy Bypass -File scripts/build.ps1
 The core and test suite do not need network access. Desktop, audio, STT, local
 LLM, and TTS providers are optional and loaded only when configured.
 
+Read JavaScript-rendered public pages without opening a user-visible browser:
+
+```powershell
+python -m pip install -e ".[browser]"
+python -m playwright install chromium
+```
+
+The browser extra is optional. It uses a fresh non-persistent headless context
+and never attaches to the user's normal browser profile.
+
+User-authored Markdown playbooks can guide multi-step planning with natural
+language instructions and optional registered skill IDs. Playbooks remain
+planning guidance: every resulting call still uses the normal typed skill,
+permission, confirmation, and audit pipeline.
+
 ## Safety model
 
 Transcripts and model output are treated as untrusted input. Only registered

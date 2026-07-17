@@ -25,6 +25,7 @@ from assistant.context.providers import (
 )
 from assistant.context.snapshot import ContextSnapshot
 from assistant.contracts import (
+    ActivityTrace,
     AudioSession,
     ExecutionPlan,
     Intent,
@@ -35,6 +36,7 @@ from assistant.contracts import (
     Response,
     ResponseType,
     SkillCall,
+    TracePhase,
     Transcript,
     WordTimestamp,
 )
@@ -53,6 +55,7 @@ from assistant.language.retrieval import (
     SemanticRetriever,
     SkillSemanticIndexer,
     WorkflowTemplateSemanticIndexer,
+    playbook_context_item,
 )
 from assistant.orchestration import (
     ConversationState,
@@ -70,6 +73,7 @@ from assistant.storage.database import MetricsStore
 from assistant.storage.history import HistoryStore
 from assistant.storage.knowledge import KnowledgeBaseStore
 from assistant.storage.memory import MemoryStore
+from assistant.storage.playbooks import Playbook, PlaybookStore
 from assistant.windows.paths import (
     ASSISTANT_FOLDER_TOKEN,
     KNOWN_USER_FOLDERS,
@@ -102,6 +106,7 @@ class AssistantOrchestrator:
         memory_store: MemoryStore | None = None,
         memory_semantic_indexer: MemorySemanticIndexer | None = None,
         workflow_template_indexer: WorkflowTemplateSemanticIndexer | None = None,
+        playbook_store: PlaybookStore | None = None,
         context_providers: tuple[ContextProvider, ...] = (),
     ) -> None:
         self.router = router
@@ -124,6 +129,7 @@ class AssistantOrchestrator:
         self.memory_store = memory_store
         self.memory_semantic_indexer = memory_semantic_indexer
         self.workflow_template_indexer = workflow_template_indexer
+        self.playbook_store = playbook_store
         self.context_providers = context_providers
         self._active_correlation: UUID | None = None
         self._request_state_lock = threading.Lock()
@@ -326,7 +332,7 @@ class AssistantOrchestrator:
             )
         print("\n".join(lines), file=sys.stderr, flush=True)
 
-    def _record_routing(
+    async def _record_routing(
         self, correlation_id: UUID, intent: Intent | None, duration_ms: float
     ) -> None:
         if self.metrics:
@@ -346,6 +352,25 @@ class AssistantOrchestrator:
                 "source": intent.source if intent else None,
                 "ambiguous": intent.ambiguous if intent else True,
             },
+        )
+        if intent is None:
+            detail = "No deterministic action matched; clarification is required."
+        else:
+            detail = (
+                f"Selected {intent.name} via {intent.source} ({intent.confidence:.0%} confidence)."
+            )
+        await self.events.publish(
+            PipelineEvent(
+                correlation_id=correlation_id,
+                state=PipelineState.THINKING,
+                message=detail,
+                trace=ActivityTrace(
+                    phase=TracePhase.DECISION,
+                    label="Decision",
+                    detail=detail,
+                ),
+                updates_foreground_status=False,
+            )
         )
 
     @staticmethod
@@ -529,7 +554,53 @@ class AssistantOrchestrator:
         session_id: str,
     ) -> PlannerDecision | None:
         assert self.planner is not None
+        explicit_playbook = self._explicit_playbook_reference(text)
+        if explicit_playbook is not None:
+            playbook, reference = explicit_playbook
+            if playbook is None:
+                available = (
+                    ", ".join(item.name for item in self.playbook_store.list())
+                    if self.playbook_store is not None
+                    else ""
+                )
+                suffix = f" Available playbooks: {available}." if available else ""
+                return PlannerDecision(
+                    intent=Intent(
+                        name="conversation.answer",
+                        arguments={
+                            "text": (
+                                f'I could not find a playbook named or identified by "{reference}".'
+                                f"{suffix}"
+                            )
+                        },
+                        confidence=1,
+                        source="rule",
+                    )
+                )
+            if not playbook.enabled:
+                return PlannerDecision(
+                    intent=Intent(
+                        name="conversation.answer",
+                        arguments={
+                            "text": (
+                                f'The playbook "{playbook.name}" is disabled. '
+                                f'Say "enable playbook {playbook.playbook_id}" before using it.'
+                            )
+                        },
+                        confidence=1,
+                        source="rule",
+                    )
+                )
         retrieved = await self._retrieve_planner_goal_context(text)
+        if explicit_playbook is not None:
+            playbook, _ = explicit_playbook
+            assert playbook is not None
+            exact = playbook_context_item(playbook, self.engine.registry)
+            retrieved = (exact,) + tuple(
+                item
+                for item in retrieved
+                if not (item.namespace == "playbook" and item.source_id == playbook.playbook_id)
+            )
         context = await self._context_snapshot_for_planner_goal(
             text,
             session_id=session_id,
@@ -561,6 +632,46 @@ class AssistantOrchestrator:
             )
         return None
 
+    def _explicit_playbook_reference(
+        self,
+        text: str,
+    ) -> tuple[Playbook | None, str] | None:
+        if self.playbook_store is None:
+            return None
+        match = re.fullmatch(
+            r"\s*(?:use|run|follow|apply)\s+(?:the\s+)?playbook\s+(.+?)\s*[.!]?\s*",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if match is None:
+            return None
+        remainder = match.group(1).strip()
+        folded = remainder.casefold()
+        candidates = []
+        for playbook in self.playbook_store.list():
+            for alias in {playbook.playbook_id, playbook.name}:
+                candidates.append((alias, playbook))
+        for alias, playbook in sorted(
+            candidates,
+            key=lambda item: len(item[0]),
+            reverse=True,
+        ):
+            folded_alias = alias.casefold()
+            if folded == folded_alias:
+                return playbook, alias
+            if not folded.startswith(folded_alias + " "):
+                continue
+            tail = remainder[len(alias) :].strip()
+            if re.match(r"^(?:to|for|on)\b", tail, flags=re.IGNORECASE):
+                return playbook, re.sub(
+                    r"^(?:to|for|on)\s+",
+                    "",
+                    tail,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
+        return None, remainder
+
     async def _retrieve_planner_goal_context(
         self,
         text: str,
@@ -575,12 +686,13 @@ class AssistantOrchestrator:
             if self.memory_semantic_indexer is not None and self.memory_store is not None:
                 await self.memory_semantic_indexer.refresh(self.memory_store)
             if self.workflow_template_indexer is not None:
-                await self.workflow_template_indexer.refresh()
+                await self.workflow_template_indexer.refresh(self.engine.registry)
             return await self.semantic_retriever.search(
                 text,
                 namespaces={
                     "knowledge",
                     "memory",
+                    "playbook",
                     "skill",
                     "skill_example",
                     "workflow_template",
@@ -670,6 +782,8 @@ class AssistantOrchestrator:
         if isinstance(metadata, dict):
             for key in (
                 "skill_id",
+                "skill_ids",
+                "playbook_id",
                 "template_id",
                 "knowledge_base_id",
                 "type",
@@ -1486,6 +1600,11 @@ class AssistantOrchestrator:
                 correlation_id=correlation_id,
                 state=PipelineState.THINKING,
                 message="Interpreting command",
+                trace=ActivityTrace(
+                    phase=TracePhase.UNDERSTANDING,
+                    label="Understanding",
+                    detail="Interpreting the request and selecting a bounded action.",
+                ),
             )
         )
         if self._pending_clarification_follow_up is not None:
@@ -1503,7 +1622,7 @@ class AssistantOrchestrator:
         route = self.router.route(text)
         route_duration = (time.perf_counter() - route_started) * 1000
         intent = route.intent
-        self._record_routing(correlation_id, intent, route_duration)
+        await self._record_routing(correlation_id, intent, route_duration)
         if route.clarification:
             self._set_pending_clarification(
                 original_text=text,
@@ -2396,9 +2515,10 @@ class AssistantOrchestrator:
         if not transcript.normalized_text.strip():
             response = Response(
                 display_text="No speech was detected.",
-                speech_text="I did not hear anything.",
+                speech_text=None,
                 response_type=ResponseType.STATUS,
                 severity="warning",
+                updates_display=False,
             )
             return await self._finish(response, ExecutionOutcome(), invoked_by_voice=True)
         route = self.router.route(transcript.normalized_text)
@@ -2574,9 +2694,10 @@ class AssistantOrchestrator:
         if final is None:
             response = Response(
                 display_text="No speech was detected.",
-                speech_text="I did not hear anything.",
+                speech_text=None,
                 response_type=ResponseType.STATUS,
                 severity="warning",
+                updates_display=False,
             )
             return await self._finish(response, ExecutionOutcome(), invoked_by_voice=True)
         return await self.handle_transcript(final)

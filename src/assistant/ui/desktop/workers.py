@@ -31,6 +31,7 @@ class PassiveVoiceWorker(QThread):
     complete = Signal(object)
     failed = Signal(str)
     partial_transcript = Signal(str)
+    request_transcript = Signal(str)
 
     def __init__(self, container: Container, mode: str) -> None:
         super().__init__()
@@ -63,12 +64,18 @@ class PassiveVoiceWorker(QThread):
             publish_events=False,
             on_transcript=self._show_transcript,
         )
-        if self._stop_requested or transcript is None:
+        if (
+            self._stop_requested
+            or transcript is None
+            or not transcript.normalized_text.strip()
+        ):
             return
-        spoken = transcript.normalized_text or transcript.raw_text
+        spoken = transcript.normalized_text.strip()
         if await self.container.orchestrator.consume_persistent_voice_interrupt(spoken):
             return
-        self.complete.emit(await self.container.orchestrator.handle_transcript(transcript))
+        result = await self.container.orchestrator.handle_transcript(transcript)
+        self.request_transcript.emit(transcript.raw_text.strip() or spoken)
+        self.complete.emit(result)
 
     async def _listen_for_activation(self) -> None:
         transcript = await self.container.orchestrator.transcribe_once(
@@ -93,15 +100,15 @@ class PassiveVoiceWorker(QThread):
         if request is None and not clap_detected:
             return
         if request:
-            self.complete.emit(
-                await self.container.orchestrator.handle_text(
-                    request,
-                    session_id=(
-                        str(transcript.session_id) if transcript is not None else "voice-activation"
-                    ),
-                    invoked_by_voice=True,
-                )
+            result = await self.container.orchestrator.handle_text(
+                request,
+                session_id=(
+                    str(transcript.session_id) if transcript is not None else "voice-activation"
+                ),
+                invoked_by_voice=True,
             )
+            self.request_transcript.emit(request)
+            self.complete.emit(result)
         else:
             self.complete.emit(
                 await self.container.orchestrator.listen_once(

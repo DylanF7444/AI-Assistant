@@ -12,6 +12,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from assistant.contracts import (
+    ActivityTrace,
     ConfirmationRequest,
     ExecutionPlan,
     PermissionScope,
@@ -22,6 +23,7 @@ from assistant.contracts import (
     SkillCall,
     SkillError,
     SkillResult,
+    TracePhase,
 )
 from assistant.events import EventBus
 from assistant.execution.evaluation import (
@@ -55,6 +57,7 @@ class ActiveJob:
     arguments: dict[str, Any]
     started_at: datetime
     elapsed_seconds: float
+    invocation: str
 
 
 @dataclass(frozen=True)
@@ -91,7 +94,7 @@ class ExecutionEngine:
             self._requires_confirmation,
         )
         self._jobs: dict[UUID, asyncio.Task[SkillResult]] = {}
-        self._job_details: dict[UUID, tuple[str, str, dict[str, Any], datetime, float]] = {}
+        self._job_details: dict[UUID, tuple[str, str, dict[str, Any], datetime, float, str]] = {}
         self._job_loops: dict[UUID, asyncio.AbstractEventLoop] = {}
         self._cancel_events: dict[UUID, asyncio.Event] = {}
         self._completed_keys: OrderedDict[str, SkillResult] = OrderedDict()
@@ -110,6 +113,7 @@ class ExecutionEngine:
                 arguments=dict(arguments),
                 started_at=started_at,
                 elapsed_seconds=max(0.0, current - started_monotonic),
+                invocation=invocation,
             )
             for correlation_id, (
                 skill_id,
@@ -117,10 +121,30 @@ class ExecutionEngine:
                 arguments,
                 started_at,
                 started_monotonic,
+                invocation,
             ) in details
         )
 
     async def prepare(self, call: SkillCall) -> ExecutionOutcome:
+        try:
+            skill_name = self.registry.get(call.skill_id).manifest.display_name
+        except KeyError:
+            skill_name = call.skill_id
+        await self.events.publish(
+            PipelineEvent(
+                correlation_id=call.correlation_id,
+                state=PipelineState.THINKING,
+                message=f"Checking {skill_name}",
+                trace=ActivityTrace(
+                    phase=TracePhase.PERMISSION,
+                    label="Safety check",
+                    detail=f"Checking permissions and confirmation requirements for {skill_name}.",
+                    invocation=call.permission_context.invocation,
+                    skill_id=call.skill_id,
+                ),
+                updates_foreground_status=(call.permission_context.invocation == "interactive"),
+            )
+        )
         evaluation = await self.evaluator.evaluate(
             call,
             consume_once=False,
@@ -464,6 +488,18 @@ class ExecutionEngine:
                 correlation_id=call.correlation_id,
                 state=PipelineState.EXECUTING,
                 message=f"Executing {skill.manifest.display_name}",
+                trace=ActivityTrace(
+                    phase=TracePhase.ACTION,
+                    label=(
+                        "Background action"
+                        if call.permission_context.invocation == "background"
+                        else "Action"
+                    ),
+                    detail=f"Running {skill.manifest.display_name}.",
+                    invocation=call.permission_context.invocation,
+                    skill_id=call.skill_id,
+                ),
+                updates_foreground_status=(call.permission_context.invocation == "interactive"),
             )
         )
         started = time.perf_counter()
@@ -477,6 +513,8 @@ class ExecutionEngine:
         timeout_seconds = (
             max(30.0, float(call.arguments.get("seconds", 0)) + 1.0)
             if call.skill_id == "core.timer"
+            else min(65.0, float(call.arguments.get("timeout_seconds", 30)) + 5.0)
+            if call.skill_id == "web.headless_read"
             else 30.0
         )
         result = None
@@ -494,6 +532,7 @@ class ExecutionEngine:
                         dict(call.arguments),
                         datetime.now(UTC),
                         time.monotonic(),
+                        call.permission_context.invocation,
                     )
                 try:
                     result = await asyncio.wait_for(task, timeout=timeout_seconds)
@@ -552,6 +591,25 @@ class ExecutionEngine:
                 "skill_id": call.skill_id,
                 "outcome": result.status.value,
             },
+        )
+        await self.events.publish(
+            PipelineEvent(
+                correlation_id=call.correlation_id,
+                state=PipelineState.EXECUTING,
+                message=result.summary,
+                trace=ActivityTrace(
+                    phase=TracePhase.RESULT,
+                    label=(
+                        "Background result"
+                        if call.permission_context.invocation == "background"
+                        else "Result"
+                    ),
+                    detail=f"{skill.manifest.display_name}: {result.summary}",
+                    invocation=call.permission_context.invocation,
+                    skill_id=call.skill_id,
+                ),
+                updates_foreground_status=False,
+            )
         )
         if result.status == ResultStatus.COMPLETED:
             with self._state_lock:

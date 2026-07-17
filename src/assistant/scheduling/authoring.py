@@ -9,6 +9,7 @@ from assistant.contracts import (
     RiskLevel,
     SkillCall,
 )
+from assistant.policy.background import background_compatibility
 from assistant.scheduling.contracts import (
     AutonomyPolicy,
     FixedSkillAction,
@@ -214,6 +215,12 @@ class ScheduleAuthoringService:
         )
         skill.validate(arguments)
         permissions = tuple(skill.required_permissions(call))
+        compatibility = background_compatibility(skill.manifest, permissions)
+        if not compatibility.allowed:
+            raise ValueError(
+                "Skill cannot run without interrupting the interactive desktop: "
+                f"{skill_id}. {compatibility.reason}"
+            )
         risk = skill.risk_for(call)
         snapshot = SkillSnapshot(
             skill_id=skill_id,
@@ -248,15 +255,7 @@ class ScheduleAuthoringService:
                 capability == "network" or capability.startswith("network.")
                 for capability in capabilities
             ),
-            requires_unlocked_session=bool(
-                {
-                    "input.control",
-                    "process.window",
-                    "window.control",
-                    "clipboard.read",
-                }
-                & set(capabilities)
-            ),
+            requires_unlocked_session=False,
         )
 
     @staticmethod

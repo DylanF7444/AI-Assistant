@@ -61,3 +61,11 @@ and single-use confirmation for that occurrence; critical work still requires
 the displayed typed token. Schedules cannot invoke schedule management, macros,
 or file-access-policy management in the background and cannot persist embedded
 password, token, secret, API-key, or PIN fields.
+
+Background compatibility is a separate check from permission and risk. Calls
+that request interactive or device-changing capabilities such as
+`input.control`, `process.window`, `process.launch`, clipboard access,
+`media.control`, `settings.set`, process termination, or system/device control
+cannot run unattended on the user's active desktop. New packaged skills default
+to foreground-only until their execution mode is explicitly reviewed. See
+`docs/BACKGROUND_EXECUTION.md` for the complete compatibility policy.

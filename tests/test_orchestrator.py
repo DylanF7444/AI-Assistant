@@ -456,6 +456,30 @@ async def test_text_to_command_to_response(settings):
 
 
 @pytest.mark.asyncio
+async def test_daily_message_creates_persistent_schedule_without_using_planner(settings):
+    container = build_container(settings)
+    container.orchestrator.planner = BrokenPlanner()
+
+    response, outcome = await container.orchestrator.handle_text(
+        "Say good morning! everyday at 8 AM"
+    )
+
+    assert outcome.result is not None
+    assert outcome.result.status == ResultStatus.COMPLETED
+    assert outcome.call is not None
+    assert outcome.call.skill_id == "core.schedule"
+    assert "Created schedule good morning!" in response.display_text
+    schedules = container.schedule_store.list()
+    assert len(schedules) == 1
+    assert schedules[0].status.value == "active"
+    assert schedules[0].trigger.frequency == "daily"
+    assert schedules[0].trigger.local_time.isoformat() == "08:00:00"
+    assert schedules[0].action.kind == "notify_only"
+    assert schedules[0].action.message == "good morning!"
+    assert container.notification_center.history() == ()
+
+
+@pytest.mark.asyncio
 async def test_naturally_worded_launch_goal_executes_selected_skill(settings, tmp_path):
     settings.confirmation_overrides = {"skill:windows.launcher": False}
     container = build_container(settings)
@@ -1067,7 +1091,7 @@ async def test_listen_once_routes_final_transcript_not_partial_filler(settings):
 
 
 @pytest.mark.asyncio
-async def test_empty_voice_transcript_reports_no_speech(settings):
+async def test_empty_voice_transcript_does_not_update_the_display(settings):
     container = build_container(settings)
     transcript = Transcript(
         session_id=uuid4(),
@@ -1080,6 +1104,8 @@ async def test_empty_voice_transcript_reports_no_speech(settings):
 
     assert response.display_text == "No speech was detected."
     assert response.response_type == ResponseType.STATUS
+    assert response.speech_text is None
+    assert response.updates_display is False
     assert outcome.result is None
 
 
@@ -1464,6 +1490,7 @@ async def test_broad_goal_interpretation_receives_semantic_retrieval(settings):
             {
                 "knowledge",
                 "memory",
+                "playbook",
                 "skill",
                 "skill_example",
                 "workflow_template",
@@ -1473,6 +1500,56 @@ async def test_broad_goal_interpretation_receives_semantic_retrieval(settings):
     ]
     assert planner.calls[0][2][0].namespace == "skill_example"
     assert planner.calls[0][2][0].metadata["skill_id"] == "windows.file_operation"
+
+
+@pytest.mark.asyncio
+async def test_explicit_playbook_use_injects_exact_enabled_playbook(settings):
+    container = build_container(settings)
+    planner = InterpretingThenAnswerPlanner()
+    container.orchestrator.planner = planner
+    container.playbook_store.save_markdown(
+        container.playbook_store.EXAMPLE.replace(
+            "prepare-release",
+            "release-check",
+        ).replace(
+            "Prepare a release",
+            "Release Check",
+        )
+    )
+
+    response, outcome = await container.orchestrator.handle_text(
+        "Use playbook Release Check to prepare version 2.0"
+    )
+
+    assert response.response_type == ResponseType.ANSWER
+    assert outcome.result is None
+    retrieved = planner.interpret_calls[0][2]
+    assert retrieved[0].namespace == "playbook"
+    assert retrieved[0].source_id == "release-check"
+    assert retrieved[0].score == 1.0
+
+
+@pytest.mark.asyncio
+async def test_explicit_playbook_use_reports_unknown_or_disabled_reference(settings):
+    container = build_container(settings)
+    planner = InterpretingThenAnswerPlanner()
+    container.orchestrator.planner = planner
+    saved = container.playbook_store.save_markdown(container.playbook_store.EXAMPLE)
+    container.playbook_store.set_enabled(saved.playbook_id, False)
+
+    disabled_response, _ = await container.orchestrator.handle_text("Use playbook prepare-release")
+    unknown_response, _ = await container.orchestrator.handle_text("Use playbook missing-workflow")
+    enabled_response, _ = await container.orchestrator.handle_text(
+        "enable playbook prepare-release"
+    )
+
+    assert disabled_response.response_type == ResponseType.ANSWER
+    assert "is disabled" in disabled_response.display_text
+    assert unknown_response.response_type == ResponseType.ANSWER
+    assert "could not find a playbook" in unknown_response.display_text
+    assert "Enabled playbook" in enabled_response.display_text
+    assert container.playbook_store.get("prepare-release").enabled is True
+    assert planner.interpret_calls == []
 
 
 @pytest.mark.asyncio

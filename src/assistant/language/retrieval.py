@@ -11,6 +11,7 @@ from assistant.skills.registry import SkillRegistry
 from assistant.skills.workflows import DEFAULT_WORKFLOW_TEMPLATES, WorkflowTemplate
 from assistant.storage.knowledge import KnowledgeBaseStore
 from assistant.storage.memory import MemoryItem, MemoryStore
+from assistant.storage.playbooks import Playbook, PlaybookStore
 from assistant.storage.vector_index import VectorIndex
 
 
@@ -263,27 +264,54 @@ class WorkflowTemplateSemanticIndexer:
         embedding_provider: EmbeddingProvider,
         *,
         templates: tuple[WorkflowTemplate, ...] = DEFAULT_WORKFLOW_TEMPLATES,
+        playbook_store: PlaybookStore | None = None,
     ) -> None:
         self.index = index
         self.embedding_provider = embedding_provider
         self.templates = templates
+        self.playbook_store = playbook_store
         self._last_signature: tuple[Any, ...] | None = None
 
-    async def refresh(self) -> None:
-        signature = tuple(
-            json.dumps(template.model_dump(mode="json"), sort_keys=True)
-            for template in self.templates
+    async def refresh(self, registry: SkillRegistry | None = None) -> None:
+        playbooks = self.playbook_store.list(enabled_only=True) if self.playbook_store else ()
+        enabled_skill_ids = (
+            {
+                manifest.skill_id
+                for manifest in registry.list()
+                if registry.is_enabled(manifest.skill_id)
+            }
+            if registry is not None
+            else None
+        )
+        signature = (
+            tuple(
+                json.dumps(template.model_dump(mode="json"), sort_keys=True)
+                for template in self.templates
+            ),
+            tuple(
+                json.dumps(
+                    playbook.model_dump(mode="json", by_alias=True, exclude={"source_path"}),
+                    sort_keys=True,
+                )
+                for playbook in playbooks
+            ),
+            tuple(sorted(enabled_skill_ids)) if enabled_skill_ids is not None else None,
         )
         if signature == self._last_signature:
             return
         self.index.delete_namespace("workflow_template")
-        texts = [_workflow_text(template) for template in self.templates]
+        self.index.delete_namespace("playbook")
+        workflow_texts = [_workflow_text(template) for template in self.templates]
+        playbook_texts = [_playbook_text(playbook) for playbook in playbooks]
+        texts = workflow_texts + playbook_texts
         embeddings = await self.embedding_provider.embed(texts) if texts else []
+        workflow_embeddings = embeddings[: len(workflow_texts)]
+        playbook_embeddings = embeddings[len(workflow_texts) :]
         model_name = self.embedding_provider.__class__.__name__
         for template, text, embedding in zip(
             self.templates,
-            texts,
-            embeddings,
+            workflow_texts,
+            workflow_embeddings,
             strict=True,
         ):
             self.index.upsert(
@@ -296,6 +324,20 @@ class WorkflowTemplateSemanticIndexer:
                     "clarification": template.clarification,
                     "triggers": list(template.triggers),
                 },
+                embedding=embedding,
+                embedding_model=model_name,
+            )
+        for playbook, text, embedding in zip(
+            playbooks,
+            playbook_texts,
+            playbook_embeddings,
+            strict=True,
+        ):
+            self.index.upsert(
+                namespace="playbook",
+                source_id=playbook.playbook_id,
+                text=text,
+                metadata=_playbook_metadata(playbook, enabled_skill_ids),
                 embedding=embedding,
                 embedding_model=model_name,
             )
@@ -347,4 +389,63 @@ def _workflow_text(template: WorkflowTemplate) -> str:
         f"Triggers: {', '.join(template.triggers)}\n"
         f"Steps: {'; '.join(template.steps)}\n"
         f"Clarification: {template.clarification or ''}"
+    )
+
+
+def _playbook_text(playbook: Playbook) -> str:
+    skill_guidance = "; ".join(
+        f"{item.skill_id}: {item.instructions or 'No additional guidance.'}"
+        for item in playbook.skills
+    )
+    return (
+        f"User playbook ID: {playbook.playbook_id}\n"
+        f"Name: {playbook.name}\n"
+        f"Description: {playbook.description}\n"
+        f"Triggers: {', '.join(playbook.triggers)}\n"
+        f"Registered skill guidance: {skill_guidance}\n"
+        f"Workflow instructions:\n{playbook.instructions}"
+    )
+
+
+def _playbook_metadata(
+    playbook: Playbook,
+    enabled_skill_ids: set[str] | None,
+) -> dict[str, Any]:
+    available_ids = tuple(
+        skill_id
+        for skill_id in playbook.skill_ids
+        if enabled_skill_ids is None or skill_id in enabled_skill_ids
+    )
+    unavailable_ids = tuple(
+        skill_id for skill_id in playbook.skill_ids if skill_id not in available_ids
+    )
+    return {
+        "playbook_id": playbook.playbook_id,
+        "name": playbook.name,
+        "version": playbook.version,
+        "content_hash": playbook.content_hash,
+        "skill_ids": list(available_ids),
+        "unavailable_skill_ids": list(unavailable_ids),
+        "skill_guidance": {
+            guidance.skill_id: guidance.instructions for guidance in playbook.skills
+        },
+        "triggers": list(playbook.triggers),
+    }
+
+
+def playbook_context_item(
+    playbook: Playbook,
+    registry: SkillRegistry,
+    *,
+    score: float = 1.0,
+) -> RetrievedContextItem:
+    enabled_skill_ids = {
+        manifest.skill_id for manifest in registry.list() if registry.is_enabled(manifest.skill_id)
+    }
+    return RetrievedContextItem(
+        namespace="playbook",
+        source_id=playbook.playbook_id,
+        text=_playbook_text(playbook),
+        metadata=_playbook_metadata(playbook, enabled_skill_ids),
+        score=score,
     )

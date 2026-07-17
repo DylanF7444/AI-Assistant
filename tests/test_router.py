@@ -94,6 +94,42 @@ def test_recurring_reminder_routes_to_schedule_skill(text, recurrence):
 
 
 @pytest.mark.parametrize(
+    "text",
+    [
+        "Say good morning! everyday at 8 AM",
+        "say good morning every day at 8 am",
+        "announce good morning at 8 am daily",
+        "every day at 8 am say good morning",
+    ],
+)
+def test_daily_message_routes_to_durable_schedule(text):
+    result = DeterministicRouter().route(text)
+
+    assert not result.needs_llm
+    assert result.clarification is None
+    assert result.intent.name == "core.schedule"
+    assert result.intent.arguments == {
+        "operation": "create",
+        "name": "good morning!" if "!" in text else "good morning",
+        "message": "good morning!" if "!" in text else "good morning",
+        "recurrence": {
+            "frequency": "daily",
+            "interval": 1,
+            "local_time": "08:00:00",
+        },
+    }
+
+
+def test_daily_message_with_ambiguous_time_asks_for_am_or_pm():
+    result = DeterministicRouter().route("say good morning every day at 8")
+
+    assert result.intent is None
+    assert result.clarification == (
+        "What time should the daily message run, including AM or PM?"
+    )
+
+
+@pytest.mark.parametrize(
     ("text", "arguments"),
     [
         ("list schedules", {"operation": "list"}),
@@ -713,6 +749,78 @@ def test_light_and_dark_mode_routes():
 
 def test_knowledge_question_is_not_misrouted_to_calculator():
     result = DeterministicRouter().route("What is the capital of France?")
+    assert result.needs_llm
+    assert result.intent.name == "planner.goal"
+
+
+def test_save_playbook_route_preserves_instructions_and_registered_skill_ids():
+    result = DeterministicRouter().route(
+        "Save a playbook called Release Check using skills core.datetime, core.tasks: "
+        "First inspect the release notes. Then create a final checklist."
+    )
+
+    assert not result.needs_llm
+    assert result.intent.name == "core.playbook"
+    assert result.intent.arguments == {
+        "operation": "save",
+        "name": "Release Check",
+        "instructions": ("First inspect the release notes. Then create a final checklist."),
+        "skill_ids": ("core.datetime", "core.tasks"),
+    }
+
+
+def test_save_playbook_route_accepts_spoken_with_instructions_form():
+    result = DeterministicRouter().route(
+        "Create a playbook named Morning Review with instructions "
+        "First list my tasks, then summarize the highest priority items"
+    )
+
+    assert result.intent.name == "core.playbook"
+    assert result.intent.arguments == {
+        "operation": "save",
+        "name": "Morning Review",
+        "instructions": ("First list my tasks, then summarize the highest priority items"),
+    }
+
+    alternate = DeterministicRouter().route(
+        "Save these instructions as a playbook called Morning Review: "
+        "First list my tasks, then summarize the highest priority items"
+    )
+    assert alternate.intent.name == "core.playbook"
+    assert alternate.intent.arguments["name"] == "Morning Review"
+
+
+@pytest.mark.parametrize(
+    ("text", "arguments"),
+    [
+        ("list playbooks", {"operation": "list"}),
+        ("show playbook release-check", {"operation": "show", "name": "release-check"}),
+        ("recall playbook Release Check", {"operation": "show", "name": "release check"}),
+        (
+            "disable playbook release-check",
+            {"operation": "disable", "name": "release-check"},
+        ),
+        (
+            "enable playbook release-check",
+            {"operation": "enable", "name": "release-check"},
+        ),
+        (
+            "delete playbook release-check",
+            {"operation": "delete", "name": "release-check"},
+        ),
+    ],
+)
+def test_playbook_management_routes(text, arguments):
+    result = DeterministicRouter().route(text)
+
+    assert not result.needs_llm
+    assert result.intent.name == "core.playbook"
+    assert result.intent.arguments == arguments
+
+
+def test_use_playbook_routes_to_open_ended_planner_goal():
+    result = DeterministicRouter().route("Use playbook release-check to prepare version 2.0")
+
     assert result.needs_llm
     assert result.intent.name == "planner.goal"
 

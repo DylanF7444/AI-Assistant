@@ -8,17 +8,27 @@ pytest.importorskip("PySide6")
 pytest.importorskip("pytestqt")
 
 from assistant.bootstrap import build_container
+from assistant.contracts import (
+    ActivityTrace,
+    PipelineEvent,
+    PipelineState,
+    Response,
+    ResponseType,
+    TracePhase,
+    Transcript,
+)
+from assistant.execution.engine import ExecutionOutcome
 from assistant.storage.database import SettingsStore
 from assistant.ui.desktop.app import _demo_arguments, run_desktop
 from assistant.ui.desktop.controller import DesktopController
 from assistant.ui.desktop.state import DesktopWindowState, WindowGeometry
 from assistant.ui.desktop.tabs import TAB_GROUPS, TAB_LABELS
-from assistant.ui.desktop.workers import AsyncWorker
+from assistant.ui.desktop.workers import AsyncWorker, PassiveVoiceWorker
 
 
 @pytest.mark.ui
 def test_desktop_preserves_all_tab_labels():
-    assert len(TAB_LABELS) == 14
+    assert len(TAB_LABELS) == 15
     assert {label for labels in TAB_GROUPS.values() for label in labels} == set(TAB_LABELS)
 
 
@@ -33,12 +43,37 @@ def test_async_worker_reports_completion(qtbot):
     assert worker.wait(2000)
 
 
+@pytest.mark.ui
+@pytest.mark.asyncio
+async def test_persistent_voice_ignores_an_empty_final_transcript(settings, monkeypatch):
+    container = build_container(settings)
+    worker = PassiveVoiceWorker(container, "persistent")
+    transcript = Transcript(
+        session_id=__import__("uuid").uuid4(),
+        raw_text="",
+        normalized_text="",
+        confidence=None,
+    )
+    handled = []
+
+    async def transcribe_once(*args, **kwargs):
+        return transcript
+
+    async def handle_transcript(value):
+        handled.append(value)
+
+    monkeypatch.setattr(container.orchestrator, "transcribe_once", transcribe_once)
+    monkeypatch.setattr(container.orchestrator, "handle_transcript", handle_transcript)
+
+    await worker._listen_persistent()
+
+    assert handled == []
+
+
 def test_skill_demo_arguments_are_generated_from_the_declared_schema():
     from assistant.skills.builtin import CalculatorSkill
 
-    assert _demo_arguments(CalculatorSkill.manifest.input_schema) == {
-        "expression": "2 + 2"
-    }
+    assert _demo_arguments(CalculatorSkill.manifest.input_schema) == {"expression": "2 + 2"}
 
 
 @pytest.mark.ui
@@ -105,7 +140,7 @@ def test_compact_companion_switches_views_renders_and_hides_to_tray(
 
     assert window._window_mode == "compact"
     assert window.view_stack.currentWidget() is window.compact_panel
-    assert window.tabs.count() == 14
+    assert window.tabs.count() == 15
     assert window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
     assert (window.minimumWidth(), window.minimumHeight()) == (380, 500)
     assert (window.maximumWidth(), window.maximumHeight()) == (520, 680)
@@ -127,6 +162,27 @@ def test_compact_companion_switches_views_renders_and_hides_to_tray(
     assert "calculate 17 times 19" in window.compact_panel.latest_request.text()
     assert window.response.toPlainText() == window.compact_panel.response.toPlainText()
 
+    previous_request = window.transcript.toPlainText()
+    previous_response = window.response.toPlainText()
+    previous_response_type = window.response_type.text()
+    window._show_voice_transcript("ambient noise spike")
+    window._show_voice_result(
+        (
+            Response(
+                display_text="No speech was detected.",
+                response_type=ResponseType.STATUS,
+                severity="warning",
+                updates_display=False,
+            ),
+            ExecutionOutcome(),
+        )
+    )
+    assert window.transcript.toPlainText() == previous_request
+    assert window.compact_panel.latest_request.text() == previous_request
+    assert window.response.toPlainText() == previous_response
+    assert window.compact_panel.response.toPlainText() == previous_response
+    assert window.response_type.text() == previous_response_type
+
     window._switch_window_mode("full")
     assert window.view_stack.currentWidget() is window.tabs
     tab_bar = window.tabs.tabBar()
@@ -145,6 +201,40 @@ def test_compact_companion_switches_views_renders_and_hides_to_tray(
     assert window.maximumWidth() == window.UNBOUNDED_WIDGET_SIZE
     assert window.maximumHeight() == window.UNBOUNDED_WIDGET_SIZE
     assert window.audit_table.objectName() == "auditTable"
+    assert window.activity_hint.text() == "Safe decision and action trace"
+    foreground_state = window._active_state
+    correlation_id = __import__("uuid").uuid4()
+    window._handle_pipeline_event(
+        PipelineEvent(
+            correlation_id=correlation_id,
+            state=PipelineState.EXECUTING,
+            message="Background work",
+            trace=ActivityTrace(
+                phase=TracePhase.ACTION,
+                label="Background action",
+                detail="Running a safe task.",
+                invocation="background",
+            ),
+            updates_foreground_status=False,
+        )
+    )
+    assert window._active_state == foreground_state
+    assert "1 ACTIVE" in window.background_activity.text()
+    window._handle_pipeline_event(
+        PipelineEvent(
+            correlation_id=correlation_id,
+            state=PipelineState.EXECUTING,
+            message="Done",
+            trace=ActivityTrace(
+                phase=TracePhase.RESULT,
+                label="Background result",
+                detail="Safe task completed.",
+                invocation="background",
+            ),
+            updates_foreground_status=False,
+        )
+    )
+    assert window.background_activity.text().endswith("IDLE")
     assert all(
         window.audit_table.horizontalHeader().sectionResizeMode(column)
         == QHeaderView.ResizeMode.ResizeToContents
@@ -198,9 +288,7 @@ def test_compact_companion_switches_views_renders_and_hides_to_tray(
 
 
 @pytest.mark.ui
-def test_skills_tab_shows_details_permissions_security_and_runs_demo(
-    qtbot, settings, monkeypatch
-):
+def test_skills_tab_shows_details_permissions_security_and_runs_demo(qtbot, settings, monkeypatch):
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -219,11 +307,18 @@ def test_skills_tab_shows_details_permissions_security_and_runs_demo(
 
     monkeypatch.setattr(QApplication, "exec", capture_window)
     container = build_container(settings)
+    container.playbook_store.save_markdown(container.playbook_store.EXAMPLE)
     SettingsStore(container.database).set("first_run_complete", True)
 
     assert run_desktop(container) == 0
     window = captured_windows[-1]
     qtbot.addWidget(window)
+
+    assert window.playbook_list.count() == 1
+    assert "Prepare a release" in window.playbook_list.item(0).text()
+    window.playbook_list.setCurrentRow(0)
+    window._toggle_playbook()
+    assert container.playbook_store.get("prepare-release").enabled is False
 
     def select_skill(skill_id: str) -> None:
         for row in range(window.skill_list.count()):
@@ -246,15 +341,14 @@ def test_skills_tab_shows_details_permissions_security_and_runs_demo(
     assert window.skill_category_value.text() == "Productivity"
     assert "no special permissions" in window.skill_permissions_summary.text()
     assert '"expression": "2 + 2"' in window.skill_demo_input.toPlainText()
+    assert "Background eligible" in window.skill_background_value.text()
 
     window._run_skill_demo()
     qtbot.waitUntil(
         lambda: "The result is 4" in window.skill_demo_output.toPlainText(),
         timeout=5000,
     )
-    assert container.audit.query(event_type="skill_execution")[0]["skill_id"] == (
-        "core.calculator"
-    )
+    assert container.audit.query(event_type="skill_execution")[0]["skill_id"] == ("core.calculator")
 
     window.shutdown()
     window.hide()

@@ -13,6 +13,11 @@ transcripts, permissions, and the integrity of audit records.
 - Prompt injection: model text cannot execute. Only retrieved registered skills
   can be selected, arguments must satisfy JSON Schema, and policy is enforced
   outside the model.
+- Playbook abuse: only enabled local Markdown playbooks receive user-guidance
+  precedence. Their frontmatter is schema-validated and size-bounded, listed
+  skill IDs are intersected with enabled registered skills, and instructions
+  cannot grant authority or weaken policy. Playbooks are not interpreted by the
+  unattended scheduler.
 - Malicious skills: new skills default disabled/no permissions. Manifests,
   duplicate IDs, API versions, schemas, timeouts, and capability expansion are
   reviewed. Packages require trusted Ed25519 signatures and execute in a
@@ -33,6 +38,13 @@ transcripts, permissions, and the integrity of audit records.
   schedule revision, action and policy digests, skills, capabilities, exact
   targets, risk, expiry, and machine identity. Interactive grants are not
   accepted as background authority.
+- Foreground interference: schedule authoring and execution independently reject
+  input, window, launch/termination, clipboard, media, and device-changing
+  capabilities. An unlocked session does not make those actions background-safe.
+- Headless browsing: every read uses a fresh non-persistent context; only public
+  HTTPS requests are allowed, private/local targets, downloads, service workers,
+  and WebSockets are blocked, output is bounded, and the user's normal browser
+  profile is not reused.
 - Stored-action tampering and prompt injection: schedule payloads are typed data,
   never prompts interpreted at fire time. Action/policy digest mismatches,
   changed arguments, schema/permission/risk/version drift, disabled skills, and

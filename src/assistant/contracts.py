@@ -39,6 +39,20 @@ class PipelineState(StrEnum):
     CANCELLED = "cancelled"
 
 
+class TracePhase(StrEnum):
+    UNDERSTANDING = "understanding"
+    DECISION = "decision"
+    PERMISSION = "permission"
+    ACTION = "action"
+    RESULT = "result"
+
+
+class BackgroundMode(StrEnum):
+    SAFE = "safe"
+    CAPABILITY_GATED = "capability_gated"
+    FOREGROUND_ONLY = "foreground_only"
+
+
 class RiskLevel(StrEnum):
     LOW = "low"
     MEDIUM = "medium"
@@ -137,6 +151,7 @@ class SkillManifest(StrictModel):
     entry_point: str
     supports_rollback: bool = False
     safe_to_retry: bool = False
+    background_mode: BackgroundMode = BackgroundMode.FOREGROUND_ONLY
 
 
 class PermissionContext(StrictModel):
@@ -213,6 +228,15 @@ class Response(StrictModel):
     severity: Literal["info", "success", "warning", "error"] = "info"
     speak: bool = False
     sensitive: bool = False
+    updates_display: bool = True
+
+
+class ActivityTrace(StrictModel):
+    phase: TracePhase
+    label: str = Field(min_length=1, max_length=80)
+    detail: str = Field(default="", max_length=500)
+    invocation: Literal["interactive", "background"] = "interactive"
+    skill_id: str | None = None
 
 
 class PipelineEvent(StrictModel):
@@ -223,6 +247,8 @@ class PipelineEvent(StrictModel):
     message: str = ""
     progress: float | None = Field(default=None, ge=0, le=1)
     data: dict[str, Any] = Field(default_factory=dict)
+    trace: ActivityTrace | None = None
+    updates_foreground_status: bool = True
 
 
 class PlanStep(StrictModel):

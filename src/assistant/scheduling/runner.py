@@ -6,14 +6,19 @@ from datetime import timedelta
 from uuid import UUID, uuid4
 
 from assistant.contracts import (
+    ActivityTrace,
     ExecutionPlan,
+    PipelineEvent,
+    PipelineState,
     PlanStep,
     ResultStatus,
     RiskLevel,
     SkillCall,
     SkillResult,
+    TracePhase,
 )
 from assistant.execution.engine import ExecutionEngine
+from assistant.policy.background import background_compatibility
 from assistant.scheduling.clock import Clock
 from assistant.scheduling.contracts import (
     ApprovalConfirmation,
@@ -81,8 +86,20 @@ class BackgroundRunner:
         )
         try:
             schedule = self.store.get(evaluating.schedule_id)
+            await self._publish_trace(
+                correlation_id,
+                TracePhase.DECISION,
+                "Background check",
+                f"Evaluating {schedule.name} against its frozen authorization and safety limits.",
+            )
             reason = self._denial_reason(schedule, evaluating)
             if reason:
+                await self._publish_trace(
+                    correlation_id,
+                    TracePhase.RESULT,
+                    "Background blocked",
+                    f"{schedule.name}: {reason}",
+                )
                 return self._blocked(evaluating, correlation_id, reason)
             effective_risk = self._effective_risk(schedule)
             if effective_risk != RiskLevel.LOW:
@@ -107,6 +124,12 @@ class BackgroundRunner:
                     )
                 )
                 self._audit(result, "schedule_approval_requested", "awaiting_approval")
+                await self._publish_trace(
+                    correlation_id,
+                    TracePhase.PERMISSION,
+                    "Background approval",
+                    f"{schedule.name} is waiting for explicit approval.",
+                )
                 return result
             running = self.store.transition_run(
                 evaluating.run_id,
@@ -115,7 +138,20 @@ class BackgroundRunner:
                 correlation_id=correlation_id,
             )
             if isinstance(schedule.action, NotificationAction):
-                return self._deliver_notification(schedule, running, correlation_id)
+                await self._publish_trace(
+                    correlation_id,
+                    TracePhase.ACTION,
+                    "Background action",
+                    f"Delivering notification for {schedule.name}.",
+                )
+                result = self._deliver_notification(schedule, running, correlation_id)
+                await self._publish_trace(
+                    correlation_id,
+                    TracePhase.RESULT,
+                    "Background result",
+                    f"{schedule.name} completed.",
+                )
+                return result
             if isinstance(schedule.action, FixedSkillAction):
                 return await self._execute_fixed(schedule, running, correlation_id)
             if isinstance(schedule.action, FrozenPlanAction):
@@ -156,6 +192,30 @@ class BackgroundRunner:
             if heartbeat is not None:
                 heartbeat.cancel()
                 await asyncio.gather(heartbeat, return_exceptions=True)
+
+    async def _publish_trace(
+        self,
+        correlation_id,
+        phase: TracePhase,
+        label: str,
+        detail: str,
+    ) -> None:
+        if self.engine is None:
+            return
+        await self.engine.events.publish(
+            PipelineEvent(
+                correlation_id=correlation_id,
+                state=PipelineState.EXECUTING,
+                message=detail[:500],
+                trace=ActivityTrace(
+                    phase=phase,
+                    label=label,
+                    detail=detail[:500],
+                    invocation="background",
+                ),
+                updates_foreground_status=False,
+            )
+        )
 
     async def _lease_heartbeat(self, run: ScheduleRun) -> None:
         assert run.lease_owner is not None
@@ -598,16 +658,19 @@ class BackgroundRunner:
                 return "Background skill actions are disabled in settings"
             if self.engine is None or self.registry is None:
                 return "Background execution services are unavailable"
+            snapshot_reason = self._snapshot_denial_reason(schedule)
+            if snapshot_reason:
+                self.store.revoke_authorization(schedule.schedule_id, snapshot_reason)
+                return snapshot_reason
+            compatibility_reason = self._background_compatibility_reason(schedule)
+            if compatibility_reason:
+                return compatibility_reason
             if (
                 self.pause_while_locked
                 and schedule.autonomy_policy.requires_unlocked_session
                 and not self.session_unlocked()
             ):
                 return "The interactive Windows session is locked"
-            snapshot_reason = self._snapshot_denial_reason(schedule)
-            if snapshot_reason:
-                self.store.revoke_authorization(schedule.schedule_id, snapshot_reason)
-                return snapshot_reason
             now = self.clock.now()
             if (
                 self.store.count_runs_since(
@@ -627,6 +690,27 @@ class BackgroundRunner:
                 >= schedule.autonomy_policy.max_runs_per_day
             ):
                 return "Daily background run budget exhausted"
+        return None
+
+    def _background_compatibility_reason(self, schedule: ScheduleDefinition) -> str | None:
+        assert self.registry is not None
+        calls = (
+            (schedule.action.call,)
+            if isinstance(schedule.action, FixedSkillAction)
+            else tuple(step.call for step in schedule.action.plan.steps)
+        )
+        for call in calls:
+            try:
+                skill = self.registry.get(call.skill_id)
+            except KeyError:
+                return f"Scheduled skill is unavailable: {call.skill_id}"
+            permissions = tuple(skill.required_permissions(call))
+            compatibility = background_compatibility(skill.manifest, permissions)
+            if not compatibility.allowed:
+                return (
+                    f"Background action would interrupt the active user: {call.skill_id}. "
+                    f"{compatibility.reason}"
+                )
         return None
 
     def _snapshot_denial_reason(self, schedule: ScheduleDefinition) -> str | None:

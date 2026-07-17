@@ -1,6 +1,6 @@
 # Feature Catalog
 
-Updated July 10, 2026. This catalog lists the built-in features registered by
+Updated July 16, 2026. This catalog lists the built-in features registered by
 the application container. Optional integrations are implemented but require
 the relevant setting, credential, local service, or device to be configured.
 
@@ -21,6 +21,7 @@ the relevant setting, credential, local service, or device to be configured.
 | Core | `core.help` | Implemented | Low | None | Explain available commands, skills, and required permissions. |
 | Core | `core.macro` | Extensible | Low | Per macro step | Run an existing configured sequence by its exact saved name without bypassing validation, permissions, or confirmations. |
 | Core | `core.notes` | Implemented | Low | None | Add, search, list, and delete local notes. |
+| Core | `core.playbook` | Extensible | Dynamic | None | Save, list, show/recall, enable, disable, or confirmation-gated delete of Markdown planning playbooks. |
 | Core | `core.reminder` | Implemented | Low | None | Create local reminders or alarms. |
 | Core | `core.schedule` | Implemented | Dynamic | None | Create recurring reminders or reviewed frozen actions/macros; list, inspect, pause, resume, revise, delete, snooze, run now, and inspect or clear run history. |
 | Core | `core.tasks` | Implemented | Low | None | Add, list, complete, and delete local tasks. |
@@ -28,6 +29,7 @@ the relevant setting, credential, local service, or device to be configured.
 | Core | `core.unit_conversion` | Implemented | Low | None | Convert common distance, weight, volume, and temperature units locally. |
 | Network | `cloud.ask` | Optional | Low | `network`, `process.launch` for Codex | Ask configured OpenAI, Anthropic, or local Codex CLI providers. |
 | Network | `web.fetch` | Optional | Low | `network` | Read text from a specific public HTTPS page. |
+| Network | `web.headless_read` | Optional | Low | `network` | Render a public HTTPS page in a fresh non-persistent headless browser and return bounded visible text and links without opening a user window. |
 | Network | `web.search` | Optional | Low | `network` | Search the public web through DuckDuckGo Instant Answer or Brave Search. |
 | Windows | `windows.application_window` | Implemented | High | `process.window` | Focus, minimize, maximize, close, move, or resize an approved application window. |
 | Windows | `windows.browser_navigate` | Implemented | Low | `process.window`, `input.control`, `network` | Open a public HTTPS site in an existing browser window. |
@@ -50,6 +52,9 @@ the relevant setting, credential, local service, or device to be configured.
   settings, skills, permissions, audit, privacy, diagnostics, applications,
   macros, models, and benchmark views. Closing hides to the tray so background
   activation remains available.
+- A live, bounded decision/action/result trace and separate background active
+  indicator that do not expose private model chain-of-thought or take over the
+  foreground command state.
 - Text input, push-to-talk, keyword/clap, persistent voice, and configurable
   local ONNX wake-word activation, plus streaming STT, optional local Piper TTS,
   cancellation, response-detail modes, and privacy controls.
@@ -59,8 +64,16 @@ the relevant setting, credential, local service, or device to be configured.
   emergency stop, rollback where supported, and file access allow/block policy.
 - Signed skill-package validation, isolated worker execution, update review for
   new capabilities, macro composition, and offline lock enforcement.
+- User-authored Markdown playbooks with validated YAML frontmatter, natural
+  language workflow instructions, per-skill-ID guidance, enable/disable and
+  import/edit/delete controls, semantic retrieval, and unavailable-skill
+  grounding. Deterministic text/voice commands support save, list, recall,
+  enable/disable, confirmation-gated delete, and exact named application.
+  Playbooks guide planning but cannot grant permissions or execute directly.
 - Optional MQTT, Home Assistant, Wyoming, web search/fetch, and cloud-model
   integrations behind explicit configuration and permissions.
+- Optional Playwright headless rendering in a fresh non-persistent context,
+  with public-HTTPS-only navigation and no access to the user's browser profile.
 - Durable one-time and recurring schedules with SQLite persistence, IANA time
   zones, DST handling, bounded misfire catch-up, multi-instance leases, restart
   reconciliation, nonblocking tray notifications, and an Automations control
@@ -68,7 +81,9 @@ the relevant setting, credential, local service, or device to be configured.
 - Revocable schedule-scoped background authorization for exact low-risk fixed
   skills and frozen macro plans, with capability/target/risk/runtime/rate bounds,
   skill drift detection, machine-bound restores, locked-session gating, and
-  fresh approval for every higher-risk occurrence.
+  fresh approval for every higher-risk occurrence. Background compatibility is
+  checked separately so input, window, clipboard, media, launch/terminate, and
+  device-changing capabilities cannot interrupt the active user.
 
 ## Not Yet Claimed Complete
 

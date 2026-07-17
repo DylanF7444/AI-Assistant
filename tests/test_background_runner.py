@@ -582,7 +582,7 @@ def test_background_actions_global_switch_blocks_fixed_actions(settings):
     assert "disabled in settings" in (run.blocked_reason or "")
 
 
-def test_locked_session_blocks_interactive_background_action(settings):
+def test_authoring_rejects_interactive_desktop_background_action(settings):
     container = build_container(settings.model_copy(update={"background_actions_enabled": True}))
     container.scheduler.runner.session_unlocked = lambda: False
     skill = _InteractiveSessionSkill()
@@ -592,18 +592,15 @@ def test_locked_session_blocks_interactive_background_action(settings):
         container.registry,
         container.macro_store,
     )
-    schedule = authoring.create_fixed_action(
-        name="Needs desktop",
-        trigger=_due_now(),
-        skill_id=skill.manifest.skill_id,
-        arguments={},
-    )
+    with pytest.raises(ValueError, match="interrupting the interactive desktop"):
+        authoring.create_fixed_action(
+            name="Needs desktop",
+            trigger=_due_now(),
+            skill_id=skill.manifest.skill_id,
+            arguments={},
+        )
 
-    assert asyncio.run(container.scheduler.run_once()) == 1
-
-    blocked = container.schedule_store.list_runs(schedule_id=schedule.schedule_id)[0]
-    assert blocked.state == ScheduleRunState.BLOCKED
-    assert "locked" in (blocked.blocked_reason or "")
+    assert container.schedule_store.list() == ()
     assert skill.count == 0
 
 

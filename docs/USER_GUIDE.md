@@ -62,6 +62,14 @@ its exact schedule revision. Low-risk work may then run unattended. Medium,
 high, and critical occurrences always wait for approval, and critical approval
 requires the final six characters of the displayed confirmation ID.
 
+The Assistant page keeps a live decision and action trace and shows whether
+background work is active. Background events do not replace the foreground
+status or disable foreground command controls. Actions that send input, focus
+or launch windows, use the clipboard, control media, terminate processes, or
+change display/network/power/device state are rejected as unattended work even
+while Windows is unlocked. File and database work, read-only device queries,
+web APIs, and explicitly background-safe integrations can remain eligible.
+
 Closing the window to the tray keeps scheduling active. Sleep, restart, or an
 ordinary crash is handled on next start according to the schedule's missed-run
 policy. The assistant does not run while the computer is powered off and does
@@ -141,6 +149,18 @@ API invocations require the `network` permission; Codex invocations require
 `search the web for ...`, `read https://...`, `ask ChatGPT ...`, `ask Codex ...`,
 `ask Claude ...`, and `make code to ...`.
 
+For JavaScript-rendered pages, install the optional browser extra and Chromium:
+
+```powershell
+python -m pip install -e ".[browser]"
+python -m playwright install chromium
+```
+
+Then use commands such as `read https://example.com in the background` or
+`render https://example.com with a headless browser`. The assistant uses a new
+private, non-persistent browser context and never attaches to the user's visible
+browser or normal profile. This initial headless capability is read-only.
+
 ## Skills and diagnostics
 
 Install only signed skill packages from trusted publishers. Updates that add a
@@ -157,6 +177,45 @@ status.
 The Diagnostics tab reports model, microphone, GPU, audio, database, and skill
 health with recovery guidance. Exported diagnostic bundles redact secrets and
 are created only when requested.
+
+## Playbooks
+
+Use the Playbooks tab to create, edit, import, enable, disable, or delete local
+Markdown workflow guides. Files are stored under the configured data
+directory's `playbooks` folder, so advanced users can also create or edit them
+with a text editor. Invalid files are ignored and reported in the tab.
+
+Each file starts with YAML frontmatter containing a stable `id`, `name`, optional
+description and triggers, and an optional `skills` list. A skill entry contains
+the registered skill `id` plus natural-language `instructions` describing its
+role in the workflow. The Markdown body contains the overall procedure. The New
+from Template button provides a complete editable example.
+
+Enabled playbooks are searched for open-ended planner requests. A relevant
+playbook guides interpretation and planning, while its available skill IDs are
+prioritized as grounded candidates. Missing or disabled skill IDs are shown in
+the UI and cannot be selected. Playbooks cannot install skills, grant
+permissions, suppress confirmation, add arbitrary shell access, or run directly
+as unattended schedules. Every resulting action still passes normal schema,
+permission, confirmation, and audit checks.
+
+Playbooks can also be managed by text or voice:
+
+- `save playbook Release Check: First inspect the notes. Then summarize risks.`
+- `save these instructions as a playbook called Release Check: First ...`
+- `save playbook Release Check using skills core.datetime, core.tasks: First ...`
+- `list playbooks`
+- `show playbook release-check` or `recall playbook Release Check`
+- `enable playbook release-check` and `disable playbook release-check`
+- `delete playbook release-check` (requires confirmation)
+- `use playbook Release Check to prepare version 2.0`
+
+Saving the same name or ID updates the existing instructions and increments a
+numeric version. Existing skill guidance is retained unless the save command
+includes a new comma-separated `using skills` list. Explicit `use`, `run`,
+`follow`, or `apply` commands bind the exact enabled playbook into planner
+context; an unknown or disabled reference is reported without invoking a
+different playbook.
 
 ## Knowledge bases
 

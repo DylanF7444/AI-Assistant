@@ -24,6 +24,7 @@ from assistant.contracts import (
 )
 from assistant.diagnostics import hardware_report, model_recommendations
 from assistant.models import ModelManifest
+from assistant.policy.background import background_mode_summary
 from assistant.policy.capabilities import available_capabilities
 from assistant.policy.permissions import GrantType
 from assistant.response import response_from_result
@@ -535,8 +536,10 @@ def run_desktop(container: Container) -> int:
             self._passive_voice_worker: PassiveVoiceWorker | None = None
             self._passive_voice_restart_enabled = False
             self._voice_prompt_active = False
+            self._pending_voice_transcript: str | None = None
             self._shutdown_started = False
             self._activity_started = time.perf_counter()
+            self._background_correlations: dict[UUID, int] = {}
             self._status_frame = 0
             self._active_state = PipelineState.IDLE
             self._desktop_state_store = SettingsStore(container.database)
@@ -568,6 +571,7 @@ def run_desktop(container: Container) -> int:
                 self._settings_tab,
                 self._diagnostics_tab,
                 self._macros_tab,
+                self._playbooks_tab,
                 self._models_tab,
                 self._knowledge_tab,
                 self._memories_tab,
@@ -1476,8 +1480,11 @@ def run_desktop(container: Container) -> int:
             activity_layout.setSpacing(10)
             activity_title = QLabel("ACTIVITY")
             activity_title.setObjectName("sectionLabel")
-            activity_hint = QLabel("Live progress and actions")
-            activity_hint.setObjectName("activityHint")
+            self.activity_hint = QLabel("Safe decision and action trace")
+            self.activity_hint.setObjectName("activityHint")
+            self.activity_hint.setWordWrap(True)
+            self.background_activity = QLabel("BACKGROUND  •  IDLE")
+            self.background_activity.setObjectName("activityHint")
             self.activity_log = QListWidget()
             self.activity_log.setObjectName("activityLog")
             self.activity_log.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -1485,7 +1492,8 @@ def run_desktop(container: Container) -> int:
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
             )
             activity_layout.addWidget(activity_title)
-            activity_layout.addWidget(activity_hint)
+            activity_layout.addWidget(self.activity_hint)
+            activity_layout.addWidget(self.background_activity)
             activity_layout.addWidget(self.activity_log)
             self._append_activity("Ready", "Waiting for your request")
 
@@ -1495,19 +1503,28 @@ def run_desktop(container: Container) -> int:
             return page
 
         def _append_activity(self, label: str, detail: str = "") -> None:
-            elapsed = time.perf_counter() - self._activity_started
-            timestamp = f"{elapsed:04.1f}s"
+            timestamp = datetime.now().astimezone().strftime("%H:%M:%S")
             text = f"{timestamp}   {label}"
             if detail and detail.lower() != label.lower():
                 text += f"\n          {detail}"
             self.activity_log.addItem(text)
+            while self.activity_log.count() > 200:
+                self.activity_log.takeItem(0)
             self.activity_log.scrollToBottom()
+
+        def _update_background_activity(self) -> None:
+            count = sum(self._background_correlations.values())
+            self.background_activity.setText(
+                "BACKGROUND  •  IDLE" if count == 0 else f"BACKGROUND  •  {count} ACTIVE"
+            )
 
         def _set_pipeline_state(
             self,
             state: PipelineState,
             message: str = "",
             progress: float | None = None,
+            *,
+            record_activity: bool = True,
         ) -> None:
             labels = {
                 PipelineState.IDLE: "Ready",
@@ -1566,7 +1583,8 @@ def run_desktop(container: Container) -> int:
                 self.elapsed_status.setText("")
                 self.pipeline_progress.hide()
                 self.compact_panel.pipeline_progress.hide()
-            self._append_activity(labels[state], message)
+            if record_activity:
+                self._append_activity(labels[state], message)
 
         def _pipeline_is_busy(self) -> bool:
             return self._active_state in self.ACTIVE_PIPELINE_STATES
@@ -1656,9 +1674,10 @@ def run_desktop(container: Container) -> int:
                 container,
                 container.settings.voice_activation_mode,
             )
-            worker.complete.connect(self._show_result)
+            worker.complete.connect(self._show_voice_result)
             worker.failed.connect(self._show_error)
             worker.partial_transcript.connect(self._show_voice_transcript)
+            worker.request_transcript.connect(self._commit_voice_transcript)
             worker.finished.connect(
                 lambda worker=worker: self._handle_passive_voice_finished(worker)
             )
@@ -1722,22 +1741,43 @@ def run_desktop(container: Container) -> int:
             if self._pipeline_is_busy():
                 self.statusBar().showMessage("Voice input is already active.", 1500)
                 return
+            self._pending_voice_transcript = None
             self._set_pipeline_state(PipelineState.LISTENING, "Microphone is active")
             worker = AsyncWorker(
                 container.orchestrator.listen_once(container.stt, container.audio_capture.chunks())
             )
-            worker.complete.connect(self._show_result)
+            worker.complete.connect(self._show_voice_result)
             worker.failed.connect(self._show_error)
             worker.finished.connect(lambda: self._workers.remove(worker))
             self._workers.append(worker)
             worker.start()
 
         def _handle_pipeline_event(self, event: PipelineEvent) -> None:
-            self._set_pipeline_state(event.state, event.message, event.progress)
+            if event.trace is not None:
+                prefix = "Background · " if event.trace.invocation == "background" else ""
+                self._append_activity(prefix + event.trace.label, event.trace.detail)
+                if event.trace.invocation == "background":
+                    if event.trace.phase.value == "action":
+                        self._background_correlations[event.correlation_id] = (
+                            self._background_correlations.get(event.correlation_id, 0) + 1
+                        )
+                    elif event.trace.phase.value == "result":
+                        remaining = self._background_correlations.get(event.correlation_id, 0) - 1
+                        if remaining > 0:
+                            self._background_correlations[event.correlation_id] = remaining
+                        else:
+                            self._background_correlations.pop(event.correlation_id, None)
+                    self._update_background_activity()
+            if not event.updates_foreground_status:
+                return
+            self._set_pipeline_state(
+                event.state,
+                event.message,
+                event.progress,
+                record_activity=event.trace is None,
+            )
             if event.state == PipelineState.TRANSCRIBING and event.message:
-                self.transcript.setPlainText(event.message)
-                self.compact_panel.set_request(event.message)
-                self._set_status_transcript(event.message)
+                self._show_voice_transcript(event.message)
 
         def _handle_background_notification(self, message: Any) -> None:
             tray = getattr(self, "tray", None)
@@ -1758,10 +1798,18 @@ def run_desktop(container: Container) -> int:
             self._refresh_active_scripts()
 
         def _show_voice_transcript(self, text: str) -> None:
+            self._pending_voice_transcript = text
+            self._set_status_transcript(text)
+
+        def _commit_voice_transcript(self, text: str) -> None:
+            text = text.strip()
+            if not text:
+                return
             self.transcript.setPlainText(text)
             self.transcript.moveCursor(QTextCursor.MoveOperation.End)
             self.compact_panel.set_request(text)
             self._set_status_transcript(text)
+            self._pending_voice_transcript = None
 
         def _set_status_transcript(self, text: str) -> None:
             text = " ".join(text.split())
@@ -1883,12 +1931,8 @@ def run_desktop(container: Container) -> int:
             self.skill_list.setObjectName("skillList")
             self.skill_list.setAccessibleName("Available skills")
             self.skill_list.setWordWrap(True)
-            self.skill_list.setHorizontalScrollBarPolicy(
-                Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-            )
-            self.skill_list.currentItemChanged.connect(
-                lambda *_: self._update_skill_details()
-            )
+            self.skill_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.skill_list.currentItemChanged.connect(lambda *_: self._update_skill_details())
             browser_layout.addWidget(self.skill_list, 1)
 
             toggle = QPushButton("Enable / Disable Selected")
@@ -1947,6 +1991,10 @@ def run_desktop(container: Container) -> int:
             self.skill_description.setWordWrap(True)
             overview_layout.addLayout(overview_header)
             overview_layout.addWidget(self.skill_security_value)
+            self.skill_background_value = QLabel("")
+            self.skill_background_value.setObjectName("activityHint")
+            self.skill_background_value.setWordWrap(True)
+            overview_layout.addWidget(self.skill_background_value)
             overview_layout.addWidget(self.skill_description)
             detail_layout.addWidget(overview)
 
@@ -2048,6 +2096,7 @@ def run_desktop(container: Container) -> int:
                 self.skill_detail_title.setText("No skill selected")
                 self.skill_detail_id.clear()
                 self.skill_description.clear()
+                self.skill_background_value.clear()
                 self.skill_permissions_summary.clear()
                 self.skill_permission_table.setRowCount(0)
                 self.skill_demo_input.clear()
@@ -2065,6 +2114,7 @@ def run_desktop(container: Container) -> int:
             self.skill_security_value.setProperty("level", manifest.risk.value)
             self.skill_security_value.style().unpolish(self.skill_security_value)
             self.skill_security_value.style().polish(self.skill_security_value)
+            self.skill_background_value.setText(background_mode_summary(manifest))
             self.skill_description.setText(manifest.description)
 
             permissions = manifest.permissions
@@ -2076,9 +2126,7 @@ def run_desktop(container: Container) -> int:
                 for column, value in enumerate(
                     ("None", "Local skill boundary", "No protected capability is requested.")
                 ):
-                    self.skill_permission_table.setItem(
-                        0, column, self._table_item(value)
-                    )
+                    self.skill_permission_table.setItem(0, column, self._table_item(value))
             else:
                 self.skill_permissions_summary.setText(
                     f"{len(permissions)} declared permission"
@@ -2092,9 +2140,7 @@ def run_desktop(container: Container) -> int:
                         permission.reason,
                     )
                     for column, value in enumerate(values):
-                        self.skill_permission_table.setItem(
-                            row, column, self._table_item(value)
-                        )
+                        self.skill_permission_table.setItem(row, column, self._table_item(value))
             self.skill_permission_table.resizeRowsToContents()
 
             if reset_demo:
@@ -2115,9 +2161,7 @@ def run_desktop(container: Container) -> int:
             else:
                 container.registry.enable(manifest.skill_id)
             self.skill_list.currentItem().setText(
-                self._skill_list_text(
-                    manifest, container.registry.is_enabled(manifest.skill_id)
-                )
+                self._skill_list_text(manifest, container.registry.is_enabled(manifest.skill_id))
             )
             self._update_skill_details(reset_demo=False)
 
@@ -2126,9 +2170,7 @@ def run_desktop(container: Container) -> int:
             if manifest is None or self._skill_demo_running:
                 return
             if not container.registry.is_enabled(manifest.skill_id):
-                self.skill_demo_output.setPlainText(
-                    "Enable this skill before running its demo."
-                )
+                self.skill_demo_output.setPlainText("Enable this skill before running its demo.")
                 return
             try:
                 arguments = json.loads(self.skill_demo_input.toPlainText() or "{}")
@@ -2146,9 +2188,7 @@ def run_desktop(container: Container) -> int:
                 permission_context=PermissionContext(session_id="skills-tab-demo"),
             )
             self._set_skill_demo_running(True)
-            self.skill_demo_output.setPlainText(
-                "Checking permissions and preparing the demo…"
-            )
+            self.skill_demo_output.setPlainText("Checking permissions and preparing the demo…")
             self._set_pipeline_state(
                 PipelineState.THINKING, f"Preparing {manifest.display_name} demo"
             )
@@ -2211,9 +2251,7 @@ def run_desktop(container: Container) -> int:
             )
             self._set_skill_demo_running(False)
             state = (
-                PipelineState.IDLE
-                if result.status.value == "completed"
-                else PipelineState.ERROR
+                PipelineState.IDLE if result.status.value == "completed" else PipelineState.ERROR
             )
             self._set_pipeline_state(state, f"Demo {result.status.value.replace('_', ' ')}")
 
@@ -2229,13 +2267,9 @@ def run_desktop(container: Container) -> int:
         def _set_skill_demo_running(self, running: bool) -> None:
             self._skill_demo_running = running
             manifest = self._selected_manifest()
-            enabled = bool(
-                manifest and container.registry.is_enabled(manifest.skill_id)
-            )
+            enabled = bool(manifest and container.registry.is_enabled(manifest.skill_id))
             self.skill_demo_run_button.setEnabled(enabled and not running)
-            self.skill_demo_run_button.setText(
-                "Running…" if running else "Run selected skill"
-            )
+            self.skill_demo_run_button.setText("Running…" if running else "Run selected skill")
 
         def _install_skill(self) -> None:
             package = QFileDialog.getExistingDirectory(self, "Select Signed Skill Package")
@@ -3229,6 +3263,176 @@ def run_desktop(container: Container) -> int:
             container.macro_store.delete(definitions[row].name)
             self._reload_macros()
 
+        def _playbooks_tab(self) -> QWidget:
+            page = QWidget()
+            layout = QVBoxLayout(page)
+            layout.addWidget(
+                self._info_label(
+                    "Playbooks are user-authored Markdown planning instructions. "
+                    "Their skill IDs ground the planner, but they never grant permissions "
+                    "or bypass confirmations. Files are stored in "
+                    f"{container.playbook_store.root}."
+                )
+            )
+            self.playbook_list = QListWidget()
+            self.playbook_list.setAccessibleName("User playbooks")
+            self.playbook_errors = QLabel("")
+            self.playbook_errors.setWordWrap(True)
+            self.playbook_errors.setObjectName("activityHint")
+            controls = QHBoxLayout()
+            import_button = QPushButton("Import Markdown")
+            import_button.clicked.connect(self._import_playbook)
+            add_button = QPushButton("New from Template")
+            add_button.clicked.connect(self._add_playbook)
+            edit_button = QPushButton("Edit Selected")
+            edit_button.clicked.connect(self._edit_playbook)
+            toggle_button = QPushButton("Enable / Disable")
+            toggle_button.clicked.connect(self._toggle_playbook)
+            delete_button = QPushButton("Delete Selected")
+            delete_button.clicked.connect(self._delete_playbook)
+            for button in (
+                import_button,
+                add_button,
+                edit_button,
+                toggle_button,
+                delete_button,
+            ):
+                controls.addWidget(button)
+            layout.addWidget(self.playbook_list)
+            layout.addWidget(self.playbook_errors)
+            layout.addLayout(controls)
+            self._reload_playbooks()
+            return page
+
+        def _reload_playbooks(self) -> None:
+            self.playbook_list.clear()
+            enabled_skill_ids = {
+                manifest.skill_id
+                for manifest in container.registry.list()
+                if container.registry.is_enabled(manifest.skill_id)
+            }
+            for playbook in container.playbook_store.list():
+                state = "Enabled" if playbook.enabled else "Disabled"
+                missing = tuple(
+                    skill_id for skill_id in playbook.skill_ids if skill_id not in enabled_skill_ids
+                )
+                suffix = f" | Unavailable: {', '.join(missing)}" if missing else ""
+                item = QListWidgetItem(
+                    f"{state} | {playbook.name} | {len(playbook.skills)} skill(s){suffix}"
+                )
+                item.setData(Qt.ItemDataRole.UserRole, playbook.playbook_id)
+                item.setToolTip(playbook.description or playbook.playbook_id)
+                self.playbook_list.addItem(item)
+            errors = container.playbook_store.errors()
+            if errors:
+                details = "; ".join(
+                    f"{Path(path).name}: {message}" for path, message in sorted(errors.items())
+                )
+                self.playbook_errors.setText(f"Invalid files ignored: {details}")
+                self.playbook_errors.show()
+            else:
+                self.playbook_errors.clear()
+                self.playbook_errors.hide()
+
+        def _selected_playbook(self):
+            item = self.playbook_list.currentItem()
+            if item is None:
+                return None
+            playbook_id = item.data(Qt.ItemDataRole.UserRole)
+            try:
+                return container.playbook_store.get(str(playbook_id))
+            except KeyError:
+                return None
+
+        def _import_playbook(self) -> None:
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Import Playbook",
+                "",
+                "Markdown playbooks (*.md *.markdown)",
+            )
+            if not path:
+                return
+            try:
+                playbook = container.playbook_store.import_file(Path(path))
+            except Exception as error:
+                QMessageBox.critical(self, "Playbook Import Failed", str(error))
+                return
+            self._warn_for_unavailable_playbook_skills(playbook)
+            self._reload_playbooks()
+
+        def _add_playbook(self) -> None:
+            self._edit_playbook_markdown(None, container.playbook_store.EXAMPLE)
+
+        def _edit_playbook(self) -> None:
+            selected = self._selected_playbook()
+            if selected is None or selected.source_path is None:
+                return
+            try:
+                markdown = selected.source_path.read_text(encoding="utf-8-sig")
+            except Exception as error:
+                QMessageBox.critical(self, "Playbook Read Failed", str(error))
+                return
+            self._edit_playbook_markdown(selected, markdown)
+
+        def _edit_playbook_markdown(self, selected, markdown: str) -> None:
+            value, ok = QInputDialog.getMultiLineText(
+                self,
+                "Playbook Markdown",
+                "YAML frontmatter followed by workflow instructions",
+                markdown,
+            )
+            if not ok:
+                return
+            try:
+                playbook = container.playbook_store.save_markdown(
+                    value,
+                    original_id=selected.playbook_id if selected else None,
+                )
+            except Exception as error:
+                QMessageBox.critical(self, "Playbook Save Failed", str(error))
+                return
+            self._warn_for_unavailable_playbook_skills(playbook)
+            self._reload_playbooks()
+
+        def _warn_for_unavailable_playbook_skills(self, playbook) -> None:
+            enabled_skill_ids = {
+                manifest.skill_id
+                for manifest in container.registry.list()
+                if container.registry.is_enabled(manifest.skill_id)
+            }
+            missing = tuple(
+                skill_id for skill_id in playbook.skill_ids if skill_id not in enabled_skill_ids
+            )
+            if missing:
+                QMessageBox.warning(
+                    self,
+                    "Unavailable Playbook Skills",
+                    "The playbook was saved, but these skill IDs are unavailable and will "
+                    "not be selected: " + ", ".join(missing),
+                )
+
+        def _toggle_playbook(self) -> None:
+            selected = self._selected_playbook()
+            if selected is None:
+                return
+            try:
+                container.playbook_store.set_enabled(
+                    selected.playbook_id,
+                    not selected.enabled,
+                )
+            except Exception as error:
+                QMessageBox.critical(self, "Playbook Update Failed", str(error))
+                return
+            self._reload_playbooks()
+
+        def _delete_playbook(self) -> None:
+            selected = self._selected_playbook()
+            if selected is None or not self._confirm(f'Delete playbook "{selected.name}"?'):
+                return
+            container.playbook_store.delete(selected.playbook_id)
+            self._reload_playbooks()
+
         def _models_tab(self) -> QWidget:
             page = QWidget()
             layout = QVBoxLayout(page)
@@ -3490,6 +3694,7 @@ def run_desktop(container: Container) -> int:
                 ("Clear Transcript History", self._clear_history),
                 ("Clear Audit Log", self._clear_audit),
                 ("Clear Knowledge Bases", self._clear_knowledge),
+                ("Clear Playbooks", self._clear_playbooks),
                 ("Clear Stored Memories", self._clear_memories),
                 ("Clear TTS Cache", lambda: self._clear_directory("tts-cache")),
                 (
@@ -3511,6 +3716,11 @@ def run_desktop(container: Container) -> int:
             if self._confirm("Delete all local knowledge bases?"):
                 container.knowledge_bases.clear()
                 self._reload_knowledge()
+
+        def _clear_playbooks(self) -> None:
+            if self._confirm("Delete all local playbook Markdown files?"):
+                container.playbook_store.clear()
+                self._reload_playbooks()
 
         def _clear_memories(self) -> None:
             if not self._confirm("Delete all stored memories, including disabled ones?"):
@@ -3772,8 +3982,8 @@ def run_desktop(container: Container) -> int:
                 return False
             self.transcript.setPlainText(text)
             self.compact_panel.set_request(text)
-            self.activity_log.clear()
             self._activity_started = time.perf_counter()
+            self._append_activity("Request", "Started a new interactive request")
             self._set_pipeline_state(PipelineState.THINKING, "Interpreting your request")
             worker = AsyncWorker(controller.run_text(text))
             worker.complete.connect(self._show_result)
@@ -3803,6 +4013,14 @@ def run_desktop(container: Container) -> int:
                     else "Request complete",
                 )
                 self._apply_passive_voice_indicators()
+
+        def _show_voice_result(self, payload: Any) -> None:
+            response, _outcome = payload
+            if response.updates_display and self._pending_voice_transcript:
+                self._commit_voice_transcript(self._pending_voice_transcript)
+            elif not response.updates_display:
+                self._pending_voice_transcript = None
+            self._show_result(payload)
 
         def _request_permissions(
             self,
@@ -4088,6 +4306,8 @@ def run_desktop(container: Container) -> int:
                 self._set_pipeline_state(PipelineState.ERROR, result.summary)
 
         def _display_response(self, response: Any) -> None:
+            if not response.updates_display:
+                return
             self.response.setPlainText(response.display_text)
             self.compact_panel.set_response(response.display_text)
             error = response.response_type == ResponseType.ERROR or response.severity == "error"

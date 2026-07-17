@@ -41,10 +41,31 @@ critical work. Background authorizations are revision-, digest-, target-,
 capability-, risk-, expiry-, and machine-bound and are separate from interactive
 permission grants.
 
+Background compatibility is enforced independently of risk and permission.
+Exact calls that can focus or launch windows, send input, use the clipboard,
+control media, terminate processes, or visibly change the device are rejected
+at schedule authoring and rechecked before every occurrence. Background pipeline
+events carry a safe structured activity trace and never mutate the foreground
+desktop pipeline state.
+
+Optional headless web rendering uses a new non-persistent Playwright browser
+context per call. Navigation is public-HTTPS-only, local/private targets and
+downloads are blocked, results are bounded, and the user's visible browser
+profile is never attached.
+
 For unmatched conversational requests, enabled local knowledge bases are
 searched with bounded lexical retrieval. Relevant excerpts are included as
 untrusted reference data in the schema-constrained planner prompt. Knowledge
 files are stored as local database content and never execute instructions.
+
+Enabled user playbooks are loaded from validated Markdown files under the local
+data directory and indexed in a separate retrieval namespace. Unlike knowledge,
+they are explicit user-authored planning guidance. Their structured skill IDs
+can prioritize only currently enabled registered skills; missing IDs remain
+visible metadata and are never invented. Playbook prose and per-skill guidance
+cannot add capabilities, grant permission, suppress confirmation, or bypass the
+execution engine. Scheduled actions continue to use reviewed frozen calls and
+never reinterpret a playbook at fire time.
 
 The UI depends on the orchestrator and event bus, not model or OS
 implementations. STT, LLM, TTS, wake-word, embedding, Windows, storage, clock,
