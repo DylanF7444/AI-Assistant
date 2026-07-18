@@ -19,14 +19,24 @@ class OllamaProvider:
         model: str,
         endpoint: str = "http://127.0.0.1:11434/api/generate",
         max_tokens: int = 256,
+        max_prompt_chars: int = 4500,
         terminal_debug: bool = False,
     ) -> None:
         self.model = model
         self.endpoint = endpoint
         self.max_tokens = max_tokens
+        self.max_prompt_chars = max_prompt_chars
         self.terminal_debug = terminal_debug
         self._task: asyncio.Task | None = None
         self._server_process: subprocess.Popen | None = None
+
+    def _bounded_prompt(self, prompt: str) -> str:
+        if len(prompt) <= self.max_prompt_chars:
+            return prompt
+        marker = "\n[Earlier planner context omitted for local inference.]\n"
+        tail_chars = max(1, self.max_prompt_chars // 3)
+        head_chars = self.max_prompt_chars - tail_chars - len(marker)
+        return f"{prompt[:head_chars]}{marker}{prompt[-tail_chars:]}"
 
     def _print_completion_debug(self, prompt: str, response: str) -> None:
         if not self.terminal_debug:
@@ -82,7 +92,7 @@ class OllamaProvider:
     ) -> dict[str, Any]:
         payload = {
             "model": self.model,
-            "prompt": prompt[-8000:],
+            "prompt": self._bounded_prompt(prompt),
             "stream": False,
             "format": schema,
             "options": {"num_predict": self.max_tokens, "temperature": 0},

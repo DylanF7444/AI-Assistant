@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
-python -m pip install -e ".[desktop,audio,stt,build,test,dev,ui-test]"
+python -m pip install -e ".[desktop,audio,stt,browser,build,test,dev,ui-test]"
 if ($LASTEXITCODE -ne 0) { throw "Dependency installation failed with exit code $LASTEXITCODE" }
 python -m ruff format --check .
 if ($LASTEXITCODE -ne 0) { throw "Format check failed with exit code $LASTEXITCODE" }

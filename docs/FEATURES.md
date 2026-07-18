@@ -29,7 +29,7 @@ the relevant setting, credential, local service, or device to be configured.
 | Core | `core.unit_conversion` | Implemented | Low | None | Convert common distance, weight, volume, and temperature units locally. |
 | Network | `cloud.ask` | Optional | Low | `network`, `process.launch` for Codex | Ask configured OpenAI, Anthropic, or local Codex CLI providers. |
 | Network | `web.fetch` | Optional | Low | `network` | Read text from a specific public HTTPS page. |
-| Network | `web.headless_read` | Optional | Low | `network` | Render a public HTTPS page in a fresh non-persistent headless browser and return bounded visible text and links without opening a user window. |
+| Network | `web.headless_read` | Optional | Low | `network` | Render a public HTTPS page in a fresh non-persistent headless browser and return bounded visible text/links or matching deal, product, article, listing, and result cards without opening a user window. |
 | Network | `web.search` | Optional | Low | `network` | Search the public web through DuckDuckGo Instant Answer or Brave Search. |
 | Windows | `windows.application_window` | Implemented | High | `process.window` | Focus, minimize, maximize, close, move, or resize an approved application window. |
 | Windows | `windows.browser_navigate` | Implemented | Low | `process.window`, `input.control`, `network` | Open a public HTTPS site in an existing browser window. |
@@ -73,7 +73,9 @@ the relevant setting, credential, local service, or device to be configured.
 - Optional MQTT, Home Assistant, Wyoming, web search/fetch, and cloud-model
   integrations behind explicit configuration and permissions.
 - Optional Playwright headless rendering in a fresh non-persistent context,
-  with public-HTTPS-only navigation and no access to the user's browser profile.
+  with public-HTTPS-only navigation, bounded result-card extraction, read-only
+  request methods, installed Edge/Chrome fallback, and no access to the user's
+  browser profile.
 - Durable one-time and recurring schedules with SQLite persistence, IANA time
   zones, DST handling, bounded misfire catch-up, multi-instance leases, restart
   reconciliation, nonblocking tray notifications, and an Automations control

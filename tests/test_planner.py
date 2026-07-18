@@ -1,7 +1,7 @@
 import pytest
 from pydantic import create_model
 
-from assistant.context.snapshot import ContextSnapshot
+from assistant.context.snapshot import ContextItem, ContextSnapshot
 from assistant.language.planner import InvalidPlannerResponse, LocalPlanner, SkillRetriever
 from assistant.language.retrieval import RetrievedContextItem
 from assistant.language.understanding import UserIntentInterpretation
@@ -13,6 +13,7 @@ from assistant.skills.builtin import (
     TimerSkill,
     manifest,
 )
+from assistant.skills.network import HeadlessReadSkill
 from assistant.skills.windows import (
     ApplicationWindowSkill,
     FileOperationSkill,
@@ -88,6 +89,13 @@ async def test_planner_accepts_only_retrieved_schema_valid_call():
     assert "Registered skills are your only action capabilities" in provider.last_prompt
     assert '"id":"core.calculator"' in provider.last_prompt
     assert '"id":"core.datetime"' in provider.last_prompt
+    assert provider.last_prompt.count(LocalPlanner.ROLE) == 1
+    directory = provider.last_prompt.split(
+        "Skill directory (excluding the detailed candidates below): ",
+        1,
+    )[1].split("\nDetailed candidate skills", 1)[0]
+    assert '"id":"core.calculator"' not in directory
+    assert '"id":"core.datetime"' in directory
     detailed = provider.last_prompt.split(
         "Detailed candidate skills (the only selectable skills for this request): ",
         1,
@@ -113,6 +121,41 @@ async def test_planner_uses_configured_timeout():
     await planner.plan("Can you help?")
 
     assert provider.last_timeout_seconds == 45
+
+
+def test_interpretation_prompt_compacts_large_context_without_losing_request():
+    planner = LocalPlanner(FakeProvider({}), SkillRetriever(()))
+    text = "What is the capital of France?"
+    context = ContextSnapshot(
+        request_text=text,
+        session_id="s1",
+        items=[
+            ContextItem(
+                key=f"capital.context.{index}",
+                title="Capital reference",
+                value="v" * 1000,
+                source="test",
+                summary="Potentially relevant capital context.",
+            )
+            for index in range(8)
+        ],
+    )
+    retrieved = tuple(
+        RetrievedContextItem(
+            namespace="knowledge",
+            source_id=f"source-{index}",
+            text="reference " * 500,
+            score=1 - index / 10,
+        )
+        for index in range(8)
+    )
+
+    prompt = planner._build_interpretation_prompt(text, context, retrieved)
+
+    assert len(prompt) < 4000
+    assert prompt.startswith(LocalPlanner.ROLE)
+    assert "Intent interpretation schema" in prompt
+    assert prompt.endswith(f"Request: {text}")
 
 
 @pytest.mark.asyncio
@@ -150,6 +193,39 @@ async def test_planner_retries_instead_of_promising_to_use_an_available_skill():
     assert decision.intent.name == "windows.device_control"
     assert decision.intent.arguments == {"operation": "performance_status"}
     assert "deferred an available skill call" in provider.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_planner_retries_fetch_promise_instead_of_echoing_it_as_an_answer():
+    first = {
+        "disposition": "answer",
+        "skill_id": "web.headless_read",
+        "arguments": {
+            "url": "https://slickdeals.net",
+            "extract": "deal",
+            "max_items": 1,
+        },
+        "answer": "I will fetch the first deal from Slickdeals and show it to you.",
+        "confidence": 0.95,
+        "clarification": None,
+    }
+    second = {
+        **first,
+        "disposition": "skill",
+        "answer": None,
+    }
+    provider = FakeProvider([first, second])
+    planner = LocalPlanner(
+        provider,
+        SkillRetriever((HeadlessReadSkill(object()).manifest,)),
+    )
+
+    decision = await planner.plan_decision("Show me the first deal from Slickdeals")
+
+    assert provider.calls == 2
+    assert decision.intent is not None
+    assert decision.intent.name == "web.headless_read"
+    assert decision.intent.arguments["extract"] == "deal"
 
 
 @pytest.mark.asyncio
@@ -391,7 +467,7 @@ async def test_planner_can_explain_its_role_and_available_skills():
     intent = await planner.plan("What is your role and what can you do?")
 
     assert intent.name == "conversation.answer"
-    assert "Skill directory:" in provider.last_prompt
+    assert "Skill directory (excluding the detailed candidates below):" in provider.last_prompt
     assert "questions about your role or capabilities" in provider.last_prompt
 
 
@@ -610,6 +686,28 @@ async def test_planner_answers_when_no_skill_is_relevant():
 
 
 @pytest.mark.asyncio
+async def test_planner_discards_action_fields_from_a_direct_answer():
+    provider = FakeProvider(
+        {
+            "disposition": "answer",
+            "skill_id": "core.datetime",
+            "arguments": {"query": "capital of France"},
+            "answer": "Paris is the capital of France.",
+            "confidence": 0.98,
+            "clarification": None,
+        }
+    )
+    planner = LocalPlanner(provider, SkillRetriever((DateTimeSkill.manifest,)))
+
+    decision = await planner.plan_decision("What is the capital of France?")
+
+    assert provider.calls == 1
+    assert decision.intent is not None
+    assert decision.intent.name == "conversation.answer"
+    assert decision.intent.arguments["text"].startswith("Paris")
+
+
+@pytest.mark.asyncio
 async def test_planner_repairs_promise_to_move_files_instead_of_requesting_confirmation():
     file_operation = FileOperationSkill(FakeFileSystem())
     invalid_promise = {
@@ -651,7 +749,7 @@ async def test_planner_repairs_promise_to_move_files_instead_of_requesting_confi
     assert decision.clarification == repaired["clarification"]
     assert decision.intent is None
     assert decision.steps == ()
-    assert "cannot include a skill or action arguments" in provider.last_prompt
+    assert "select and call the skill now" in provider.last_prompt
 
 
 @pytest.mark.asyncio

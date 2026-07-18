@@ -50,8 +50,11 @@ desktop pipeline state.
 
 Optional headless web rendering uses a new non-persistent Playwright browser
 context per call. Navigation is public-HTTPS-only, local/private targets and
-downloads are blocked, results are bounded, and the user's visible browser
-profile is never attached.
+downloads are blocked, mutating HTTP methods are aborted, results are bounded,
+and the user's visible browser profile is never attached. Result-oriented reads
+rank visible article/card/product/listing structures and return a bounded set of
+matching items. Windows builds prefer an installed Edge or Chrome runtime and
+can fall back to Playwright Chromium when it has been installed.
 
 For unmatched conversational requests, enabled local knowledge bases are
 searched with bounded lexical retrieval. Relevant excerpts are included as

@@ -149,17 +149,21 @@ API invocations require the `network` permission; Codex invocations require
 `search the web for ...`, `read https://...`, `ask ChatGPT ...`, `ask Codex ...`,
 `ask Claude ...`, and `make code to ...`.
 
-For JavaScript-rendered pages, install the optional browser extra and Chromium:
+For JavaScript-rendered pages, install the optional browser extra:
 
 ```powershell
 python -m pip install -e ".[browser]"
-python -m playwright install chromium
 ```
 
 Then use commands such as `read https://example.com in the background` or
-`render https://example.com with a headless browser`. The assistant uses a new
-private, non-persistent browser context and never attaches to the user's visible
-browser or normal profile. This initial headless capability is read-only.
+`render https://example.com with a headless browser`. Result-oriented requests
+such as `Go to Slickdeals and give me the first deal` also use this skill and
+return bounded matching cards with their title, details, and URL. The assistant
+uses a new private, non-persistent browser context and never attaches to the
+user's visible browser or normal profile. It uses installed Microsoft Edge or
+Google Chrome when available; run `python -m playwright install chromium` only
+when neither system browser is available. The capability is read-only and blocks
+mutating page requests, downloads, service workers, and WebSockets.
 
 ## Skills and diagnostics
 

@@ -6,13 +6,14 @@ stt_datas, stt_binaries, stt_hiddenimports = collect_all("faster_whisper")
 ctranslate_datas, ctranslate_binaries, ctranslate_hiddenimports = collect_all(
     "ctranslate2"
 )
-hiddenimports += stt_hiddenimports + ctranslate_hiddenimports
+playwright_datas, playwright_binaries, playwright_hiddenimports = collect_all("playwright")
+hiddenimports += stt_hiddenimports + ctranslate_hiddenimports + playwright_hiddenimports
 
 a = Analysis(
     ["../src/assistant/app.py"],
     pathex=["../src"],
-    binaries=stt_binaries + ctranslate_binaries,
-    datas=[("../docs", "docs")] + stt_datas + ctranslate_datas,
+    binaries=stt_binaries + ctranslate_binaries + playwright_binaries,
+    datas=[("../docs", "docs")] + stt_datas + ctranslate_datas + playwright_datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],

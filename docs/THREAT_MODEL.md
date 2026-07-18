@@ -42,9 +42,9 @@ transcripts, permissions, and the integrity of audit records.
   input, window, launch/termination, clipboard, media, and device-changing
   capabilities. An unlocked session does not make those actions background-safe.
 - Headless browsing: every read uses a fresh non-persistent context; only public
-  HTTPS requests are allowed, private/local targets, downloads, service workers,
-  and WebSockets are blocked, output is bounded, and the user's normal browser
-  profile is not reused.
+  HTTPS requests are allowed, private/local targets, mutating HTTP methods,
+  downloads, service workers, and WebSockets are blocked, output and extracted
+  result cards are bounded, and the user's normal browser profile is not reused.
 - Stored-action tampering and prompt injection: schedule payloads are typed data,
   never prompts interpreted at fire time. Action/policy digest mismatches,
   changed arguments, schema/permission/risk/version drift, disabled skills, and

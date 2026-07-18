@@ -1860,6 +1860,24 @@ async def test_unregistered_website_name_requests_existing_browser_permission(se
 
 
 @pytest.mark.asyncio
+async def test_slickdeals_result_request_uses_headless_browser_skill(settings):
+    container = build_container(settings)
+
+    response, outcome = await container.orchestrator.handle_text(
+        "Go to Slickdeals and give me the first deal"
+    )
+
+    assert response.response_type == ResponseType.PERMISSION
+    assert outcome.call is not None
+    assert outcome.call.skill_id == "web.headless_read"
+    assert outcome.call.arguments["url"] == "https://slickdeals.net"
+    assert outcome.call.arguments["extract"] == "deal"
+    assert outcome.call.arguments["max_items"] == 1
+    assert outcome.permission_requests[0].scope.capability == "network"
+    assert outcome.permission_requests[0].scope.targets == ("https://slickdeals.net",)
+
+
+@pytest.mark.asyncio
 async def test_open_registered_application_requests_permission(settings, tmp_path):
     container = build_container(settings)
     target = tmp_path / "youtube.exe"

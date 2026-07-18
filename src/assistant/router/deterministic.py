@@ -75,6 +75,8 @@ class DeterministicRouter:
         "linkedin": "https://www.linkedin.com",
         "netflix": "https://www.netflix.com",
         "reddit": "https://www.reddit.com",
+        "slick deals": "https://slickdeals.net",
+        "slickdeals": "https://slickdeals.net",
         "stack overflow": "https://stackoverflow.com",
         "twitch": "https://www.twitch.tv",
         "wikipedia": "https://www.wikipedia.org",

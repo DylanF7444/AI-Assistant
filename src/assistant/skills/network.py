@@ -138,6 +138,8 @@ class HeadlessReadInput(BaseModel):
     max_links: int = Field(default=30, ge=0, le=100)
     timeout_seconds: float = Field(default=30, ge=5, le=60)
     wait_after_load_ms: int = Field(default=250, ge=0, le=5000)
+    extract: str | None = Field(default=None, min_length=1, max_length=200)
+    max_items: int = Field(default=5, ge=1, le=20)
 
 
 class HeadlessReadOutput(BaseModel):
@@ -145,6 +147,7 @@ class HeadlessReadOutput(BaseModel):
     title: str
     text: str
     links: list[dict[str, str]]
+    items: list[dict[str, str]]
 
 
 class HeadlessReadSkill(Skill):
@@ -157,8 +160,9 @@ class HeadlessReadSkill(Skill):
             skill_id="web.headless_read",
             display_name="Headless Web Read",
             description=(
-                "Render a public HTTPS page in a private headless browser context and "
-                "return its visible text and links without opening a user window."
+                "Browse and render a public HTTPS website in a private headless browser, "
+                "then return visible text and links or extract matching page items such "
+                "as the first deal, product, article, listing, or search result."
             ),
             input_model=self.input_model,
             output_model=self.output_model,
@@ -193,21 +197,44 @@ class HeadlessReadSkill(Skill):
             max_links=args.max_links,
             timeout_seconds=args.timeout_seconds,
             wait_after_load_ms=args.wait_after_load_ms,
+            extract=args.extract,
+            max_items=args.max_items,
         )
         output = HeadlessReadOutput(
             url=page.url,
             title=page.title,
             text=page.text,
             links=list(page.links),
+            items=list(page.items),
         )
-        display = page.text
-        if page.links:
+        if page.items:
+            item_lines = []
+            for index, item in enumerate(page.items, 1):
+                title = item["title"] or item["url"]
+                detail = item["text"]
+                if detail.casefold().startswith(title.casefold()):
+                    detail = detail[len(title) :].strip(" -:|")
+                lines = [f"{index}. {title}"]
+                if detail:
+                    lines.append(detail)
+                lines.append(item["url"])
+                item_lines.append("\n".join(lines))
+            display = f"Matching items from {page.title or page.url}:\n\n" + "\n\n".join(item_lines)
+        else:
+            display = page.text
+        if page.links and not page.items:
             display += "\n\nLinks:\n" + "\n".join(
                 f"- {item['text'] or item['url']}: {item['url']}" for item in page.links
             )
+        summary = (
+            f"Found {len(page.items)} matching page item"
+            f"{'s' if len(page.items) != 1 else ''}: {page.items[0]['title']}"
+            if page.items
+            else f"Rendered {page.title or page.url} without opening a window."
+        )
         return SkillResult(
             status=ResultStatus.COMPLETED,
-            summary=f"Rendered {page.title or page.url} without opening a window.",
+            summary=summary,
             display_text=display,
             data=output.model_dump(),
         )

@@ -27,6 +27,8 @@ class NetworkHandler:
                     source="rule",
                 )
             )
+        if headless_request := self._route_result_oriented_browse(routed, router):
+            return RouteResult(headless_request)
         headless_patterns = (
             r"(?:read|render|fetch) (https://\S+) "
             r"(?:in the background|headlessly|with (?:a )?headless browser)",
@@ -113,5 +115,52 @@ class NetworkHandler:
                     confidence=0.94,
                     source="rule",
                 )
+            )
+        return None
+
+    @staticmethod
+    def _route_result_oriented_browse(
+        routed: str,
+        router: DeterministicRouter,
+    ) -> Intent | None:
+        patterns = (
+            r"(?:go to|visit|browse|open) (?P<website>.+?) "
+            r"(?:and(?: then)?|then) (?:(?:give|show|tell) me|find|get|read) "
+            r"(?P<extract>.+)",
+            r"(?:(?:give|show|tell) me|find|get|read) (?P<extract>.+?) "
+            r"(?:from|on|at) (?P<website>.+)",
+        )
+        for pattern in patterns:
+            match = re.fullmatch(pattern, routed, flags=re.I)
+            if match is None:
+                continue
+            url = router._website_url(match.group("website"))
+            if url is None:
+                continue
+            raw_extract = match.group("extract").strip()
+            singular = bool(
+                re.search(r"\b(?:first|latest|newest|top|one|1st)\b", raw_extract, re.I)
+            )
+            extract = re.sub(
+                r"^(?:(?:the|a|an)\s+)?(?:first|latest|newest|top|one|1st)\s+",
+                "",
+                raw_extract,
+                flags=re.I,
+            ).strip()
+            if not extract:
+                continue
+            return Intent(
+                name="web.headless_read",
+                arguments={
+                    "url": url,
+                    "max_characters": 12000,
+                    "max_links": 30,
+                    "timeout_seconds": 30,
+                    "wait_after_load_ms": 750,
+                    "extract": extract,
+                    "max_items": 1 if singular else 5,
+                },
+                confidence=0.99,
+                source="rule",
             )
         return None

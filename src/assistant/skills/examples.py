@@ -18,6 +18,23 @@ class SkillExample(BaseModel):
 
 DEFAULT_SKILL_EXAMPLES: tuple[SkillExample, ...] = (
     SkillExample(
+        utterance="Go to Slickdeals and give me the first deal",
+        skill_id="web.headless_read",
+        arguments={
+            "url": "https://slickdeals.net",
+            "max_characters": 12000,
+            "max_links": 30,
+            "timeout_seconds": 30,
+            "wait_after_load_ms": 750,
+            "extract": "deal",
+            "max_items": 1,
+        },
+        notes=(
+            "The user wants website content returned in the assistant, so render the "
+            "page in the isolated browser and extract the first matching deal card."
+        ),
+    ),
+    SkillExample(
         utterance="I need a fresh calculator window",
         skill_id="windows.launcher",
         arguments={"application": "calculator"},

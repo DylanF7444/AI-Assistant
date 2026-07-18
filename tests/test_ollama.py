@@ -20,22 +20,26 @@ class FakeHttpResponse:
 
 
 @pytest.mark.asyncio
-async def test_completion_debug_prints_exact_submitted_prompt_and_raw_response(
-    monkeypatch, capsys
-):
+async def test_completion_bounds_prompt_without_discarding_rules_or_request(monkeypatch, capsys):
     raw_response = '{"answer":"exact model response"}'
+    submitted_prompt = ""
 
     def fake_urlopen(request, timeout):
+        nonlocal submitted_prompt
         payload = json.loads(request.data)
-        assert payload["prompt"] == "p" * 8000
+        submitted_prompt = payload["prompt"]
+        assert len(submitted_prompt) == 120
+        assert submitted_prompt.startswith("BEGIN-RULES")
+        assert submitted_prompt.endswith("END-REQUEST")
+        assert "[Earlier planner context omitted for local inference.]" in submitted_prompt
         assert timeout == 3
         return FakeHttpResponse({"response": raw_response})
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-    provider = OllamaProvider("test-model", terminal_debug=True)
+    provider = OllamaProvider("test-model", max_prompt_chars=120, terminal_debug=True)
 
     result = await provider.structured_completion(
-        "omitted-prefix" + "p" * 8000,
+        "BEGIN-RULES" + "p" * 300 + "END-REQUEST",
         {"type": "object"},
         timeout_seconds=3,
     )
@@ -45,8 +49,7 @@ async def test_completion_debug_prints_exact_submitted_prompt_and_raw_response(
     assert captured.out == ""
     assert "[assistant ai debug]" in captured.err
     assert "model=test-model" in captured.err
-    assert f"prompt:\n{'p' * 8000}\nresponse:\n{raw_response}" in captured.err
-    assert "omitted-prefix" not in captured.err
+    assert f"prompt:\n{submitted_prompt}\nresponse:\n{raw_response}" in captured.err
 
 
 @pytest.mark.asyncio

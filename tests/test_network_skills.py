@@ -68,6 +68,20 @@ def test_network_routes_are_explicit():
     headless = router.route("read https://example.com in the background").intent
     assert headless.name == "web.headless_read"
     assert headless.arguments["url"] == "https://example.com"
+    deal = router.route("Go to Slickdeals and give me the first deal").intent
+    assert deal.name == "web.headless_read"
+    assert deal.arguments == {
+        "url": "https://slickdeals.net",
+        "max_characters": 12000,
+        "max_links": 30,
+        "timeout_seconds": 30,
+        "wait_after_load_ms": 750,
+        "extract": "deal",
+        "max_items": 1,
+    }
+    alternate = router.route("show me the first deal from slick deals").intent
+    assert alternate.name == "web.headless_read"
+    assert alternate.arguments["extract"] == "deal"
     news = router.route("ask Codex for today's news").intent
     assert news.arguments["provider"] == "codex"
     assert news.arguments["question"] == "today's news"
@@ -92,6 +106,13 @@ async def test_headless_read_uses_isolated_browser_contract_and_exact_network_ta
                 title="Rendered example",
                 text="JavaScript rendered content",
                 links=({"text": "Docs", "url": "https://example.com/docs"},),
+                items=(
+                    {
+                        "title": "Example deal",
+                        "text": "Example deal $10",
+                        "url": "https://example.com/deal",
+                    },
+                ),
             )
 
     skill = HeadlessReadSkill(FakeHeadlessBrowser())
@@ -103,6 +124,8 @@ async def test_headless_read_uses_isolated_browser_contract_and_exact_network_ta
             "max_links": 10,
             "timeout_seconds": 20,
             "wait_after_load_ms": 100,
+            "extract": "deal",
+            "max_items": 1,
         },
     )
 
@@ -117,11 +140,61 @@ async def test_headless_read_uses_isolated_browser_contract_and_exact_network_ta
             "max_links": 10,
             "timeout_seconds": 20.0,
             "wait_after_load_ms": 100,
+            "extract": "deal",
+            "max_items": 1,
         }
     ]
     assert result.data["title"] == "Rendered example"
-    assert "JavaScript rendered content" in result.display_text
+    assert result.data["items"][0]["title"] == "Example deal"
+    assert "Example deal" in result.display_text
+    assert "$10" in result.display_text
     assert skill.manifest.background_mode.value == "safe"
+
+
+def test_headless_browser_ranks_the_first_matching_deal_card_and_deduplicates_links():
+    items = PlaywrightHeadlessBrowser._clean_items(
+        "https://slickdeals.net/",
+        [
+            {
+                "order": 0,
+                "identity": "NAV menu card",
+                "title": "Deal Alerts",
+                "text": "Deal Alerts",
+                "href": "/deal-alerts/",
+            },
+            {
+                "order": 1,
+                "identity": "DIV dealCard",
+                "title": "First product",
+                "text": "First product $12 $25 Example Store",
+                "href": "/f/first-product",
+            },
+            {
+                "order": 2,
+                "identity": "A dealCard__title",
+                "title": "First product",
+                "text": "First product",
+                "href": "/f/first-product",
+            },
+            {
+                "order": 3,
+                "identity": "DIV dealCard",
+                "title": "Second product",
+                "text": "Second product $20 $40 Example Store",
+                "href": "/f/second-product",
+            },
+        ],
+        "deal",
+        1,
+    )
+
+    assert items == (
+        {
+            "title": "First product",
+            "text": "First product $12 $25 Example Store",
+            "url": "https://slickdeals.net/f/first-product",
+        },
+    )
 
 
 @pytest.mark.asyncio
@@ -147,6 +220,29 @@ async def test_headless_browser_blocks_websockets():
     await PlaywrightHeadlessBrowser._block_websocket(FakeWebSocketRoute())
 
     assert closed == [{"code": 1008, "reason": "Headless read blocks WebSockets"}]
+
+
+@pytest.mark.asyncio
+async def test_headless_browser_blocks_mutating_page_requests():
+    actions = []
+
+    class FakeRequest:
+        url = "https://example.com/track"
+        method = "POST"
+        resource_type = "fetch"
+
+    class FakeRoute:
+        request = FakeRequest()
+
+        async def abort(self):
+            actions.append("abort")
+
+        async def continue_(self):
+            actions.append("continue")
+
+    await PlaywrightHeadlessBrowser._route_public_request(FakeRoute())
+
+    assert actions == ["abort"]
 
 
 @pytest.mark.asyncio
