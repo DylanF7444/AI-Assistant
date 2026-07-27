@@ -9,7 +9,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from assistant.contracts import PermissionScope, SkillCall
+from assistant.contracts import PermissionContext, PermissionScope, SkillCall
 from assistant.policy.file_access import FileAccessPolicyStore
 from assistant.storage.database import (
     AuditStore,
@@ -274,6 +274,26 @@ class PermissionManager:
             },
         )
         return decision
+
+    def authorize_scopes(
+        self,
+        *,
+        user_id: str,
+        subject_id: str,
+        session_id: str,
+        required: tuple[PermissionScope, ...],
+        consume_once: bool = True,
+    ) -> PermissionDecision:
+        """Authorize a typed, non-executing principal through the normal grant store."""
+        call = SkillCall(
+            skill_id=subject_id,
+            caller="user",
+            permission_context=PermissionContext(
+                user_id=user_id,
+                session_id=session_id,
+            ),
+        )
+        return self.authorize(call, required, consume_once=consume_once)
 
     def _authorize_background(
         self,

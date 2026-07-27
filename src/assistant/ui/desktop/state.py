@@ -14,6 +14,7 @@ class WindowGeometry(BaseModel):
 
 class DesktopWindowState(BaseModel):
     mode: Literal["compact", "full"] = "compact"
+    primary_screen: Literal["dashboard", "assistant"] = "assistant"
     compact_pinned: bool = True
     compact_geometry: WindowGeometry | None = None
     full_geometry: WindowGeometry | None = None

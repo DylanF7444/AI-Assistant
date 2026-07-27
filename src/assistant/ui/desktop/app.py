@@ -33,6 +33,13 @@ from assistant.storage.database import SettingsStore
 from assistant.storage.history import HistoryStore
 from assistant.storage.macros import MacroDefinition, MacroStep
 from assistant.storage.secrets import SecretVault
+from assistant.tts.discovery import (
+    find_piper_executable,
+    find_piper_voice_models,
+    piper_executable_dialog_directory,
+    piper_model_dialog_directory,
+)
+from assistant.tts.elevenlabs import ElevenLabsProvider
 from assistant.ui.desktop.controller import DesktopController
 from assistant.ui.desktop.state import DesktopWindowState, WindowGeometry
 from assistant.ui.desktop.tabs import TAB_LABELS
@@ -134,6 +141,10 @@ def run_desktop(container: Container) -> int:
         "filesystem.read": ("Read files", "Open files or folders for reading."),
         "filesystem.write": ("Change files", "Create, edit, move, rename, or delete files."),
         "input.control": ("Control mouse and keyboard", "Type, click, or automate input."),
+        "integration.read": (
+            "Read integration data",
+            "Read exact metrics from a configured external application.",
+        ),
         "media.control": ("Control media", "Change playback, volume, or media state."),
         "messaging": ("Send messages", "Send messages through configured accounts."),
         "network": ("Use the network", "Open websites or call network services."),
@@ -220,6 +231,7 @@ def run_desktop(container: Container) -> int:
             QApplication,
             QCheckBox,
             QComboBox,
+            QDialog,
             QFileDialog,
             QFormLayout,
             QFrame,
@@ -254,6 +266,9 @@ def run_desktop(container: Container) -> int:
         raise RuntimeError(
             "Desktop UI is not installed. Run: python -m pip install -e .[desktop]"
         ) from exc
+    from assistant.ui.desktop.dashboard import DashboardPage
+    from assistant.ui.desktop.dashboard_connections import DashboardConnectionsDialog
+    from assistant.ui.desktop.dashboard_editor import DashboardEditor
     from assistant.ui.desktop.workers import (
         AsyncWorker,
         PassiveVoiceWorker,
@@ -531,6 +546,7 @@ def run_desktop(container: Container) -> int:
             self.setObjectName("localAssistantWindow")
             self.setAccessibleName("Local Assistant command window")
             self._workers: list[AsyncWorker] = []
+            self._dashboard_workers: list[AsyncWorker] = []
             self._hotkeys: list[int] = []
             self._shortcuts: list[QShortcut] = []
             self._passive_voice_worker: PassiveVoiceWorker | None = None
@@ -542,6 +558,7 @@ def run_desktop(container: Container) -> int:
             self._background_correlations: dict[UUID, int] = {}
             self._status_frame = 0
             self._active_state = PipelineState.IDLE
+            self._startup_offline_lock = container.settings.offline_lock
             self._desktop_state_store = SettingsStore(container.database)
             try:
                 self._desktop_state = DesktopWindowState.model_validate(
@@ -562,9 +579,11 @@ def run_desktop(container: Container) -> int:
             self.tabs.setObjectName("fullAssistantTabs")
             self.tabs.setTabBar(HorizontalTabBar())
             tab_factories = (
+                self._dashboard_tab,
                 self._command_tab,
                 self._active_scripts_tab,
                 self._skills_tab,
+                self._extension_hub_tab,
                 self._permissions_tab,
                 self._file_access_tab,
                 self._audit_tab,
@@ -582,6 +601,14 @@ def run_desktop(container: Container) -> int:
                 self.tabs.addTab(factory(), label)
             self.tabs.setTabPosition(QTabWidget.TabPosition.West)
             self.tabs.setDocumentMode(True)
+            self._primary_tab_indices = {
+                "dashboard": TAB_LABELS.index("Dashboard"),
+                "assistant": TAB_LABELS.index("Assistant"),
+            }
+            self.tabs.setCurrentIndex(
+                self._primary_tab_indices[self._desktop_state.primary_screen]
+            )
+            self.tabs.currentChanged.connect(self._full_tab_changed)
             self.compact_panel = CompactAssistantPanel(
                 activation_mode=container.settings.voice_activation_mode,
                 pinned=self._desktop_state.compact_pinned,
@@ -610,6 +637,8 @@ def run_desktop(container: Container) -> int:
             self._scripts_timer.start()
             self._add_shortcut(container.settings.push_to_talk_hotkey, self.listen)
             self._add_shortcut(container.settings.cancel_hotkey, self.cancel)
+            self._add_shortcut("Ctrl+1", lambda: self._show_primary_screen("dashboard"))
+            self._add_shortcut("Ctrl+2", lambda: self._show_primary_screen("assistant"))
             self._add_shortcut("Ctrl+Return", self._submit_current_view)
             self._register_global_hotkeys()
             self._apply_window_mode(self._window_mode, initial=True)
@@ -636,6 +665,10 @@ def run_desktop(container: Container) -> int:
                 self._application_settings_payload(settings),
             )
             container.settings = settings
+            container.dashboard.set_offline_lock(settings.offline_lock)
+            container.dashboard.set_history_retention_days(
+                settings.dashboard_history_retention_days
+            )
 
         def _save_current_geometry(self) -> None:
             geometry = self.geometry()
@@ -739,6 +772,10 @@ def run_desktop(container: Container) -> int:
                     maximum_height=maximum_height,
                 )
             else:
+                self._show_primary_screen(
+                    self._desktop_state.primary_screen,
+                    persist=False,
+                )
                 self.setMinimumSize(820, 600)
                 geometry = self._bounded_window_geometry(
                     self._desktop_state.full_geometry,
@@ -775,7 +812,7 @@ def run_desktop(container: Container) -> int:
         def _submit_current_view(self) -> None:
             if self._window_mode == "compact":
                 self.compact_panel._submit()
-            else:
+            elif self.tabs.tabText(self.tabs.currentIndex()) == "Assistant":
                 self.run_command()
 
         def _set_voice_activation_mode(self, mode: str) -> None:
@@ -793,6 +830,11 @@ def run_desktop(container: Container) -> int:
             self._apply_passive_voice_indicators()
 
         def show_from_tray(self) -> None:
+            if self._window_mode == "full":
+                self._show_primary_screen(
+                    self._desktop_state.primary_screen,
+                    persist=False,
+                )
             if self.isMinimized():
                 self.showNormal()
             else:
@@ -800,10 +842,280 @@ def run_desktop(container: Container) -> int:
             self.raise_()
             self.activateWindow()
 
-        def open_full_from_tray(self) -> None:
+        def open_primary_from_tray(self, screen: str) -> None:
             if self._window_mode != "full":
                 self._switch_window_mode("full")
+            if self._window_mode == "full":
+                self._show_primary_screen(screen)
             self.show_from_tray()
+
+        def open_dashboard_from_tray(self) -> None:
+            self.open_primary_from_tray("dashboard")
+
+        def open_assistant_from_tray(self) -> None:
+            self.open_primary_from_tray("assistant")
+
+        def open_full_from_tray(self) -> None:
+            """Backward-compatible entry point for callers that open the assistant."""
+            self.open_assistant_from_tray()
+
+        def _dashboard_tab(self) -> QWidget:
+            self.dashboard_page = DashboardPage(controller)
+            self.dashboard_page.refresh_requested.connect(self._refresh_dashboard)
+            self.dashboard_page.refresh_due_requested.connect(self._refresh_dashboard)
+            self.dashboard_page.customize_requested.connect(self._customize_dashboard)
+            self.dashboard_page.connections_requested.connect(
+                self._manage_dashboard_connections
+            )
+            self.dashboard_page.permission_requested.connect(
+                self._grant_dashboard_permission
+            )
+            self.dashboard_page.became_visible.connect(self._refresh_dashboard)
+            return self.dashboard_page
+
+        def _manage_dashboard_connections(self) -> None:
+            dialog = DashboardConnectionsDialog(controller, self)
+            dialog.add_requested.connect(
+                lambda payload: self._add_dashboard_connection(dialog, payload)
+            )
+            dialog.test_requested.connect(
+                lambda connection_id: self._test_dashboard_connection(
+                    dialog,
+                    connection_id,
+                )
+            )
+            dialog.enabled_requested.connect(
+                lambda payload: self._set_dashboard_connection_enabled(
+                    dialog,
+                    payload,
+                )
+            )
+            dialog.history_requested.connect(
+                lambda payload: self._set_dashboard_connection_history(
+                    dialog,
+                    payload,
+                )
+            )
+            dialog.clear_history_requested.connect(
+                lambda connection_id: self._clear_dashboard_connection_history(
+                    dialog,
+                    connection_id,
+                )
+            )
+            dialog.remove_requested.connect(
+                lambda connection_id: self._remove_dashboard_connection(
+                    dialog,
+                    connection_id,
+                )
+            )
+            dialog.exec()
+
+        def _add_dashboard_connection(
+            self,
+            dialog: DashboardConnectionsDialog,
+            payload: dict[str, Any],
+        ) -> None:
+            worker = AsyncWorker(controller.add_home_assistant_connection(**payload))
+            worker.complete.connect(dialog.connection_added)
+            worker.failed.connect(dialog.operation_failed)
+            worker.finished.connect(lambda: self._discard_dashboard_worker(worker))
+            self._workers.append(worker)
+            self._dashboard_workers.append(worker)
+            worker.start()
+
+        def _test_dashboard_connection(
+            self,
+            dialog: DashboardConnectionsDialog,
+            connection_id: UUID,
+        ) -> None:
+            worker = AsyncWorker(controller.test_dashboard_connection(connection_id))
+            worker.complete.connect(dialog.health_received)
+            worker.failed.connect(dialog.operation_failed)
+            worker.finished.connect(lambda: self._discard_dashboard_worker(worker))
+            self._workers.append(worker)
+            self._dashboard_workers.append(worker)
+            worker.start()
+
+        def _set_dashboard_connection_enabled(
+            self,
+            dialog: DashboardConnectionsDialog,
+            payload: tuple[UUID, bool],
+        ) -> None:
+            try:
+                connection = controller.set_dashboard_connection_enabled(*payload)
+            except (KeyError, RuntimeError, ValueError) as error:
+                dialog.operation_failed(str(error))
+                return
+            dialog.connection_changed(connection)
+            self.dashboard_page.reload_layout()
+            self._refresh_dashboard()
+
+        def _remove_dashboard_connection(
+            self,
+            dialog: DashboardConnectionsDialog,
+            connection_id: UUID,
+        ) -> None:
+            try:
+                controller.delete_dashboard_connection(connection_id)
+            except (KeyError, RuntimeError, ValueError) as error:
+                dialog.operation_failed(str(error))
+                return
+            dialog.connection_changed()
+            self.dashboard_page.reload_layout()
+            self._refresh_dashboard()
+
+        def _set_dashboard_connection_history(
+            self,
+            dialog: DashboardConnectionsDialog,
+            payload: tuple[UUID, bool],
+        ) -> None:
+            try:
+                connection = controller.set_dashboard_connection_history_enabled(
+                    *payload
+                )
+            except (KeyError, RuntimeError, ValueError) as error:
+                dialog.operation_failed(str(error))
+                return
+            dialog.connection_changed(connection)
+
+        def _clear_dashboard_connection_history(
+            self,
+            dialog: DashboardConnectionsDialog,
+            connection_id: UUID,
+        ) -> None:
+            try:
+                deleted = controller.clear_dashboard_connection_history(connection_id)
+            except (KeyError, RuntimeError, ValueError) as error:
+                dialog.operation_failed(str(error))
+                return
+            dialog.connection_changed(
+                next(
+                    (
+                        connection
+                        for connection in controller.dashboard_connections()
+                        if connection.connection_id == connection_id
+                    ),
+                    None,
+                )
+            )
+            dialog.operation_status.setText(
+                f"Deleted {deleted} retained numeric sample(s)."
+            )
+
+        def _grant_dashboard_permission(self, card_id: UUID) -> None:
+            try:
+                request = controller.dashboard_permission_request(card_id)
+            except (KeyError, ValueError) as error:
+                QMessageBox.critical(self, "Dashboard Permission Error", str(error))
+                return
+            details = "\n".join(
+                f"{capability_name(scope.capability)}: {scope.reason}\n"
+                f"Targets: {target_summary(scope.targets)}"
+                for scope in request.scopes
+            )
+            decision = self._voice_prompt_choice(
+                title="Dashboard Permission Required",
+                text=f"{request.display_name} needs read access before it can refresh.",
+                informative_text=details,
+                kind="approval",
+                buttons=[
+                    ("approve", "Grant Access", QMessageBox.ButtonRole.AcceptRole),
+                    ("deny", "Not Now", QMessageBox.ButtonRole.RejectRole),
+                ],
+                default_choice="deny",
+            )
+            if decision != "approve":
+                return
+            modes = {
+                "once": GrantType.ONCE,
+                "session": GrantType.SESSION,
+                "always": GrantType.ALWAYS,
+            }
+            mode = self._voice_prompt_choice(
+                title="Grant Dashboard Access",
+                text="How long should this read-only dashboard access last?",
+                informative_text=(
+                    "The grant is limited to the exact targets shown in the previous step."
+                ),
+                kind="permission_duration",
+                buttons=[
+                    ("once", "Just once", QMessageBox.ButtonRole.AcceptRole),
+                    ("session", "This session", QMessageBox.ButtonRole.AcceptRole),
+                    ("always", "Always", QMessageBox.ButtonRole.AcceptRole),
+                    ("deny", "Cancel", QMessageBox.ButtonRole.RejectRole),
+                ],
+                default_choice="deny",
+            )
+            if mode not in modes:
+                return
+            try:
+                controller.grant_dashboard_permission(card_id, modes[mode])
+            except (KeyError, RuntimeError, ValueError) as error:
+                QMessageBox.critical(self, "Dashboard Permission Error", str(error))
+                return
+            self._reload_permissions()
+            self.statusBar().showMessage(
+                f"Access granted for {request.display_name}.",
+                4000,
+            )
+            self._refresh_dashboard()
+
+        def _customize_dashboard(self) -> None:
+            dialog = DashboardEditor(controller, self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            try:
+                controller.save_dashboard_layout(dialog.selected_layout())
+            except (KeyError, ValueError) as error:
+                QMessageBox.critical(self, "Dashboard Layout Not Saved", str(error))
+                return
+            self.dashboard_page.reload_layout()
+            self._refresh_dashboard()
+
+        def _refresh_dashboard(
+            self,
+            card_ids: tuple[UUID, ...] | None = None,
+        ) -> None:
+            if isinstance(card_ids, bool):
+                card_ids = None
+            if not self.dashboard_page.begin_refresh(card_ids):
+                return
+            worker = AsyncWorker(controller.refresh_dashboard(card_ids))
+            worker.complete.connect(self.dashboard_page.apply_snapshots)
+            worker.failed.connect(self.dashboard_page.fail_refresh)
+            worker.finished.connect(lambda: self._discard_dashboard_worker(worker))
+            self._workers.append(worker)
+            self._dashboard_workers.append(worker)
+            worker.start()
+
+        def _full_tab_changed(self, index: int) -> None:
+            label = self.tabs.tabText(index)
+            screen = {
+                "Dashboard": "dashboard",
+                "Assistant": "assistant",
+            }.get(label)
+            if screen is None:
+                return
+            if self._desktop_state.primary_screen != screen:
+                self._desktop_state = self._desktop_state.model_copy(
+                    update={"primary_screen": screen}
+                )
+                self._persist_window_state()
+            if screen == "assistant":
+                QTimer.singleShot(0, self.transcript.setFocus)
+
+        def _show_primary_screen(self, screen: str, *, persist: bool = True) -> None:
+            index = self._primary_tab_indices[screen]
+            self.tabs.setCurrentIndex(index)
+            if persist and self._desktop_state.primary_screen != screen:
+                self._desktop_state = self._desktop_state.model_copy(
+                    update={"primary_screen": screen}
+                )
+                self._persist_window_state()
+            if screen == "dashboard":
+                QTimer.singleShot(0, self._refresh_dashboard)
+            else:
+                QTimer.singleShot(0, self.transcript.setFocus)
 
         def _active_scripts_tab(self) -> QWidget:
             page = QWidget()
@@ -1526,6 +1838,7 @@ def run_desktop(container: Container) -> int:
             *,
             record_activity: bool = True,
         ) -> None:
+            controller.set_dashboard_pipeline_state(state)
             labels = {
                 PipelineState.IDLE: "Ready",
                 PipelineState.LISTENING: "Listening",
@@ -1904,6 +2217,28 @@ def run_desktop(container: Container) -> int:
         def _discard_worker(self, worker: Any) -> None:
             if worker in self._workers:
                 self._workers.remove(worker)
+
+        def _discard_dashboard_worker(self, worker: AsyncWorker) -> None:
+            if worker in self._dashboard_workers:
+                self._dashboard_workers.remove(worker)
+            self._discard_worker(worker)
+
+        def _extension_hub_tab(self) -> QWidget:
+            from assistant.ui.desktop.extension_hub import ExtensionHubPage
+
+            self.extension_hub_page = ExtensionHubPage(
+                container.extension_hub,
+                offline=self._startup_offline_lock,
+            )
+            self.extension_hub_page.installed.connect(self._extension_installed)
+            return self.extension_hub_page
+
+        def _extension_installed(self, skill_id: str) -> None:
+            self._reload_skills()
+            self.statusBar().showMessage(
+                f"Installed {skill_id} disabled. Review it in Skills before enabling.",
+                8000,
+            )
 
         def _skills_tab(self) -> QWidget:
             page = QWidget()
@@ -2365,12 +2700,13 @@ def run_desktop(container: Container) -> int:
                 self._info_label(
                     "Skills start with no sensitive permissions. Grants can be one-time, "
                     "session-only, always, or deny, and may be target-scoped. "
+                    "Read-only dashboard providers appear here as Dashboard principals. "
                     "File access grants are managed in the File Access tab."
                 )
             )
             self.permission_table = QTableWidget(0, 5)
             self.permission_table.setHorizontalHeaderLabels(
-                ["Skill", "Capability", "Mode", "Targets", "Effect"]
+                ["Principal", "Capability", "Mode", "Targets", "Effect"]
             )
             self._configure_data_table(self.permission_table)
             self._reload_permissions()
@@ -2395,9 +2731,20 @@ def run_desktop(container: Container) -> int:
                     continue
                 row = self.permission_table.rowCount()
                 self.permission_table.insertRow(row)
-                manifest = container.registry.get(value["skill_id"]).manifest
+                try:
+                    manifest = container.registry.get(value["skill_id"]).manifest
+                    principal = (
+                        f"{manifest.display_name} "
+                        f"({friendly_identifier(value['skill_id'])})"
+                    )
+                except KeyError:
+                    principal = (
+                        f"Dashboard ({friendly_identifier(value['skill_id'])})"
+                        if value["skill_id"].startswith("dashboard.")
+                        else friendly_identifier(value["skill_id"])
+                    )
                 fields = [
-                    f"{manifest.display_name} ({friendly_identifier(value['skill_id'])})",
+                    principal,
                     capability_table_label(value["capability"]),
                     grant_type_label(value["grant_type"]),
                     target_summary(value["targets"]),
@@ -2848,12 +3195,83 @@ def run_desktop(container: Container) -> int:
             self.setting_search_provider.addItem("Brave Search", "brave")
             selected = self.setting_search_provider.findData(container.settings.search_provider)
             self.setting_search_provider.setCurrentIndex(max(0, selected))
+            self.setting_extension_catalog_url = QLineEdit(
+                container.settings.extension_catalog_url or ""
+            )
+            self.setting_extension_catalog_url.setPlaceholderText(
+                "https://extensions.example.com/v1/catalog.json"
+            )
+            self.setting_tts_provider = QComboBox()
+            self.setting_tts_provider.addItem("Piper (local)", "piper")
+            self.setting_tts_provider.addItem("ElevenLabs (cloud)", "elevenlabs")
+            selected = self.setting_tts_provider.findData(container.settings.tts_provider)
+            self.setting_tts_provider.setCurrentIndex(max(0, selected))
             self.setting_piper_executable = QLineEdit(
                 str(container.settings.piper_executable or "")
             )
             self.setting_piper_model = QLineEdit(str(container.settings.piper_model or ""))
             self.setting_piper_executable_label = QLabel("Piper executable")
             self.setting_piper_model_label = QLabel("Piper voice model")
+            detected_executable = find_piper_executable(container.settings.data_dir)
+            if detected_executable and not container.settings.piper_executable:
+                self.setting_piper_executable.setPlaceholderText(f"Detected: {detected_executable}")
+            detected_voices = find_piper_voice_models(container.settings.data_dir)
+            if detected_voices and not container.settings.piper_model:
+                self.setting_piper_model.setPlaceholderText(f"Detected: {detected_voices[0]}")
+            piper_executable_row = QWidget()
+            piper_executable_layout = QHBoxLayout(piper_executable_row)
+            piper_executable_layout.setContentsMargins(0, 0, 0, 0)
+            piper_executable_layout.addWidget(self.setting_piper_executable, 1)
+            piper_executable_browse = QPushButton("Browse")
+            piper_executable_browse.clicked.connect(self._select_piper_executable)
+            piper_executable_layout.addWidget(piper_executable_browse)
+            self.setting_piper_executable_row = piper_executable_row
+            piper_model_row = QWidget()
+            piper_model_layout = QHBoxLayout(piper_model_row)
+            piper_model_layout.setContentsMargins(0, 0, 0, 0)
+            piper_model_layout.addWidget(self.setting_piper_model, 1)
+            piper_model_browse = QPushButton("Browse")
+            piper_model_browse.clicked.connect(self._select_piper_model)
+            piper_model_layout.addWidget(piper_model_browse)
+            self.setting_piper_model_row = piper_model_row
+            self.setting_piper_help = QLabel(
+                f"Found {len(detected_voices)} local Piper voice file(s). "
+                "Browse opens the detected model folder."
+                if detected_voices
+                else "Choose the Piper .onnx voice file; Browse checks common model folders."
+            )
+            self.setting_piper_help.setWordWrap(True)
+            self.setting_elevenlabs_key = QLineEdit()
+            self.setting_elevenlabs_key.setEchoMode(QLineEdit.EchoMode.Password)
+            self.setting_elevenlabs_key.setPlaceholderText(
+                "Stored; enter a new key to replace"
+                if vault.has("elevenlabs")
+                else "ElevenLabs API key"
+            )
+            self.setting_elevenlabs_voice_id = QLineEdit(
+                container.settings.elevenlabs_voice_id or ""
+            )
+            self.setting_elevenlabs_voice_id.setPlaceholderText(
+                "Copy the voice ID from ElevenLabs My Voices"
+            )
+            self.setting_elevenlabs_model = QComboBox()
+            self.setting_elevenlabs_model.setEditable(True)
+            self.setting_elevenlabs_model.addItems(
+                [
+                    "eleven_flash_v2_5",
+                    "eleven_multilingual_v2",
+                    "eleven_v3",
+                ]
+            )
+            self.setting_elevenlabs_model.setCurrentText(container.settings.elevenlabs_model_id)
+            self.setting_elevenlabs_key_label = QLabel("ElevenLabs API key")
+            self.setting_elevenlabs_voice_id_label = QLabel("ElevenLabs voice ID")
+            self.setting_elevenlabs_model_label = QLabel("ElevenLabs model")
+            self.setting_elevenlabs_help = QLabel(
+                "ElevenLabs uses cloud voice/model IDs rather than local files and is "
+                "disabled while the global offline lock is on."
+            )
+            self.setting_elevenlabs_help.setWordWrap(True)
             self.setting_speech = QComboBox()
             self.setting_speech.addItems(["always", "voice_only", "never"])
             self.setting_speech.setCurrentText(container.settings.speech_mode)
@@ -2908,6 +3326,9 @@ def run_desktop(container: Container) -> int:
             self.setting_ptt = QLineEdit(container.settings.push_to_talk_hotkey)
             self.setting_cancel = QLineEdit(container.settings.cancel_hotkey)
             self.setting_retention = QLineEdit(str(container.settings.retain_transcripts_days))
+            self.setting_dashboard_history_retention = QLineEdit(
+                str(container.settings.dashboard_history_retention_days)
+            )
             self.setting_diagnostic_audio = QCheckBox()
             self.setting_diagnostic_audio.setChecked(container.settings.diagnostic_audio)
             self.setting_noise = QCheckBox()
@@ -2942,6 +3363,7 @@ def run_desktop(container: Container) -> int:
             save = QPushButton("Save Settings")
             save.clicked.connect(self._save_settings)
             form.addRow("Global offline lock", self.setting_offline)
+            form.addRow("Extension catalog URL", self.setting_extension_catalog_url)
             form.addRow("Enable durable scheduling", self.setting_scheduler_enabled)
             form.addRow("Enable background skill actions", self.setting_background_actions)
             form.addRow("Pause interactive actions while locked", self.setting_pause_while_locked)
@@ -2956,8 +3378,23 @@ def run_desktop(container: Container) -> int:
             form.addRow("Anthropic API key", self.setting_anthropic_key)
             form.addRow("Web search provider", self.setting_search_provider)
             form.addRow("Brave Search API key", self.setting_brave_key)
-            form.addRow(self.setting_piper_executable_label, self.setting_piper_executable)
-            form.addRow(self.setting_piper_model_label, self.setting_piper_model)
+            form.addRow("Speech provider", self.setting_tts_provider)
+            form.addRow(
+                self.setting_piper_executable_label,
+                self.setting_piper_executable_row,
+            )
+            form.addRow(self.setting_piper_model_label, self.setting_piper_model_row)
+            form.addRow("", self.setting_piper_help)
+            form.addRow(self.setting_elevenlabs_key_label, self.setting_elevenlabs_key)
+            form.addRow(
+                self.setting_elevenlabs_voice_id_label,
+                self.setting_elevenlabs_voice_id,
+            )
+            form.addRow(
+                self.setting_elevenlabs_model_label,
+                self.setting_elevenlabs_model,
+            )
+            form.addRow("", self.setting_elevenlabs_help)
             form.addRow("Speech mode", self.setting_speech)
             form.addRow("Voice activation", self.setting_voice_activation_mode)
             form.addRow(
@@ -2985,6 +3422,10 @@ def run_desktop(container: Container) -> int:
             form.addRow("Push-to-talk hotkey", self.setting_ptt)
             form.addRow("Cancel hotkey", self.setting_cancel)
             form.addRow("Transcript retention days", self.setting_retention)
+            form.addRow(
+                "Dashboard numeric history days",
+                self.setting_dashboard_history_retention,
+            )
             form.addRow("Diagnostic raw audio", self.setting_diagnostic_audio)
             form.addRow("Noise suppression", self.setting_noise)
             form.addRow("Automatic gain control", self.setting_gain)
@@ -2996,6 +3437,9 @@ def run_desktop(container: Container) -> int:
             form.addRow(save)
             self.setting_speech.currentTextChanged.connect(
                 lambda _text: self._update_voice_settings_visibility()
+            )
+            self.setting_tts_provider.currentIndexChanged.connect(
+                lambda _index: self._update_voice_settings_visibility()
             )
             self.setting_voice_activation_mode.currentIndexChanged.connect(
                 lambda _index: self._update_voice_settings_visibility()
@@ -3015,10 +3459,21 @@ def run_desktop(container: Container) -> int:
 
         def _update_voice_settings_visibility(self) -> None:
             speech_enabled = self.setting_speech.currentText() != "never"
-            self.setting_piper_executable_label.setVisible(speech_enabled)
-            self.setting_piper_executable.setVisible(speech_enabled)
-            self.setting_piper_model_label.setVisible(speech_enabled)
-            self.setting_piper_model.setVisible(speech_enabled)
+            provider = self.setting_tts_provider.currentData()
+            piper_active = speech_enabled and provider == "piper"
+            elevenlabs_active = speech_enabled and provider == "elevenlabs"
+            self.setting_piper_executable_label.setVisible(piper_active)
+            self.setting_piper_executable_row.setVisible(piper_active)
+            self.setting_piper_model_label.setVisible(piper_active)
+            self.setting_piper_model_row.setVisible(piper_active)
+            self.setting_piper_help.setVisible(piper_active)
+            self.setting_elevenlabs_key_label.setVisible(elevenlabs_active)
+            self.setting_elevenlabs_key.setVisible(elevenlabs_active)
+            self.setting_elevenlabs_voice_id_label.setVisible(elevenlabs_active)
+            self.setting_elevenlabs_voice_id.setVisible(elevenlabs_active)
+            self.setting_elevenlabs_model_label.setVisible(elevenlabs_active)
+            self.setting_elevenlabs_model.setVisible(elevenlabs_active)
+            self.setting_elevenlabs_help.setVisible(elevenlabs_active)
 
             activation_mode = self.setting_voice_activation_mode.currentData()
             keyword_clap_active = activation_mode == "keyword_clap"
@@ -3040,6 +3495,40 @@ def run_desktop(container: Container) -> int:
             self.setting_wake_word_threshold_label.setVisible(wake_word_active)
             self.setting_wake_word_threshold.setVisible(wake_word_active)
 
+        def _select_piper_executable(self) -> None:
+            configured_text = self.setting_piper_executable.text().strip()
+            configured = Path(configured_text) if configured_text else None
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Select Piper Executable",
+                str(
+                    piper_executable_dialog_directory(
+                        container.settings.data_dir,
+                        configured_executable=configured,
+                    )
+                ),
+                "Piper executable (piper.exe);;Applications (*.exe);;All files (*)",
+            )
+            if path:
+                self.setting_piper_executable.setText(path)
+
+        def _select_piper_model(self) -> None:
+            configured_text = self.setting_piper_model.text().strip()
+            configured = Path(configured_text) if configured_text else None
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Select Piper Voice Model",
+                str(
+                    piper_model_dialog_directory(
+                        container.settings.data_dir,
+                        configured_model=configured,
+                    )
+                ),
+                "Piper voice models (*.onnx);;All files (*)",
+            )
+            if path:
+                self.setting_piper_model.setText(path)
+
         def _select_wake_word_model(self) -> None:
             path, _ = QFileDialog.getOpenFileName(
                 self,
@@ -3052,6 +3541,39 @@ def run_desktop(container: Container) -> int:
 
         def _save_settings(self) -> None:
             try:
+                speech_enabled = self.setting_speech.currentText() != "never"
+                tts_provider = self.setting_tts_provider.currentData()
+                piper_executable_text = self.setting_piper_executable.text().strip()
+                piper_executable = (
+                    Path(piper_executable_text).expanduser() if piper_executable_text else None
+                )
+                piper_model_text = self.setting_piper_model.text().strip()
+                piper_model = Path(piper_model_text).expanduser() if piper_model_text else None
+                if (
+                    speech_enabled
+                    and tts_provider == "piper"
+                    and (piper_executable is not None or piper_model is not None)
+                ):
+                    if piper_executable is None or not piper_executable.is_file():
+                        raise ValueError("Select an existing Piper executable")
+                    if piper_model is None or not piper_model.is_file():
+                        raise ValueError("Select an existing Piper voice model")
+                    if piper_model.suffix.casefold() != ".onnx":
+                        raise ValueError("Piper voice model must be an .onnx file")
+                    piper_config = piper_model.with_suffix(f"{piper_model.suffix}.json")
+                    if not piper_config.is_file():
+                        raise ValueError(
+                            f"Piper voice configuration is missing: {piper_config.name}"
+                        )
+                elevenlabs_voice_id = self.setting_elevenlabs_voice_id.text().strip() or None
+                if speech_enabled and tts_provider == "elevenlabs":
+                    if elevenlabs_voice_id is None:
+                        raise ValueError("Enter an ElevenLabs voice ID")
+                    if not (
+                        self.setting_elevenlabs_key.text().strip()
+                        or container.secret_vault.has("elevenlabs")
+                    ):
+                        raise ValueError("Enter an ElevenLabs API key")
                 wake_word_text = self.setting_wake_word_model.text().strip()
                 wake_word_model = Path(wake_word_text).expanduser() if wake_word_text else None
                 if self.setting_wake_word_enabled.isChecked():
@@ -3077,8 +3599,14 @@ def run_desktop(container: Container) -> int:
                     "openai_codex_model": (self.setting_openai_codex_model.text().strip()),
                     "anthropic_model": self.setting_anthropic_model.text().strip(),
                     "search_provider": self.setting_search_provider.currentData(),
-                    "piper_executable": self.setting_piper_executable.text().strip() or None,
-                    "piper_model": self.setting_piper_model.text().strip() or None,
+                    "extension_catalog_url": (
+                        self.setting_extension_catalog_url.text().strip() or None
+                    ),
+                    "tts_provider": tts_provider,
+                    "piper_executable": piper_executable,
+                    "piper_model": piper_model,
+                    "elevenlabs_voice_id": elevenlabs_voice_id,
+                    "elevenlabs_model_id": (self.setting_elevenlabs_model.currentText().strip()),
                     "speech_mode": self.setting_speech.currentText(),
                     "voice_activation_mode": (self.setting_voice_activation_mode.currentData()),
                     "wake_word_enabled": self.setting_wake_word_enabled.isChecked(),
@@ -3095,6 +3623,9 @@ def run_desktop(container: Container) -> int:
                     "push_to_talk_hotkey": self.setting_ptt.text().strip(),
                     "cancel_hotkey": self.setting_cancel.text().strip(),
                     "retain_transcripts_days": int(self.setting_retention.text().strip()),
+                    "dashboard_history_retention_days": int(
+                        self.setting_dashboard_history_retention.text().strip()
+                    ),
                     "diagnostic_audio": self.setting_diagnostic_audio.isChecked(),
                     "noise_suppression": self.setting_noise.isChecked(),
                     "automatic_gain_control": self.setting_gain.isChecked(),
@@ -3110,6 +3641,14 @@ def run_desktop(container: Container) -> int:
                 QMessageBox.critical(self, "Invalid Settings", str(error))
                 return
             self._persist_application_settings(validated)
+            container.extension_hub.configure(
+                validated.extension_catalog_url,
+                timeout_seconds=validated.extension_catalog_timeout_seconds,
+            )
+            self.extension_hub_page.set_configuration(
+                validated.extension_catalog_url,
+                offline=self._startup_offline_lock or validated.offline_lock,
+            )
             container.scheduler.enabled = validated.scheduler_enabled
             if validated.scheduler_enabled and not container.background_runtime.running:
                 container.background_runtime.start()
@@ -3124,11 +3663,16 @@ def run_desktop(container: Container) -> int:
                 ("openai", self.setting_openai_key),
                 ("anthropic", self.setting_anthropic_key),
                 ("brave", self.setting_brave_key),
+                ("elevenlabs", self.setting_elevenlabs_key),
             ):
                 if field.text().strip():
                     vault.set(name, field.text())
                     field.clear()
                     field.setPlaceholderText("Stored; enter a new key to replace")
+            if isinstance(container.orchestrator.tts, ElevenLabsProvider):
+                container.orchestrator.tts.set_offline_lock(
+                    validated.offline_lock or validated.tts_provider != "elevenlabs"
+                )
             container.orchestrator.speech_mode = validated.speech_mode
             container.orchestrator.response_detail = validated.response_detail
             container.orchestrator.show_reasoning_steps = validated.show_reasoning_steps
@@ -3150,23 +3694,38 @@ def run_desktop(container: Container) -> int:
             QMessageBox.information(
                 self,
                 "Settings Saved",
-                "Settings were saved. Model, wake-word, device, and global hotkey changes "
-                "take full effect after restart.",
+                "Settings were saved. Speech provider, model, wake-word, device, and global "
+                "hotkey changes take full effect after restart.",
             )
 
         def _diagnostics_tab(self) -> QWidget:
             page = QWidget()
             layout = QVBoxLayout(page)
+            self.diagnostic_text = QTextEdit()
+            self.diagnostic_text.setReadOnly(True)
+            self._refresh_diagnostics()
+            controls = QHBoxLayout()
+            refresh = QPushButton("Refresh Diagnostics")
+            refresh.clicked.connect(self._refresh_diagnostics)
+            benchmark = QPushButton("Benchmark Deterministic Command")
+            benchmark.clicked.connect(self._benchmark)
+            controls.addWidget(refresh)
+            controls.addWidget(benchmark)
+            controls.addStretch()
+            layout.addWidget(self.diagnostic_text)
+            layout.addLayout(controls)
+            return page
+
+        def _refresh_diagnostics(self) -> None:
             report = hardware_report()
             recommendations = model_recommendations(report)
             recent_metrics = container.metrics.recent(100)
+            dashboard = container.dashboard.diagnostics()
             command_latencies = [
                 item["duration_ms"]
                 for item in recent_metrics
                 if item["stage"] == "execution" and item["duration_ms"] is not None
             ]
-            self.diagnostic_text = QTextEdit()
-            self.diagnostic_text.setReadOnly(True)
             self.diagnostic_text.setPlainText(
                 "\n".join(
                     [
@@ -3185,14 +3744,22 @@ def run_desktop(container: Container) -> int:
                             if command_latencies
                             else "No samples"
                         ),
+                        "",
+                        "Dashboard",
+                        f"Cards: {dashboard.get('cards', 0)}",
+                        f"Connections: {dashboard.get('connections', 0)}",
+                        f"Refresh attempts: {dashboard.get('refresh_started', 0)}",
+                        f"Ready snapshots: {dashboard.get('ready', 0)}",
+                        f"Stale fallbacks: {dashboard.get('stale', 0)}",
+                        f"Permission blocks: {dashboard.get('permission_required', 0)}",
+                        f"Offline blocks: {dashboard.get('offline', 0)}",
+                        f"Timeouts: {dashboard.get('timeout', 0)}",
+                        f"Refresh errors: {dashboard.get('error', 0)}",
+                        f"History errors: {dashboard.get('history_error', 0)}",
+                        f"Numeric history samples: {dashboard.get('history_samples', 0)}",
                     ]
                 )
             )
-            benchmark = QPushButton("Benchmark Deterministic Command")
-            benchmark.clicked.connect(self._benchmark)
-            layout.addWidget(self.diagnostic_text)
-            layout.addWidget(benchmark)
-            return page
 
         def _macros_tab(self) -> QWidget:
             page = QWidget()
@@ -4385,6 +4952,12 @@ def run_desktop(container: Container) -> int:
             except Exception:
                 pass
             self._hotkeys.clear()
+            self.dashboard_page.shutdown()
+            for worker in tuple(self._dashboard_workers):
+                worker.cancel()
+            for worker in tuple(self._dashboard_workers):
+                worker.wait(1000)
+                self._discard_dashboard_worker(worker)
             self._stop_passive_voice()
             if container.wakeword:
                 asyncio.run(container.wakeword.cancel())
@@ -4464,6 +5037,68 @@ def run_desktop(container: Container) -> int:
             background: #101d30;
             border: 1px solid #1e304a;
             border-radius: 14px;
+        }
+        #dashboardPage, #dashboardScroll, #dashboardCardContainer {
+            background: #0c1626;
+        }
+        #dashboardMetricCard {
+            background: #101d30;
+            border: 1px solid #1e304a;
+            border-radius: 14px;
+        }
+        #dashboardMetricCard[state="stale"], #dashboardMetricCard[state="empty"] {
+            border-color: #4e4936;
+        }
+        #dashboardMetricCard[state="permission_required"] {
+            border-color: #6a4b22;
+        }
+        #dashboardMetricCard[state="error"] {
+            border-color: #633747;
+        }
+        #dashboardCardTitle {
+            color: #dce7f3;
+            font-size: 10.5pt;
+            font-weight: 650;
+        }
+        #dashboardCardValue {
+            color: #f7fbff;
+            font-size: 23pt;
+            font-weight: 650;
+        }
+        #dashboardCardState {
+            color: #72e2bd;
+            background: #15342d;
+            border-radius: 7px;
+            padding: 3px 7px;
+            font-size: 7pt;
+            font-weight: 700;
+        }
+        #dashboardMetricCard[state="stale"] #dashboardCardState,
+        #dashboardMetricCard[state="empty"] #dashboardCardState,
+        #dashboardMetricCard[state="permission_required"] #dashboardCardState {
+            color: #ffd18a;
+            background: #3a2a18;
+        }
+        #dashboardMetricCard[state="error"] #dashboardCardState {
+            color: #ff9cac;
+            background: #3a1e2a;
+        }
+        #dashboardCardSummary {
+            color: #aebed1;
+        }
+        #dashboardCardDetails, #dashboardCardSource, #dashboardLastRefresh {
+            color: #7f91a8;
+            font-size: 8.5pt;
+        }
+        #dashboardMetricProgress {
+            border: 0;
+            background: #1c2b40;
+            border-radius: 3px;
+            max-height: 7px;
+        }
+        #dashboardMetricProgress::chunk {
+            background: #5a8cff;
+            border-radius: 3px;
         }
         #statusCard {
             background: #0f2032;
@@ -4729,14 +5364,17 @@ def run_desktop(container: Container) -> int:
     menu = QMenu()
     show_action = QAction("Show Companion", app)
     show_action.triggered.connect(window.show_from_tray)
-    full_action = QAction("Open Full Assistant", app)
-    full_action.triggered.connect(window.open_full_from_tray)
+    dashboard_action = QAction("Open Dashboard", app)
+    dashboard_action.triggered.connect(window.open_dashboard_from_tray)
+    assistant_action = QAction("Open Assistant", app)
+    assistant_action.triggered.connect(window.open_assistant_from_tray)
     cancel_action = QAction("Emergency Stop", app)
     cancel_action.triggered.connect(window.cancel)
     quit_action = QAction("Quit", app)
     quit_action.triggered.connect(app.quit)
     menu.addAction(show_action)
-    menu.addAction(full_action)
+    menu.addAction(dashboard_action)
+    menu.addAction(assistant_action)
     menu.addAction(cancel_action)
     menu.addSeparator()
     menu.addAction(quit_action)

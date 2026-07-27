@@ -15,6 +15,30 @@
 8. Structured results produce display and optional speech responses.
 9. Permission decisions and outcomes are written to a separate audit log.
 
+## Application self-knowledge
+
+Open-ended questions about Local Assistant itself use the same planner path as
+other conversational requests. For questions such as `how do you work`, the
+planner receives a trusted, code-owned product summary from
+`assistant.language.application_knowledge`. It describes the request lifecycle,
+skill and policy boundaries, memory and knowledge behavior, optional-provider
+availability, and the limits of model introspection. The context is injected
+only for application-knowledge requests so unrelated prompts retain their
+existing size.
+
+Questions about a skill also receive a compact live directory of currently
+enabled skill manifests, including description, risk, and permission
+capabilities. Named skills can additionally be supplied as detailed planning
+candidates with their input schema. Referential follow-ups such as `explain
+this skill` use bounded recent-session context; when that context does not name
+a skill, the planner is instructed to ask which skill the user means.
+
+This product summary is descriptive context, not executable authority. It does
+not add skills, permissions, or access, and it explicitly prevents claims of
+subjective self-awareness, hidden-model introspection, source-code inspection,
+or unseen runtime state. Deterministic commands still work without a planner,
+but open-ended application explanations require the configured local planner.
+
 ## Durable scheduling and background execution
 
 `assistant.scheduling` owns a deterministic, SQLite-backed scheduler. Schedule
@@ -74,6 +98,35 @@ The UI depends on the orchestrator and event bus, not model or OS
 implementations. STT, LLM, TTS, wake-word, embedding, Windows, storage, clock,
 and device implementations are injected behind typed interfaces.
 
+## Dashboard
+
+`assistant.dashboard` is a UI-independent read model. Strict card, layout,
+connection, definition, request, snapshot, and numeric point contracts flow
+through `DashboardService` and a provider registry. Built-in providers aggregate
+only bounded `MetricsStore` and scheduler data. The Windows device provider
+uses the existing device interface, and the Home Assistant provider exposes
+only health and exact entity-state reads.
+
+`DashboardService` validates layouts and provider options, deduplicates
+identical card requests, applies separate four-local/two-external concurrency
+limits and timeouts, and retains last-good snapshots in memory. One Qt page
+timer selects due card IDs while the page is visible; collection runs in
+cancellable workers, and immutable snapshots update only affected widgets.
+Provider errors are normalized without returning exception content.
+
+Device and external reads re-enter `PermissionManager` through
+`authorize_scopes` using stable non-executing dashboard principals. Remote
+providers are stopped before adapter invocation when the offline lock is on.
+Home Assistant tokens are referenced from `SecretVault`, never connection
+settings. Lifecycle and first-category block events are audited without card
+titles, options, values, or response payloads; routine polling is summarized by
+diagnostic counters.
+
+External history is connection-level opt-in. `dashboard_metric_samples` stores
+only timestamp, connection ID, generic metric ID, a SHA-256 series key, finite
+numeric value, and state. Text values are rejected, retention is bounded to
+1–90 days, and connection deletion clears samples and vault references.
+
 The implemented context-aware routing and planning roadmap is documented in
 `docs/SMART_ASSISTANT_IMPLEMENTATION_PLAN.md`. It records the design history
 for semantic retrieval, context snapshots, intent interpretation, preference
@@ -105,6 +158,10 @@ migration. Stable skill IDs are never inferred from display names.
 - `assistant.scheduling` owns trigger calculation, durable definitions and runs,
   background authorization, notification delivery, leasing, approvals, and the
   background runtime. It invokes skills only through `ExecutionEngine`.
+- `assistant.dashboard` owns metric contracts, providers, registry, validated
+  layout/connection/sample storage, permission-aware refresh, history, and
+  diagnostics. Qt dashboard widgets depend on it only through
+  `DesktopController`.
 
 The dependency direction remains contracts/interfaces -> policy and domain
 services -> orchestration -> UI/composition. Model output never calls platform

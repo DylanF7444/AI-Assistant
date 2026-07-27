@@ -124,8 +124,62 @@ def test_daily_message_with_ambiguous_time_asks_for_am_or_pm():
     result = DeterministicRouter().route("say good morning every day at 8")
 
     assert result.intent is None
-    assert result.clarification == (
-        "What time should the daily message run, including AM or PM?"
+    assert result.clarification == ("What time should the daily message run, including AM or PM?")
+
+
+def test_daily_amazon_deals_route_to_a_durable_background_web_action():
+    result = DeterministicRouter().route("Show me daily tech deals at 8 am from amazon")
+
+    assert not result.needs_llm
+    assert result.clarification is None
+    assert result.intent.name == "core.schedule"
+    assert result.intent.arguments == {
+        "operation": "create_action",
+        "name": "Daily Amazon tech deals",
+        "recurrence": {
+            "frequency": "daily",
+            "interval": 1,
+            "local_time": "08:00:00",
+        },
+        "skill_id": "web.headless_read",
+        "arguments": {
+            "url": "https://www.amazon.com/s?k=daily+tech+deals",
+            "max_characters": 12000,
+            "max_links": 30,
+            "timeout_seconds": 30,
+            "wait_after_load_ms": 750,
+            "extract": "tech deals",
+            "max_items": 5,
+        },
+        "delivery_mode": "always",
+    }
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Show me tech deals from Amazon every day at 8 am",
+        "Every day at 8 am, show me tech deals from Amazon",
+        "At 8 am every day show me tech deals from Amazon",
+        "Get daily tech deals from Amazon at 8 am",
+        "Show me Amazon tech deals every day at 8 am",
+        "Show me tech deals from Amazon at 8 am every day",
+        "Find me tech deals on Amazon daily at 8 AM",
+        "Send me Amazon tech deals daily at 8 AM",
+        "Every morning at eight a.m., display tech deals from Amazon",
+    ],
+)
+def test_daily_web_action_maps_word_order_and_voice_time_variations(text):
+    result = DeterministicRouter().route(text)
+
+    assert not result.needs_llm
+    assert result.clarification is None
+    assert result.intent.name == "core.schedule"
+    assert result.intent.arguments["recurrence"]["local_time"] == "08:00:00"
+    assert result.intent.arguments["skill_id"] == "web.headless_read"
+    assert result.intent.arguments["arguments"]["extract"] == "tech deals"
+    assert result.intent.arguments["arguments"]["url"] == (
+        "https://www.amazon.com/s?k=daily+tech+deals"
     )
 
 
@@ -749,6 +803,21 @@ def test_light_and_dark_mode_routes():
 
 def test_knowledge_question_is_not_misrouted_to_calculator():
     result = DeterministicRouter().route("What is the capital of France?")
+    assert result.needs_llm
+    assert result.intent.name == "planner.goal"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "How do you work?",
+        "Explain this skill.",
+        "How are requests handled by the assistant?",
+    ],
+)
+def test_application_knowledge_questions_route_to_open_ended_planner(text):
+    result = DeterministicRouter().route(text)
+
     assert result.needs_llm
     assert result.intent.name == "planner.goal"
 

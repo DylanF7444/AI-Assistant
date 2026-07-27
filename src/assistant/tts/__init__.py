@@ -1,1 +1,1 @@
-"""Offline speech synthesis providers."""
+"""Speech synthesis providers."""

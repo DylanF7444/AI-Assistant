@@ -25,7 +25,9 @@ powershell -ExecutionPolicy Bypass -File scripts/build.ps1
 ```
 
 The core and test suite do not need network access. Desktop, audio, STT, local
-LLM, and TTS providers are optional and loaded only when configured.
+LLM, and TTS providers are optional and loaded only when configured. Speech can
+use local Piper voice files or ElevenLabs voice/model IDs; ElevenLabs remains
+disabled under the global offline lock.
 
 Read JavaScript-rendered public pages and extract matching result cards without
 opening a user-visible browser:
@@ -45,6 +47,17 @@ User-authored Markdown playbooks can guide multi-step planning with natural
 language instructions and optional registered skill IDs. Playbooks remain
 planning guidance: every resulting call still uses the normal typed skill,
 permission, confirmation, and audit pipeline.
+
+The desktop Extension Hub can browse a configured HTTPS catalog and install
+compatible signed skill packages. Platform discovery never enables an extension
+or grants it permissions; see `docs/EXTENSION_HUB.md` for the catalog contract.
+
+The full desktop has two primary screens: a customizable metrics Dashboard and
+the conversational Assistant. The Dashboard includes local assistant and
+automation cards, permission-gated Windows device metrics, and exact,
+read-only Home Assistant entity cards. External access honors the offline lock,
+keeps credentials in the encrypted vault, and stores numeric trend history only
+when the user enables it for a connection.
 
 ## Safety model
 

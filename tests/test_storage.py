@@ -4,6 +4,7 @@ from sqlalchemy import inspect
 
 from assistant.storage.database import (
     AuditStore,
+    DashboardMetricSampleRow,
     Database,
     KnowledgeBaseRow,
     MacroRow,
@@ -50,7 +51,7 @@ def test_upgrade_from_schema_version_one(tmp_path: Path):
     MacroRow.__table__.drop(database.engine)
     database.migrate()
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 8
+        assert session.get(SchemaVersionRow, 1).version == 9
     assert inspect(database.engine).has_table("macros")
 
 
@@ -108,7 +109,7 @@ def test_upgrade_from_schema_version_three_adds_knowledge_bases(tmp_path: Path):
 
     assert inspect(database.engine).has_table("knowledge_bases")
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 8
+        assert session.get(SchemaVersionRow, 1).version == 9
 
 
 def test_upgrade_from_schema_version_four_adds_vector_items(tmp_path: Path):
@@ -122,7 +123,7 @@ def test_upgrade_from_schema_version_four_adds_vector_items(tmp_path: Path):
 
     assert inspect(database.engine).has_table("vector_items")
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 8
+        assert session.get(SchemaVersionRow, 1).version == 9
 
 
 def test_upgrade_from_schema_version_five_adds_memory_items(tmp_path: Path):
@@ -136,4 +137,20 @@ def test_upgrade_from_schema_version_five_adds_memory_items(tmp_path: Path):
 
     assert inspect(database.engine).has_table("memory_items")
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 8
+        assert session.get(SchemaVersionRow, 1).version == 9
+
+
+def test_upgrade_from_schema_version_eight_adds_dashboard_metric_samples(
+    tmp_path: Path,
+):
+    database = Database(f"sqlite:///{tmp_path / 'old.db'}")
+    database.migrate()
+    with database.session() as session:
+        session.get(SchemaVersionRow, 1).version = 8
+    DashboardMetricSampleRow.__table__.drop(database.engine)
+
+    database.migrate()
+
+    assert inspect(database.engine).has_table("dashboard_metric_samples")
+    with database.session() as session:
+        assert session.get(SchemaVersionRow, 1).version == 9

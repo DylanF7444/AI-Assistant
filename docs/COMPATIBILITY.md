@@ -9,4 +9,5 @@
 | faster-whisper | 1.1+ |
 | Ollama | local `/api/generate` with JSON Schema format |
 | Piper | maintained CLI accepting ONNX voice models |
+| ElevenLabs | HTTPS text-to-speech API with selectable voice and model IDs |
 | Database | SQLite schema version 3 |

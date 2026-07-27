@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -23,7 +24,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parse_args(argv)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] == ["--isolated-skill-worker"]:
+        from assistant.skills.worker import main as run_skill_worker
+
+        return run_skill_worker(arguments[1:])
+    args = _parse_args(arguments)
     settings = Settings(data_dir=args.data_dir) if args.data_dir is not None else None
     container = build_container(settings)
     with offline_lock(container.settings.offline_lock):

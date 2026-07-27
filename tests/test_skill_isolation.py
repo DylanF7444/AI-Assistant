@@ -20,6 +20,7 @@ class Input(BaseModel):
     text: str
     delay: float = 0
     network_test: bool = False
+    environment_name: str | None = None
 
 class Output(BaseModel):
     echoed: str
@@ -41,6 +42,9 @@ class EchoSkill(Skill):
         args = self.validate(call.arguments)
         await asyncio.sleep(args.delay)
         echoed = args.text
+        if args.environment_name:
+            import os
+            echoed = os.environ.get(args.environment_name, "missing")
         if args.network_test:
             import socket
             try:
@@ -137,6 +141,25 @@ async def test_isolated_skill_worker_blocks_outbound_network(tmp_path):
     assert result.data == {"echoed": "blocked"}
 
 
+@pytest.mark.asyncio
+async def test_isolated_skill_worker_does_not_inherit_parent_secrets(tmp_path, monkeypatch):
+    package, public = make_package(tmp_path)
+    registry = SkillRegistry(tmp_path / "installed", trusted_signing_keys={"test-key": public})
+    registry.install(package)
+    skill = registry.load_installed("test.isolated", timeout_seconds=5)
+    monkeypatch.setenv("ASSISTANT_TEST_SECRET", "must-not-cross-worker-boundary")
+    call = SkillCall(
+        skill_id="test.isolated",
+        arguments={"text": "environment", "environment_name": "ASSISTANT_TEST_SECRET"},
+        permission_context=PermissionContext(session_id="test"),
+    )
+
+    result = await skill.execute(call, __import__("asyncio").Event())
+
+    assert result.status == ResultStatus.COMPLETED
+    assert result.data == {"echoed": "missing"}
+
+
 def test_skill_update_requires_review_for_added_capabilities(tmp_path):
     package, public = make_package(tmp_path)
     registry = SkillRegistry(tmp_path / "installed", trusted_signing_keys={"test-key": public})
@@ -171,3 +194,16 @@ def test_skill_update_requires_review_for_added_capabilities(tmp_path):
     updated, added = registry.update(update, permission_reviewed=True)
     assert updated.version == "1.1.0"
     assert added == ("filesystem.read",)
+
+
+def test_frozen_build_relaunches_the_application_in_worker_mode(tmp_path, monkeypatch):
+    package, public = make_package(tmp_path)
+    registry = SkillRegistry(tmp_path / "installed", trusted_signing_keys={"test-key": public})
+    registry.install(package)
+    skill = registry.load_installed("test.isolated")
+    monkeypatch.setattr("assistant.skills.subprocess.sys.frozen", True, raising=False)
+
+    command = skill._worker_command()
+
+    assert command[:2] == (__import__("sys").executable, "--isolated-skill-worker")
+    assert command[-2:] == (str(skill.package_dir), skill.manifest.entry_point)

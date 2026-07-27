@@ -171,3 +171,26 @@ class SkillRegistry:
         )
         self.register(isolated, enabled=False)
         return isolated
+
+    def load_all_installed(
+        self,
+        *,
+        timeout_seconds: float = 30,
+        memory_limit_mb: int = 256,
+    ) -> dict[str, str]:
+        """Load valid installed packages disabled, returning per-package failures."""
+        if self.install_dir is None or not self.install_dir.is_dir():
+            return {}
+        failures: dict[str, str] = {}
+        for package_dir in sorted(self.install_dir.iterdir(), key=lambda path: path.name):
+            if not package_dir.is_dir() or not (package_dir / "manifest.json").is_file():
+                continue
+            try:
+                self.load_installed(
+                    package_dir.name,
+                    timeout_seconds=timeout_seconds,
+                    memory_limit_mb=memory_limit_mb,
+                )
+            except Exception as error:
+                failures[package_dir.name] = str(error)
+        return failures

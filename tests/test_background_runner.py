@@ -20,6 +20,7 @@ from assistant.policy.file_access import FileAccessPolicy
 from assistant.policy.permissions import GrantType
 from assistant.scheduling.authoring import ScheduleAuthoringService
 from assistant.scheduling.contracts import (
+    DeliveryPolicy,
     OneTimeTrigger,
     RecurrenceTrigger,
     ScheduleRunState,
@@ -186,6 +187,7 @@ def test_authorized_low_risk_fixed_action_runs_through_engine(settings):
         trigger=_due_now(),
         skill_id="core.calculator",
         arguments={"expression": "6 * 7"},
+        delivery_policy=DeliveryPolicy(on_success="summary"),
     )
 
     assert asyncio.run(container.scheduler.run_once()) == 1
@@ -194,6 +196,7 @@ def test_authorized_low_risk_fixed_action_runs_through_engine(settings):
     assert run.state == ScheduleRunState.SUCCEEDED
     assert run.result is not None
     assert run.result["data"]["value"] == 42
+    assert container.notification_center.history()[-1].message == "The result is 42."
     assert container.audit.query(event_type="skill_execution")[0]["skill_id"] == "core.calculator"
     assert container.audit.query(event_type="schedule_created")
     assert container.audit.query(event_type="schedule_authorized")

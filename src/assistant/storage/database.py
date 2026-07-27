@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+from collections import Counter
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -137,6 +139,17 @@ class MetricRow(Base):
     duration_ms: Mapped[float | None] = mapped_column(nullable=True)
     value: Mapped[float | None] = mapped_column(nullable=True)
     outcome: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+
+class DashboardMetricSampleRow(Base):
+    __tablename__ = "dashboard_metric_samples"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    connection_id: Mapped[str] = mapped_column(String(36), index=True)
+    metric_id: Mapped[str] = mapped_column(String(200), index=True)
+    series_key: Mapped[str] = mapped_column(String(64), index=True)
+    value: Mapped[float] = mapped_column(Float, nullable=False)
+    state: Mapped[str] = mapped_column(String(30), nullable=False)
 
 
 class KnowledgeBaseRow(Base):
@@ -280,7 +293,7 @@ class BackgroundAuthorizationRow(Base):
 
 
 class Database:
-    CURRENT_SCHEMA_VERSION = 8
+    CURRENT_SCHEMA_VERSION = 9
 
     def __init__(self, url: str) -> None:
         self.url = url
@@ -351,6 +364,8 @@ class Database:
                             "ADD COLUMN machine_identity VARCHAR(64) NOT NULL DEFAULT ''"
                         )
                     )
+            if version == 8:
+                DashboardMetricSampleRow.__table__.create(self.engine, checkfirst=True)
             version += 1
         session.get(SchemaVersionRow, 1).version = version  # type: ignore[union-attr]
 
@@ -665,17 +680,80 @@ class MetricsStore:
     def recent(self, limit: int = 500) -> list[dict[str, Any]]:
         with self.database.session() as session:
             rows = session.scalars(select(MetricRow).order_by(MetricRow.id.desc()).limit(limit))
-            return [
-                {
-                    "timestamp": row.timestamp,
-                    "correlation_id": row.correlation_id,
-                    "stage": row.stage,
-                    "duration_ms": row.duration_ms,
-                    "value": row.value,
-                    "outcome": row.outcome,
-                }
-                for row in rows
-            ]
+            return [self._value(row) for row in rows]
+
+    def query(
+        self,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        stages: tuple[str, ...] = (),
+        limit: int = 5000,
+    ) -> list[dict[str, Any]]:
+        bounded_limit = max(1, min(limit, 50_000))
+        with self.database.session() as session:
+            statement = select(MetricRow)
+            if since is not None:
+                statement = statement.where(MetricRow.timestamp >= since)
+            if until is not None:
+                statement = statement.where(MetricRow.timestamp <= until)
+            if stages:
+                statement = statement.where(MetricRow.stage.in_(stages))
+            rows = session.scalars(
+                statement.order_by(MetricRow.id.desc()).limit(bounded_limit)
+            )
+            return [self._value(row) for row in rows]
+
+    def outcome_counts(
+        self,
+        *,
+        since: datetime,
+        stage: str,
+        limit: int = 5000,
+    ) -> dict[str, int]:
+        rows = self.query(since=since, stages=(stage,), limit=limit)
+        return dict(Counter(str(row["outcome"]) for row in rows if row["outcome"]))
+
+    def duration_summary(
+        self,
+        *,
+        since: datetime,
+        stage: str,
+        limit: int = 5000,
+    ) -> dict[str, float | int]:
+        durations = sorted(
+            float(row["duration_ms"])
+            for row in self.query(since=since, stages=(stage,), limit=limit)
+            if row["duration_ms"] is not None
+        )
+        if not durations:
+            return {"count": 0, "average": 0.0, "p50": 0.0, "p95": 0.0}
+
+        def percentile(value: float) -> float:
+            index = max(0, math.ceil(value * len(durations)) - 1)
+            return durations[index]
+
+        return {
+            "count": len(durations),
+            "average": sum(durations) / len(durations),
+            "p50": percentile(0.5),
+            "p95": percentile(0.95),
+        }
+
+    def latest(self, *, stages: tuple[str, ...] = ()) -> dict[str, Any] | None:
+        values = self.query(stages=stages, limit=1)
+        return values[0] if values else None
+
+    @staticmethod
+    def _value(row: MetricRow) -> dict[str, Any]:
+        return {
+            "timestamp": row.timestamp,
+            "correlation_id": row.correlation_id,
+            "stage": row.stage,
+            "duration_ms": row.duration_ms,
+            "value": row.value,
+            "outcome": row.outcome,
+        }
 
     def clear(self) -> None:
         with self.database.session() as session:

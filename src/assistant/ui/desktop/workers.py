@@ -17,14 +17,41 @@ class AsyncWorker(QThread):
     def __init__(self, coroutine: Any) -> None:
         super().__init__()
         self.coroutine = coroutine
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._task: asyncio.Task | None = None
+        self._cancel_requested = False
+
+    def cancel(self) -> None:
+        self._cancel_requested = True
+        loop = self._loop
+        task = self._task
+        if loop is not None and task is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(task.cancel)
 
     def run(self) -> None:
+        loop = asyncio.new_event_loop()
+        self._loop = loop
+        asyncio.set_event_loop(loop)
+        task = loop.create_task(self.coroutine)
+        self._task = task
+        if self._cancel_requested:
+            task.cancel()
         try:
-            self.complete.emit(asyncio.run(self.coroutine))
+            self.complete.emit(loop.run_until_complete(task))
         except asyncio.CancelledError:
             self.cancelled.emit()
         except Exception as error:
             self.failed.emit(str(error))
+        finally:
+            pending = asyncio.all_tasks(loop)
+            for pending_task in pending:
+                pending_task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            self._task = None
+            self._loop = None
+            asyncio.set_event_loop(None)
+            loop.close()
 
 
 class PassiveVoiceWorker(QThread):
@@ -64,11 +91,7 @@ class PassiveVoiceWorker(QThread):
             publish_events=False,
             on_transcript=self._show_transcript,
         )
-        if (
-            self._stop_requested
-            or transcript is None
-            or not transcript.normalized_text.strip()
-        ):
+        if self._stop_requested or transcript is None or not transcript.normalized_text.strip():
             return
         spoken = transcript.normalized_text.strip()
         if await self.container.orchestrator.consume_persistent_voice_interrupt(spoken):

@@ -70,3 +70,52 @@ async def test_completion_debug_is_silent_when_disabled(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+@pytest.mark.asyncio
+async def test_completion_retries_truncated_json_with_concise_output_instructions(monkeypatch):
+    payloads = []
+    responses = iter(
+        (
+            {
+                "response": (
+                    '{"disposition":"answer","skill_id":"web.headless_read",'
+                    '"arguments":{"url":"https://slickdeals.net"},'
+                    '"answer":"I will fetch it shortly. #Deals'
+                ),
+                "done": True,
+                "done_reason": "length",
+            },
+            {
+                "response": (
+                    '{"disposition":"skill","skill_id":"web.headless_read",'
+                    '"arguments":{"url":"https://slickdeals.net"},'
+                    '"answer":null,"confidence":0.9,"clarification":null}'
+                ),
+                "done": True,
+                "done_reason": "stop",
+            },
+        )
+    )
+
+    def fake_urlopen(request, timeout):
+        assert timeout == 3
+        payloads.append(json.loads(request.data))
+        return FakeHttpResponse(next(responses))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = OllamaProvider("test-model", max_tokens=256, max_prompt_chars=1000)
+
+    result = await provider.structured_completion(
+        "Choose a skill for the request.",
+        {"type": "object"},
+        timeout_seconds=3,
+    )
+
+    assert result["disposition"] == "skill"
+    assert result["skill_id"] == "web.headless_read"
+    assert len(payloads) == 2
+    assert payloads[0]["options"]["num_predict"] == 256
+    assert payloads[1]["options"]["num_predict"] == 512
+    assert "previous response was truncated or malformed" in payloads[1]["prompt"]
+    assert "Do not include commentary, emoji, or hashtags" in payloads[1]["prompt"]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING
+from urllib.parse import urlencode
 
 from assistant.contracts import Intent
 from assistant.router.normalization import spoken_number
@@ -12,21 +13,36 @@ if TYPE_CHECKING:
 
 
 def _clock_time(value: str) -> str | None:
-    match = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)", value.strip())
+    value = value.strip().casefold().replace(".", "")
+    value = re.sub(r"\b([ap])\s+m\b", r"\1m", value)
+    match = re.fullmatch(
+        r"(?P<hour>\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|"
+        r"eleven|twelve)(?::(?P<minute>\d{2}))?\s*(?P<period>am|pm)",
+        value,
+    )
     if match is None:
         return None
-    hour = int(match.group(1))
-    minute = int(match.group(2) or 0)
+    try:
+        hour = int(spoken_number(match.group("hour")))
+    except ValueError:
+        return None
+    minute = int(match.group("minute") or 0)
     if not 1 <= hour <= 12 or minute > 59:
         return None
-    if match.group(3) == "pm" and hour != 12:
+    if match.group("period") == "pm" and hour != 12:
         hour += 12
-    elif match.group(3) == "am" and hour == 12:
+    elif match.group("period") == "am" and hour == 12:
         hour = 0
     return f"{hour:02d}:{minute:02d}:00"
 
 
-_DAILY_CADENCE = r"(?:every\s+day|everyday|each\s+day|daily)"
+_DAILY_CADENCE = (
+    r"(?:every\s+day|everyday|each\s+day|daily|every\s+morning|each\s+morning)"
+)
+_CLOCK_VALUE = (
+    r"(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
+    r"(?::\d{2})?\s*(?:a\.?\s*m\.?|p\.?\s*m\.?)"
+)
 
 
 def _daily_notification(message: str, clock_value: str) -> RouteResult:
@@ -56,6 +72,124 @@ def _daily_notification(message: str, clock_value: str) -> RouteResult:
     )
 
 
+def _daily_web_action(
+    *,
+    extract: str,
+    clock_value: str,
+    website: str,
+    router: DeterministicRouter,
+) -> RouteResult:
+    local_time = _clock_time(clock_value)
+    if local_time is None:
+        return RouteResult(
+            None,
+            clarification="What time should the daily web update run, including AM or PM?",
+        )
+    website = website.strip()
+    url = router._website_url(website)
+    if url is None:
+        return RouteResult(
+            None,
+            clarification="Which website should I use for the daily update?",
+        )
+    extract = extract.strip()
+    if website.casefold() == "amazon":
+        url = "https://www.amazon.com/s?" + urlencode({"k": f"daily {extract}"})
+    name = f"Daily {website.title()} {extract}"[:200]
+    return RouteResult(
+        Intent(
+            name="core.schedule",
+            arguments={
+                "operation": "create_action",
+                "name": name,
+                "recurrence": {
+                    "frequency": "daily",
+                    "interval": 1,
+                    "local_time": local_time,
+                },
+                "skill_id": "web.headless_read",
+                "arguments": {
+                    "url": url,
+                    "max_characters": 12000,
+                    "max_links": 30,
+                    "timeout_seconds": 30,
+                    "wait_after_load_ms": 750,
+                    "extract": extract,
+                    "max_items": 5,
+                },
+                "delivery_mode": "always",
+            },
+            confidence=0.99,
+            source="rule",
+        )
+    )
+
+
+def _route_daily_web_action(
+    routed: str,
+    router: DeterministicRouter,
+) -> RouteResult | None:
+    if re.search(rf"\b{_DAILY_CADENCE}\b", routed) is None:
+        return None
+    if re.search(r"\b(?:show|give|get|find|send|display)\b", routed) is None:
+        return None
+    time_match = re.search(rf"\bat\s+(?P<time>{_CLOCK_VALUE})\b", routed)
+    if time_match is None:
+        return RouteResult(
+            None,
+            clarification="What time should the daily web update run, including AM or PM?",
+        )
+
+    website = next(
+        (
+            name
+            for name in sorted(router.WEBSITE_APPLICATIONS, key=len, reverse=True)
+            if re.search(rf"\b{re.escape(name)}\b", routed)
+        ),
+        None,
+    )
+    if website is None:
+        source_match = re.search(
+            r"\b(?:from|on)\s+(?P<website>https://\S+|[a-z0-9.-]+\.[a-z]{2,})\b",
+            routed,
+        )
+        website = source_match.group("website") if source_match else None
+    if website is None:
+        return RouteResult(
+            None,
+            clarification="Which website should I use for the daily update?",
+        )
+
+    extract = re.sub(
+        r"\b(?:show|give|get|find|send|display)\s+(?:me\s+)?",
+        " ",
+        routed,
+        count=1,
+    )
+    extract = re.sub(rf"\b{_DAILY_CADENCE}\b", " ", extract)
+    extract = re.sub(rf"\bat\s+{_CLOCK_VALUE}\b", " ", extract)
+    extract = re.sub(
+        rf"\b(?:from|on)\s+(?:the\s+)?{re.escape(website)}\b",
+        " ",
+        extract,
+    )
+    extract = re.sub(rf"\b{re.escape(website)}\b", " ", extract)
+    extract = re.sub(r"\b(?:from|on)\b", " ", extract)
+    extract = re.sub(r"[.,;:]+", " ", extract)
+    extract = " ".join(extract.split()).strip(" -")
+    if not extract:
+        return RouteResult(
+            None,
+            clarification=f"What should I retrieve from {website.title()} each day?",
+        )
+    return _daily_web_action(
+        extract=extract,
+        clock_value=time_match.group("time"),
+        website=website,
+        router=router,
+    )
+
+
 class ProductivityHandler:
     def route(
         self,
@@ -73,6 +207,8 @@ class ProductivityHandler:
         for pattern in daily_message_patterns:
             if match := re.fullmatch(pattern, routed):
                 return _daily_notification(match.group("message"), match.group("time"))
+        if daily_web_action := _route_daily_web_action(routed, router):
+            return daily_web_action
         if match := re.fullmatch(
             r"remind me (?:every\s+|each\s+)?(day|everyday|daily|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday) at (.+?) to (.+)",
             routed,

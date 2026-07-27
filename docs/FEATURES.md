@@ -1,6 +1,6 @@
 # Feature Catalog
 
-Updated July 16, 2026. This catalog lists the built-in features registered by
+Updated July 25, 2026. This catalog lists the built-in features registered by
 the application container. Optional integrations are implemented but require
 the relevant setting, credential, local service, or device to be configured.
 
@@ -52,18 +52,31 @@ the relevant setting, credential, local service, or device to be configured.
   settings, skills, permissions, audit, privacy, diagnostics, applications,
   macros, models, and benchmark views. Closing hides to the tray so background
   activation remains available.
+- Persisted Dashboard and Assistant primary screens, tray actions and shortcuts
+  for each, a responsive one-to-four-column metric grid, manual and per-card
+  refresh, and staged add/remove/disable/reorder/resize/title/presentation
+  customization.
+- Privacy-bounded local assistant and automation metrics; default-deny CPU,
+  memory, storage, and battery cards; and read-only Home Assistant entity cards
+  with exact origin/entity scopes, encrypted tokens, offline/stale behavior,
+  connection health controls, and optional finite-numeric trend retention.
 - A live, bounded decision/action/result trace and separate background active
   indicator that do not expose private model chain-of-thought or take over the
   foreground command state.
 - Text input, push-to-talk, keyword/clap, persistent voice, and configurable
-  local ONNX wake-word activation, plus streaming STT, optional local Piper TTS,
-  cancellation, response-detail modes, and privacy controls.
+  local ONNX wake-word activation, plus streaming STT, provider-selectable local
+  Piper or offline-lock-aware ElevenLabs TTS, voice-file discovery, cancellation,
+  response-detail modes, and privacy controls.
 - Deterministic routing plus schema-constrained local planner support for
   ambiguous or multi-step requests.
 - Default-deny scoped permissions, action-bound confirmations, audit logging,
   emergency stop, rollback where supported, and file access allow/block policy.
 - Signed skill-package validation, isolated worker execution, update review for
   new capabilities, macro composition, and offline lock enforcement.
+- A local Extension Hub for searching a configurable HTTPS platform catalog,
+  reviewing publisher/risk/permission metadata, and installing compatible
+  packages only after digest, archive, trusted-signature, API, and manifest
+  verification. Catalog installations remain disabled and permissionless.
 - User-authored Markdown playbooks with validated YAML frontmatter, natural
   language workflow instructions, per-skill-ID guidance, enable/disable and
   import/edit/delete controls, semantic retrieval, and unavailable-skill

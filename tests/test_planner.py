@@ -14,6 +14,7 @@ from assistant.skills.builtin import (
     manifest,
 )
 from assistant.skills.network import HeadlessReadSkill
+from assistant.skills.scheduling import ScheduleSkill
 from assistant.skills.windows import (
     ApplicationWindowSkill,
     FileOperationSkill,
@@ -229,6 +230,108 @@ async def test_planner_retries_fetch_promise_instead_of_echoing_it_as_an_answer(
 
 
 @pytest.mark.asyncio
+async def test_planner_executes_concrete_skill_call_mislabeled_as_progress_answer():
+    provider = FakeProvider(
+        {
+            "disposition": "answer",
+            "skill_id": "web.headless_read",
+            "arguments": {
+                "url": "https://www.amazon.com/s?k=tech+deals&ref=nb_sb_noss_2",
+                "max_characters": 5000,
+                "max_links": 10,
+                "timeout_seconds": 60.0,
+                "wait_after_load_ms": 5000,
+                "extract": "deal,product,listing",
+            },
+            "answer": "Showing Amazon tech deals... Please wait.",
+            "confidence": 0.974,
+            "clarification": "",
+        }
+    )
+    planner = LocalPlanner(
+        provider,
+        SkillRetriever((HeadlessReadSkill(object()).manifest,)),
+    )
+    text = "Show me amazon tech deals"
+
+    decision = await planner.plan_from_interpretation(
+        text,
+        interpretation=UserIntentInterpretation(
+            user_goal="Show me Amazon tech deals",
+            request_type="local_action",
+            explicit_requests=[text],
+            confidence=0.974,
+        ),
+        context=ContextSnapshot(request_text=text, session_id="s1"),
+        retrieved=(),
+    )
+
+    assert provider.calls == 1
+    assert decision.intent is not None
+    assert decision.intent.name == "web.headless_read"
+    assert decision.intent.arguments["url"].startswith("https://www.amazon.com/")
+    assert decision.intent.arguments["extract"] == "deal,product,listing"
+
+
+@pytest.mark.asyncio
+async def test_planner_rejects_a_false_claim_that_a_recurring_fetch_was_created():
+    first = {
+        "disposition": "answer",
+        "skill_id": "web.fetch",
+        "arguments": {
+            "url": "https://www.amazon.com/s?k=daily+tech+deals",
+            "max_characters": 50000,
+            "title": "Daily Tech Deals from Amazon at 8 AM",
+        },
+        "answer": (
+            "I have fetched the daily tech deals page from Amazon. The notification "
+            "titled 'Daily Tech Deals from Amazon at 8 AM' will be shown to remind you."
+        ),
+        "confidence": 0.93,
+        "clarification": None,
+    }
+    second = {
+        "disposition": "skill",
+        "skill_id": "core.schedule",
+        "arguments": {
+            "operation": "create_action",
+            "name": "Daily Amazon tech deals",
+            "recurrence": {
+                "frequency": "daily",
+                "local_time": "08:00:00",
+            },
+            "skill_id": "web.headless_read",
+            "arguments": {
+                "url": "https://www.amazon.com/s?k=daily+tech+deals",
+                "extract": "tech deals",
+            },
+            "delivery_mode": "always",
+        },
+        "answer": None,
+        "confidence": 0.98,
+        "clarification": None,
+    }
+    provider = FakeProvider([first, second])
+    planner = LocalPlanner(
+        provider,
+        SkillRetriever(
+            (
+                ScheduleSkill(object()).manifest,
+                HeadlessReadSkill(object()).manifest,
+            )
+        ),
+    )
+
+    decision = await planner.plan_decision("Show me daily tech deals at 8 am from amazon")
+
+    assert provider.calls == 2
+    assert decision.intent is not None
+    assert decision.intent.name == "core.schedule"
+    assert decision.intent.arguments["operation"] == "create_action"
+    assert "deferred an available skill call" in provider.last_prompt
+
+
+@pytest.mark.asyncio
 async def test_planner_can_answer_a_question_about_using_an_available_skill():
     provider = FakeProvider(
         {
@@ -247,6 +350,124 @@ async def test_planner_can_answer_a_question_about_using_an_available_skill():
     assert provider.calls == 1
     assert decision.intent is not None
     assert decision.intent.name == "conversation.answer"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "How do you work?",
+        "How aware are you of your own inner workings?",
+        "How are requests handled by the assistant?",
+        "Explain this skill.",
+        "What can you do?",
+    ],
+)
+def test_planner_recognizes_application_knowledge_questions(text):
+    assert LocalPlanner._is_application_knowledge_request(text)
+
+
+@pytest.mark.asyncio
+async def test_planner_supplies_trusted_application_context_for_self_knowledge_question():
+    provider = FakeProvider(
+        {
+            "disposition": "answer",
+            "skill_id": "",
+            "arguments": {},
+            "answer": (
+                "I can explain my configured request pipeline, but I cannot inspect hidden "
+                "model activations or unseen runtime state."
+            ),
+            "confidence": 0.98,
+            "clarification": None,
+        }
+    )
+    planner = LocalPlanner(provider, SkillRetriever((CalculatorSkill.manifest,)))
+
+    decision = await planner.plan_decision("How do you work?")
+
+    assert decision.intent is not None
+    assert decision.intent.name == "conversation.answer"
+    assert "Application knowledge:" in provider.last_prompt
+    assert '"request_lifecycle"' in provider.last_prompt
+    assert "does not have subjective self-awareness" in provider.last_prompt
+    assert "Treat requests to explain the app or a skill as conversational" in (
+        provider.last_prompt
+    )
+
+
+@pytest.mark.asyncio
+async def test_interpreted_skill_explanation_gets_live_manifest_and_recent_referent():
+    provider = FakeProvider(
+        {
+            "disposition": "answer",
+            "skill_id": "",
+            "arguments": {},
+            "answer": "File Search searches filenames in an approved folder.",
+            "confidence": 0.96,
+            "clarification": None,
+        }
+    )
+    file_search = FileSearchSkill(FakeFileSystem()).manifest
+    planner = LocalPlanner(
+        provider,
+        SkillRetriever((CalculatorSkill.manifest, file_search)),
+    )
+    text = "Explain this skill."
+    context = ContextSnapshot(
+        request_text=text,
+        session_id="s1",
+        items=[
+            ContextItem(
+                key="session.recent_interactions",
+                title="Recent interactions",
+                value=[
+                    {
+                        "request": "Can you use File Search?",
+                        "response": "File Search is available.",
+                    }
+                ],
+                source="session",
+                summary="One recent interaction.",
+            )
+        ],
+    )
+
+    decision = await planner.plan_from_interpretation(
+        text,
+        interpretation=UserIntentInterpretation(
+            user_goal="Explain the previously mentioned File Search skill",
+            request_type="question",
+            explicit_requests=[text],
+            relevant_context_keys=["session.recent_interactions"],
+            confidence=0.95,
+        ),
+        context=context,
+        retrieved=(),
+    )
+
+    assert decision.intent is not None
+    assert decision.intent.name == "conversation.answer"
+    assert '"id":"windows.file_search"' in provider.last_prompt
+    assert '"permissions":["filesystem.read"]' in provider.last_prompt
+    assert "Can you use File Search?" in provider.last_prompt
+    assert "Live skill directory for capability explanations" in provider.last_prompt
+
+
+def test_application_context_is_omitted_from_unrelated_question_prompt():
+    planner = LocalPlanner(
+        FakeProvider({}),
+        SkillRetriever((CalculatorSkill.manifest,)),
+    )
+    prompt = planner._build_interpretation_prompt(
+        "What is the capital of France?",
+        ContextSnapshot(
+            request_text="What is the capital of France?",
+            session_id="s1",
+        ),
+        (),
+    )
+
+    assert "Application knowledge:" not in prompt
 
 
 @pytest.mark.asyncio

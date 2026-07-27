@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from platformdirs import user_data_path
@@ -15,6 +16,7 @@ class Settings(BaseModel):
     )
     database_name: str = "assistant.db"
     offline_lock: bool = True
+    dashboard_history_retention_days: int = Field(default=7, ge=1, le=90)
     retain_transcripts_days: int = Field(default=0, ge=0)
     diagnostic_audio: bool = False
     voice_activation_mode: Literal["hotkey", "keyword_clap", "persistent"] = "hotkey"
@@ -47,9 +49,19 @@ class Settings(BaseModel):
     openai_codex_model: str = "gpt-5.3-codex"
     anthropic_model: str = "claude-sonnet-4-6"
     search_provider: Literal["duckduckgo", "brave"] = "duckduckgo"
-    tts_provider: str = "piper"
+    extension_catalog_url: str | None = None
+    extension_catalog_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
+    extension_package_max_bytes: int = Field(
+        default=25 * 1024 * 1024,
+        ge=1024,
+        le=100 * 1024 * 1024,
+    )
+    tts_provider: Literal["piper", "elevenlabs"] = "piper"
     piper_executable: Path | None = None
     piper_model: Path | None = None
+    elevenlabs_voice_id: str | None = None
+    elevenlabs_model_id: str = "eleven_flash_v2_5"
+    elevenlabs_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
     tts_speed: float = Field(default=1.0, ge=0.5, le=2.0)
     tts_volume: float = Field(default=1.0, ge=0, le=1)
     tts_output_device: str | None = None
@@ -77,6 +89,19 @@ class Settings(BaseModel):
     notify_on_background_failure: bool = True
     pause_background_while_locked: bool = True
 
+    @field_validator("extension_catalog_url", mode="before")
+    @classmethod
+    def _extension_catalog_must_use_https(cls, value: object) -> object:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        if not normalized:
+            return None
+        parsed = urlparse(normalized)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("extension catalog URL must use HTTPS without embedded credentials")
+        return normalized
+
     @field_validator("voice_activation_keyword")
     @classmethod
     def _keyword_must_not_be_blank(cls, value: str) -> str:
@@ -84,6 +109,29 @@ class Settings(BaseModel):
         if not keyword:
             raise ValueError("voice activation keyword cannot be blank")
         return keyword
+
+    @field_validator("elevenlabs_voice_id", mode="before")
+    @classmethod
+    def _normalize_elevenlabs_voice_id(cls, value: object) -> object:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        if not normalized:
+            return None
+        if not all(character.isalnum() or character in "_-" for character in normalized):
+            raise ValueError("ElevenLabs voice ID contains unsupported characters")
+        return normalized
+
+    @field_validator("elevenlabs_model_id")
+    @classmethod
+    def _validate_elevenlabs_model_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized or not all(
+            character.islower() or character.isdigit() or character == "_"
+            for character in normalized
+        ):
+            raise ValueError("ElevenLabs model ID must use lowercase letters, numbers, or _")
+        return normalized
 
     @model_validator(mode="after")
     def _keyword_clap_mode_needs_trigger(self) -> Settings:

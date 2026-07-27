@@ -31,11 +31,49 @@ restart.
 
 Closing the window hides it to the system tray while voice activation and global
 hotkeys continue running. Double-click the tray icon or choose **Show Companion**
-to restore it. Use **Open Full Assistant** for the management interface,
-**Emergency Stop** to cancel active work, and **Quit** to stop the assistant.
+to restore it. Use **Open Dashboard** or **Open Assistant** to open either
+primary full-window screen, **Emergency Stop** to cancel active work, and
+**Quit** to stop the assistant.
 Quit also stops on-time reminder and automation delivery until the app starts
 again. Select the installer's **Start Local Assistant with Windows** option when
 you want schedules reconciled automatically after sign-in.
+
+## Dashboard
+
+The full window presents Dashboard and Assistant as its two primary screens.
+The last selected primary screen is remembered when the window is hidden and
+restored. Use `Ctrl+1` for Dashboard and `Ctrl+2` for Assistant.
+
+The default Dashboard contains local Assistant status, request outcomes,
+execution latency, automation summary, and recent activity cards. Select
+**Customize** to add, remove, hide, reorder, resize, rename, or change the
+presentation and refresh interval of a card. Changes are staged until **Save**;
+**Cancel** leaves the saved layout untouched, and **Reset to defaults** restores
+the five local cards. The catalog also offers CPU, memory, storage, and battery
+cards. These remain unavailable until the exact read-only `device.read` grant
+is approved from the card.
+
+Select **Connections** to add a Home Assistant base URL and long-lived token,
+test or disable the connection, opt into numeric history, clear its retained
+samples, or remove it. Tokens are kept in the Windows-encrypted secret vault.
+After connecting, add a Home Assistant card and enter one exact entity ID plus
+an optional scalar attribute. The first refresh asks for `integration.read` on
+that entity and `network` on the configured origin. Dashboard cards never call
+Home Assistant services or change devices.
+
+Each card shows its source, last update, and ready, stale, permission, offline,
+empty, or error state. Per-card refresh intervals run only while Dashboard is
+visible; **Refresh** updates all cards immediately while preserving permissions,
+offline checks, timeouts, and concurrency limits. External failures retain the
+last successful value as stale. The global offline lock stops external
+collection before a network request.
+
+External trend storage is off by default and accepts only finite numbers—never
+entity text, attributes, response bodies, or credentials. Configure the
+1–90-day retention in Settings. Clear a connection's samples from
+**Connections**; removing the connection also removes its cards, token, grants,
+and history. Dashboard refresh, timeout, stale, permission, offline, error, and
+sample counters are shown under Diagnostics.
 
 ## Reminders and automations
 
@@ -77,17 +115,38 @@ not wake it from sleep. If a skill, target, policy, schema, permission, risk, or
 machine identity changes, the occurrence stops and the schedule may require
 review rather than silently expanding its authority.
 
-## Local models
+## Voice and local models
 
 - STT: install a faster-whisper model locally or configure a whisper.cpp
   executable and model. CUDA falls back to CPU when unavailable.
 - Planner: install Ollama locally and select an installed quantized model.
   Core deterministic commands continue to work without it.
-- Speech: configure a Piper executable and ONNX voice. Text remains available
-  whenever speech is disabled or unavailable.
+- Speech: choose local Piper or cloud ElevenLabs in Settings. Text remains
+  available whenever speech is disabled or unavailable.
 
 The Models tab can install signed packages from removable media. HTTPS download
 is an explicit optional action. Model packages are verified before activation.
+
+### Voice setup
+
+For fully local speech, select **Piper (local)** as the speech provider. Use the
+**Browse** button beside **Piper executable** to select `piper.exe`, then use the
+voice-model **Browse** button to select the voice's `.onnx` file. The file picker
+starts in detected application, project, or user-data model folders when
+possible. A Piper voice normally has a same-name `.onnx.json` configuration file
+beside it; keep both files together. Save Settings and restart the assistant.
+
+For ElevenLabs, select **ElevenLabs (cloud)**, enter an API key, copy a voice ID
+from **My Voices**, and choose a model ID. `eleven_flash_v2_5` is the low-latency
+default; `eleven_multilingual_v2` favors consistent, high-quality multilingual
+speech; `eleven_v3` supports more expressive speech. The key is encrypted in the
+Windows secret vault and excluded from settings exports. Save Settings and
+restart after changing providers or voice/model IDs.
+
+ElevenLabs sends the response's speech text to the ElevenLabs API and may incur
+account usage charges. It cannot make a request while the global offline lock is
+enabled. Short generated responses use the local TTS cache; clear that cache
+from Privacy when desired.
 
 ## Commands, permissions, and confirmation
 
@@ -177,6 +236,22 @@ organization previews every matched move and requires folder-scoped read/write
 permissions and confirmation before changing files.
 See `docs/FEATURES.md` for the current built-in feature catalog and project
 status.
+
+## Extension Hub
+
+The full desktop includes an **Extension Hub** for browsing a curated extension
+platform. Enter its public HTTPS catalog URL in **Settings**, turn off the
+global offline lock, and restart the application before refreshing the catalog.
+Search or select an entry to review its publisher, version, risk, and declared
+permissions, then choose **Install Extension**.
+
+The hub currently installs compatible API 1.0 skill packages. It verifies the
+catalog digest, safe archive structure, trusted publisher signature, and exact
+manifest metadata before copying anything into the local skill directory. An
+installed extension remains disabled and has no permission grants. Open
+**Skills** to review and enable it; protected actions still request scoped
+permission and confirmation normally. See `docs/EXTENSION_HUB.md` for the
+platform JSON contract and package requirements.
 
 The Diagnostics tab reports model, microphone, GPU, audio, database, and skill
 health with recovery guidance. Exported diagnostic bundles redact secrets and

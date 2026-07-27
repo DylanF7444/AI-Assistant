@@ -5,6 +5,7 @@ import importlib
 import json
 import os
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 from assistant.contracts import SkillCall, SkillResult
@@ -34,9 +35,12 @@ async def run(package_dir: Path, entry_point: str) -> dict:
     return {"ok": True, "result": result.model_dump(mode="json")}
 
 
-def main() -> int:
+def main(argv: Sequence[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
     try:
-        payload = asyncio.run(run(Path(sys.argv[1]), sys.argv[2]))
+        if len(arguments) != 2:
+            raise ValueError("Skill worker requires a package directory and entry point")
+        payload = asyncio.run(run(Path(arguments[0]), arguments[1]))
     except Exception as exc:
         payload = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     sys.stdout.write(json.dumps(payload))

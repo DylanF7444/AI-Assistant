@@ -12,6 +12,7 @@ from assistant.contracts import (
 from assistant.policy.background import background_compatibility
 from assistant.scheduling.contracts import (
     AutonomyPolicy,
+    DeliveryPolicy,
     FixedSkillAction,
     FrozenPlanAction,
     ScheduleDefinition,
@@ -57,6 +58,7 @@ class ScheduleAuthoringService:
         arguments: dict,
         user_id: str = "local-user",
         description: str = "",
+        delivery_policy: DeliveryPolicy | None = None,
     ) -> ScheduleDefinition:
         schedule_id = uuid4()
         call, snapshot, capabilities, targets, risk = self._prepared_call(
@@ -77,6 +79,7 @@ class ScheduleAuthoringService:
             trigger=trigger,
             action=FixedSkillAction(call=call),
             autonomy_policy=self._policy((skill_id,), capabilities, targets, risk, max_steps=1),
+            delivery_policy=delivery_policy or DeliveryPolicy(),
             skill_snapshot=(snapshot,),
             created_at=now,
             updated_at=now,
@@ -91,6 +94,7 @@ class ScheduleAuthoringService:
         macro_name: str,
         user_id: str = "local-user",
         description: str = "",
+        delivery_policy: DeliveryPolicy | None = None,
     ) -> ScheduleDefinition:
         macro = self.macros.get(macro_name)
         schedule_id = uuid4()
@@ -141,6 +145,7 @@ class ScheduleAuthoringService:
                 effective_risk,
                 max_steps=len(calls),
             ),
+            delivery_policy=delivery_policy or DeliveryPolicy(),
             skill_snapshot=tuple(snapshots),
             created_at=now,
             updated_at=now,

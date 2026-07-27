@@ -479,6 +479,96 @@ async def test_daily_message_creates_persistent_schedule_without_using_planner(s
     assert container.notification_center.history() == ()
 
 
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "Show me daily tech deals at 8 am from amazon",
+        "Show me tech deals from Amazon every day at 8 am",
+        "Every day at 8 am, show me tech deals from Amazon",
+        "Send me Amazon tech deals daily at 8 AM",
+    ],
+)
+@pytest.mark.asyncio
+async def test_daily_amazon_deals_create_a_persistent_web_automation(settings, request_text):
+    configured = settings.model_copy(
+        update={
+            "background_actions_enabled": True,
+            "confirmation_overrides": {"skill:core.schedule": False},
+        }
+    )
+    container = build_container(configured)
+    container.orchestrator.planner = BrokenPlanner()
+
+    response, outcome = await container.orchestrator.handle_text(request_text)
+
+    assert outcome.result is not None
+    assert outcome.result.status == ResultStatus.COMPLETED
+    assert outcome.call is not None
+    assert outcome.call.skill_id == "core.schedule"
+    assert "Created schedule Daily Amazon tech deals" in response.display_text
+    schedules = container.schedule_store.list()
+    assert len(schedules) == 1
+    schedule = schedules[0]
+    assert schedule.status.value == "active"
+    assert schedule.trigger.frequency == "daily"
+    assert schedule.trigger.local_time.isoformat() == "08:00:00"
+    assert schedule.action.kind == "fixed_skill"
+    assert schedule.action.call.skill_id == "web.headless_read"
+    assert schedule.action.call.arguments["url"] == (
+        "https://www.amazon.com/s?k=daily+tech+deals"
+    )
+    assert schedule.action.call.arguments["extract"] == "tech deals"
+    assert schedule.delivery_policy.on_success == "always"
+    assert container.notification_center.history() == ()
+
+
+@pytest.mark.asyncio
+async def test_daily_web_automation_requests_confirmation_then_creates_schedule(settings):
+    container = build_container(settings)
+    container.orchestrator.planner = BrokenPlanner()
+
+    prepared_response, prepared = await container.orchestrator.handle_text(
+        "Show me tech deals from Amazon every day at 8 am"
+    )
+
+    assert prepared_response.response_type == ResponseType.CONFIRMATION
+    assert prepared.confirmation is not None
+    assert prepared.call is not None
+    assert prepared.call.skill_id == "core.schedule"
+    assert container.schedule_store.list() == ()
+
+    completed_response, completed = await container.orchestrator.handle_text("yes")
+
+    assert completed.result is not None
+    assert completed.result.status == ResultStatus.COMPLETED
+    assert "Created schedule Daily Amazon tech deals" in completed_response.display_text
+    assert len(container.schedule_store.list()) == 1
+
+
+@pytest.mark.asyncio
+async def test_complete_schedule_request_replaces_stale_planner_clarification(settings):
+    container = build_container(settings)
+    container.orchestrator.planner = BrokenPlanner()
+    container.orchestrator._set_pending_clarification(
+        original_text="Show me daily tech deals at 8 am from amazon",
+        clarification=(
+            "I could not map the next step to a registered skill. "
+            "What exact outcome and targets should I use to build the plan?"
+        ),
+        session_id="desktop",
+    )
+
+    response, outcome = await container.orchestrator.handle_text(
+        "Show me tech deals from Amazon every day at 8 am"
+    )
+
+    assert response.response_type == ResponseType.CONFIRMATION
+    assert outcome.confirmation is not None
+    assert outcome.call is not None
+    assert outcome.call.skill_id == "core.schedule"
+    assert outcome.call.arguments["skill_id"] == "web.headless_read"
+
+
 @pytest.mark.asyncio
 async def test_naturally_worded_launch_goal_executes_selected_skill(settings, tmp_path):
     settings.confirmation_overrides = {"skill:windows.launcher": False}

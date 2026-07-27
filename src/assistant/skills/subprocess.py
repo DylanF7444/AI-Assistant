@@ -14,6 +14,27 @@ from assistant.contracts import SkillCall, SkillManifest, SkillResult
 from assistant.skills.base import Skill
 from assistant.skills.job import WindowsJob
 
+_WORKER_ENVIRONMENT_KEYS = (
+    "SYSTEMROOT",
+    "WINDIR",
+    "TEMP",
+    "TMP",
+    "PYTHONIOENCODING",
+    "PYTHONUTF8",
+)
+
+
+def _worker_environment() -> dict[str, str]:
+    environment = {key: os.environ[key] for key in _WORKER_ENVIRONMENT_KEYS if key in os.environ}
+    environment.update(
+        {
+            "ASSISTANT_OFFLINE": "1",
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+    )
+    return environment
+
 
 class IsolatedSkill(Skill):
     def __init__(
@@ -48,16 +69,12 @@ class IsolatedSkill(Skill):
         self.validate(call.arguments)
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         self._process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "assistant.skills.worker",
-            str(self.package_dir),
-            self.manifest.entry_point,
+            *self._worker_command(),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             creationflags=creationflags,
-            env={**os.environ, "ASSISTANT_OFFLINE": "1"},
+            env=_worker_environment(),
         )
         process_handle = getattr(self._process, "_transport", None)
         process_handle = getattr(getattr(process_handle, "_proc", None), "_handle", None)
@@ -100,6 +117,14 @@ class IsolatedSkill(Skill):
             if not communicate.done():
                 communicate.cancel()
             await self._terminate()
+
+    def _worker_command(self) -> tuple[str, ...]:
+        prefix = (
+            (sys.executable, "--isolated-skill-worker")
+            if getattr(sys, "frozen", False)
+            else (sys.executable, "-m", "assistant.skills.worker")
+        )
+        return (*prefix, str(self.package_dir), self.manifest.entry_point)
 
     async def _terminate(self) -> None:
         if self._job:

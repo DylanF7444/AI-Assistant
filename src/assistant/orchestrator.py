@@ -1248,6 +1248,21 @@ class AssistantOrchestrator:
                 invoked_by_voice=invoked_by_voice,
             )
 
+        standalone_route = self.router.route(text)
+        if (
+            not standalone_route.needs_llm
+            and standalone_route.clarification is None
+            and not standalone_route.intents
+            and standalone_route.intent is not None
+            and standalone_route.intent.name not in {"control.confirm", "control.deny"}
+        ):
+            self._pending_clarification_follow_up = None
+            return await self.handle_text(
+                text,
+                session_id=session_id,
+                invoked_by_voice=invoked_by_voice,
+            )
+
         if pending.kind == "folder_search":
             return await self._handle_pending_folder_search_follow_up(
                 correlation_id,

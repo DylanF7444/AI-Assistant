@@ -90,18 +90,18 @@ class OllamaProvider:
     async def structured_completion(
         self, prompt: str, schema: dict[str, Any], timeout_seconds: float = 15
     ) -> dict[str, Any]:
+        bounded_prompt = self._bounded_prompt(prompt)
         payload = {
             "model": self.model,
-            "prompt": self._bounded_prompt(prompt),
+            "prompt": bounded_prompt,
             "stream": False,
             "format": schema,
             "options": {"num_predict": self.max_tokens, "temperature": 0},
         }
 
         def request() -> dict[str, Any]:
-            data = json.dumps(payload).encode("utf-8")
-
-            def send() -> dict[str, Any]:
+            def send(request_payload: dict[str, Any]) -> dict[str, Any]:
+                data = json.dumps(request_payload).encode("utf-8")
                 req = urllib.request.Request(
                     self.endpoint,
                     data=data,
@@ -111,14 +111,35 @@ class OllamaProvider:
                     return json.load(response)
 
             try:
-                body = send()
+                body = send(payload)
             except urllib.error.URLError:
                 if not self._start_local_server():
                     raise
-                body = send()
+                body = send(payload)
             raw_response = body["response"]
             self._print_completion_debug(payload["prompt"], raw_response)
-            result = json.loads(raw_response)
+            try:
+                result = json.loads(raw_response)
+            except json.JSONDecodeError:
+                retry_payload = {
+                    **payload,
+                    "prompt": self._bounded_prompt(
+                        bounded_prompt
+                        + "\nYour previous response was truncated or malformed. Return one "
+                        "complete, concise JSON object matching the schema. Keep answer and "
+                        "clarification text under 200 characters. Do not include commentary, "
+                        "emoji, or hashtags. When a listed skill performs the action, use the "
+                        "skill disposition and set answer to null."
+                    ),
+                    "options": {
+                        **payload["options"],
+                        "num_predict": max(self.max_tokens * 2, 512),
+                    },
+                }
+                body = send(retry_payload)
+                raw_response = body["response"]
+                self._print_completion_debug(retry_payload["prompt"], raw_response)
+                result = json.loads(raw_response)
             TypeAdapter(dict[str, Any]).validate_python(result)
             return result
 

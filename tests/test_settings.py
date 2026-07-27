@@ -1,6 +1,8 @@
+import assistant.bootstrap as bootstrap
 from assistant.bootstrap import build_container
 from assistant.storage.aliases import AliasStore
 from assistant.storage.database import SettingsStore
+from assistant.tts.elevenlabs import ElevenLabsProvider
 
 
 def test_database_path_and_url_are_pure(settings, tmp_path):
@@ -107,3 +109,26 @@ def test_wake_word_provider_uses_selected_microphone_and_threshold(settings, tmp
 
     assert services.wakeword is not None
     assert captured == {"model_path": model, "threshold": 0.72, "device": 4}
+
+
+def test_audio_services_build_selected_elevenlabs_provider(settings):
+    class FakeVault:
+        def get(self, name):
+            assert name == "elevenlabs"
+            return "secret-key"
+
+    configured = settings.model_copy(
+        update={
+            "tts_provider": "elevenlabs",
+            "elevenlabs_voice_id": "voice_123",
+            "elevenlabs_model_id": "eleven_multilingual_v2",
+            "offline_lock": True,
+        }
+    )
+
+    services = bootstrap._build_audio_services(configured, FakeVault())
+
+    assert isinstance(services.tts, ElevenLabsProvider)
+    assert services.tts.voice_id == "voice_123"
+    assert services.tts.model_id == "eleven_multilingual_v2"
+    assert services.tts.offline_lock is True

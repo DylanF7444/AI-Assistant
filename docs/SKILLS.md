@@ -26,6 +26,12 @@ Every package needs `manifest.json`. New and updated skills are disabled until
 reviewed. An update that adds permissions requires renewed approval. Skills
 must never invoke an unrestricted shell from model or transcript text.
 
+The desktop Extension Hub can discover compatible packages from a configured
+HTTPS catalog. Catalog presence is not trust: installation also requires a
+matching SHA-256 digest, a signature from a locally trusted publisher key, safe
+archive paths, API compatibility, and exact catalog/manifest agreement. See
+`docs/EXTENSION_HUB.md` for the platform contract.
+
 Use the same feature format when documenting a new built-in or packaged skill:
 status, skill ID, risk, permissions, and user-facing capability.
 

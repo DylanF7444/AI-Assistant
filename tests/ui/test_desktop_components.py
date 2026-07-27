@@ -28,7 +28,7 @@ from assistant.ui.desktop.workers import AsyncWorker, PassiveVoiceWorker
 
 @pytest.mark.ui
 def test_desktop_preserves_all_tab_labels():
-    assert len(TAB_LABELS) == 15
+    assert len(TAB_LABELS) == 17
     assert {label for labels in TAB_GROUPS.values() for label in labels} == set(TAB_LABELS)
 
 
@@ -40,6 +40,18 @@ def test_async_worker_reports_completion(qtbot):
         worker.start()
 
     assert signal.args == ["done"]
+    assert worker.wait(2000)
+
+
+@pytest.mark.ui
+def test_async_worker_can_cancel_an_in_flight_coroutine(qtbot):
+    worker = AsyncWorker(asyncio.sleep(10))
+
+    worker.start()
+    qtbot.waitUntil(worker.isRunning, timeout=1000)
+    with qtbot.waitSignal(worker.cancelled, timeout=2000):
+        worker.cancel()
+
     assert worker.wait(2000)
 
 
@@ -140,7 +152,7 @@ def test_compact_companion_switches_views_renders_and_hides_to_tray(
 
     assert window._window_mode == "compact"
     assert window.view_stack.currentWidget() is window.compact_panel
-    assert window.tabs.count() == 15
+    assert window.tabs.count() == 17
     assert window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
     assert (window.minimumWidth(), window.minimumHeight()) == (380, 500)
     assert (window.maximumWidth(), window.maximumHeight()) == (520, 680)
@@ -185,6 +197,7 @@ def test_compact_companion_switches_views_renders_and_hides_to_tray(
 
     window._switch_window_mode("full")
     assert window.view_stack.currentWidget() is window.tabs
+    assert window.tabs.tabText(window.tabs.currentIndex()) == "Assistant"
     tab_bar = window.tabs.tabBar()
     longest_tab_width = max(
         tab_bar.fontMetrics().horizontalAdvance(window.tabs.tabText(index))
@@ -257,6 +270,7 @@ def test_compact_companion_switches_views_renders_and_hides_to_tray(
         )
     persisted = DesktopWindowState.model_validate(store.get("desktop_window_state", {}))
     assert persisted.mode == "full"
+    assert persisted.primary_screen == "assistant"
 
     restarts = []
     monkeypatch.setattr(window, "_start_passive_voice", lambda: restarts.append(True))

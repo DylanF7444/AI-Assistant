@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import re
 from dataclasses import dataclass
 
@@ -13,8 +14,23 @@ from assistant.context.providers import (
     FileContextProvider,
     ProcessContextProvider,
 )
+from assistant.dashboard.builtins import (
+    AssistantMetricsProvider,
+    AutomationMetricsProvider,
+    default_dashboard_layout,
+)
+from assistant.dashboard.device import WindowsDeviceMetricProvider
+from assistant.dashboard.home_assistant import HomeAssistantMetricProvider
+from assistant.dashboard.registry import DashboardProviderRegistry
+from assistant.dashboard.service import DashboardService
+from assistant.dashboard.storage import (
+    DashboardConnectionStore,
+    DashboardLayoutStore,
+    DashboardSampleStore,
+)
 from assistant.events import EventBus
 from assistant.execution.engine import ExecutionEngine
+from assistant.extensions.platform import ExtensionHubService, ExtensionPlatformClient
 from assistant.integrations.headless_browser import PlaywrightHeadlessBrowser
 from assistant.integrations.web import CloudModelClient, WebClient
 from assistant.language.embeddings import (
@@ -37,6 +53,7 @@ from assistant.orchestrator import AssistantOrchestrator
 from assistant.policy.confirmations import ConfirmationManager
 from assistant.policy.file_access import FileAccessPolicyStore
 from assistant.policy.permissions import PermissionManager
+from assistant.providers import TTSProvider
 from assistant.router.deterministic import DeterministicRouter
 from assistant.scheduling.authoring import ScheduleAuthoringService
 from assistant.scheduling.notifications import NotificationCenter
@@ -90,6 +107,7 @@ from assistant.storage.playbooks import PlaybookStore
 from assistant.storage.secrets import SecretVault
 from assistant.storage.vector_index import VectorIndex
 from assistant.stt.faster_whisper import FasterWhisperProvider
+from assistant.tts.elevenlabs import ElevenLabsProvider
 from assistant.tts.piper import PiperProvider
 from assistant.windows.adapters import (
     LocalFileSystemAdapter,
@@ -112,6 +130,7 @@ class Container:
     permissions: PermissionManager
     confirmations: ConfirmationManager
     registry: SkillRegistry
+    extension_hub: ExtensionHubService
     events: EventBus
     engine: ExecutionEngine
     orchestrator: AssistantOrchestrator
@@ -135,6 +154,8 @@ class Container:
     notification_center: NotificationCenter
     scheduler: SchedulerService
     background_runtime: BackgroundRuntime
+    dashboard: DashboardService
+    secret_vault: SecretVault
 
 
 def _decode_trusted_keys(encoded_keys: dict[str, str]) -> dict[str, bytes]:
@@ -336,7 +357,7 @@ class _AudioServices:
     stt: FasterWhisperProvider
     wakeword: OpenWakeWordProvider | None
     model_manager: ModelManager
-    tts: PiperProvider | None
+    tts: TTSProvider | None
 
 
 def _build_storage_services(settings: Settings, database: Database) -> _StorageServices:
@@ -439,7 +460,10 @@ def _build_context_providers(
     )
 
 
-def _build_audio_services(settings: Settings) -> _AudioServices:
+def _build_audio_services(
+    settings: Settings,
+    secret_vault: SecretVault | None = None,
+) -> _AudioServices:
     capture = AudioCapture(
         device=settings.audio_input_device,
         silence_seconds=settings.silence_timeout_seconds,
@@ -469,7 +493,8 @@ def _build_audio_services(settings: Settings) -> _AudioServices:
     )
     tts = None
     if (
-        settings.piper_executable
+        settings.tts_provider == "piper"
+        and settings.piper_executable
         and settings.piper_model
         and settings.piper_executable.is_file()
         and settings.piper_model.is_file()
@@ -482,6 +507,18 @@ def _build_audio_services(settings: Settings) -> _AudioServices:
             volume=settings.tts_volume,
             cache_dir=settings.data_dir / "tts-cache",
             playback_state=capture.set_playback_active,
+        )
+    elif settings.tts_provider == "elevenlabs" and settings.elevenlabs_voice_id:
+        tts = ElevenLabsProvider(
+            lambda: secret_vault.get("elevenlabs") if secret_vault else None,
+            settings.elevenlabs_voice_id,
+            settings.elevenlabs_model_id,
+            settings.tts_output_device,
+            volume=settings.tts_volume,
+            timeout_seconds=settings.elevenlabs_timeout_seconds,
+            cache_dir=settings.data_dir / "tts-cache",
+            playback_state=capture.set_playback_active,
+            offline_lock=settings.offline_lock,
         )
     return _AudioServices(capture, stt, wakeword, model_manager, tts)
 
@@ -500,6 +537,15 @@ def build_container(settings: Settings | None = None) -> Container:
     storage = _build_storage_services(settings, database)
     retrieval = _build_retrieval_services(settings, storage)
     registry, macro_store = _build_registry(settings, database, storage)
+    extension_hub = ExtensionHubService(
+        registry,
+        ExtensionPlatformClient(
+            settings.extension_catalog_url,
+            timeout_seconds=settings.extension_catalog_timeout_seconds,
+            package_max_bytes=settings.extension_package_max_bytes,
+        ),
+        audit=storage.audit,
+    )
     context_providers = _build_context_providers(settings, storage)
     events = EventBus()
     confirmations = ConfirmationManager()
@@ -533,6 +579,24 @@ def build_container(settings: Settings | None = None) -> Container:
     if settings.automations_paused:
         scheduler.pause()
     background_runtime = BackgroundRuntime(scheduler)
+    dashboard_registry = DashboardProviderRegistry()
+    dashboard_registry.register(AssistantMetricsProvider(storage.metrics, settings))
+    dashboard_registry.register(AutomationMetricsProvider(scheduler, storage.metrics))
+    dashboard_registry.register(WindowsDeviceMetricProvider(LocalWindowsDeviceAdapter()))
+    dashboard_registry.register(HomeAssistantMetricProvider(storage.secret_vault))
+    dashboard = DashboardService(
+        dashboard_registry,
+        DashboardLayoutStore(SettingsStore(database), default_dashboard_layout),
+        permissions=storage.permissions,
+        connections=DashboardConnectionStore(
+            SettingsStore(database),
+            storage.secret_vault,
+        ),
+        samples=DashboardSampleStore(database),
+        audit=storage.audit,
+        offline_lock=settings.offline_lock,
+        history_retention_days=settings.dashboard_history_retention_days,
+    )
     llm = OllamaProvider(settings.llm_model) if settings.llm_provider == "ollama" else None
     planner = (
         LocalPlanner(
@@ -575,7 +639,7 @@ def build_container(settings: Settings | None = None) -> Container:
         playbook_store=storage.playbook_store,
         context_providers=context_providers,
     )
-    audio = _build_audio_services(settings)
+    audio = _build_audio_services(settings, storage.secret_vault)
     orchestrator.tts = audio.tts
     orchestrator.speech_mode = settings.speech_mode
     registry.register(
@@ -589,6 +653,11 @@ def build_container(settings: Settings | None = None) -> Container:
             },
         )
     )
+    for skill_id, error in registry.load_all_installed().items():
+        logging.getLogger(__name__).warning(
+            "Installed extension could not be loaded",
+            extra={"skill_id": skill_id, "outcome": error},
+        )
     return Container(
         settings=settings,
         database=database,
@@ -596,6 +665,7 @@ def build_container(settings: Settings | None = None) -> Container:
         permissions=storage.permissions,
         confirmations=confirmations,
         registry=registry,
+        extension_hub=extension_hub,
         events=events,
         engine=engine,
         orchestrator=orchestrator,
@@ -619,4 +689,6 @@ def build_container(settings: Settings | None = None) -> Container:
         notification_center=notification_center,
         scheduler=scheduler,
         background_runtime=background_runtime,
+        dashboard=dashboard,
+        secret_vault=storage.secret_vault,
     )

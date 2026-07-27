@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, model_validator
 from assistant.contracts import ResultStatus, RiskLevel, SkillCall, SkillResult
 from assistant.scheduling.authoring import ScheduleAuthoringService
 from assistant.scheduling.contracts import (
+    DeliveryPolicy,
     OneTimeTrigger,
     RecurrenceTrigger,
     ScheduledTrigger,
@@ -56,6 +57,7 @@ class ScheduleManagementInput(BaseModel):
     skill_id: str | None = None
     arguments: dict = Field(default_factory=dict)
     macro_name: str | None = None
+    delivery_mode: Literal["always", "summary", "silent"] = "summary"
 
     @model_validator(mode="after")
     def _operation_has_required_fields(self) -> ScheduleManagementInput:
@@ -188,6 +190,7 @@ class ScheduleSkill(Skill):
                 trigger=self._trigger_value(args),
                 skill_id=args.skill_id,
                 arguments=args.arguments,
+                delivery_policy=DeliveryPolicy(on_success=args.delivery_mode),
             )
         elif args.operation == "create_macro":
             if self.authoring is None:
@@ -197,6 +200,7 @@ class ScheduleSkill(Skill):
                 name=args.name,
                 trigger=self._trigger_value(args),
                 macro_name=args.macro_name,
+                delivery_policy=DeliveryPolicy(on_success=args.delivery_mode),
             )
         elif args.operation == "list":
             pass
@@ -316,6 +320,7 @@ class ScheduleSkill(Skill):
             "revision": schedule.revision,
             "trigger": schedule.trigger.model_dump(mode="json"),
             "action": schedule.action.model_dump(mode="json"),
+            "delivery_policy": schedule.delivery_policy.model_dump(mode="json"),
             "next_run_at": schedule.next_run_at.isoformat() if schedule.next_run_at else None,
             "last_run_at": schedule.last_run_at.isoformat() if schedule.last_run_at else None,
         }

@@ -841,7 +841,7 @@ class BackgroundRunner:
             self.notifications.publish(
                 NotificationMessage(
                     title="Automation completed",
-                    message=f"{schedule.name} completed successfully.",
+                    message=self._success_notification_message(schedule, run),
                     severity="success",
                     schedule_id=schedule.schedule_id,
                     run_id=run.run_id,
@@ -878,3 +878,20 @@ class BackgroundRunner:
                 duration_ms=duration_ms,
                 outcome=decision,
             )
+
+    @staticmethod
+    def _success_notification_message(
+        schedule: ScheduleDefinition,
+        run: ScheduleRun,
+    ) -> str:
+        fallback = f"{schedule.name} completed successfully."
+        if not isinstance(run.result, dict):
+            return fallback[:500]
+        field = "display_text" if schedule.delivery_policy.on_success == "always" else "summary"
+        value = run.result.get(field) or run.result.get("summary")
+        if not isinstance(value, str) or not value.strip():
+            return fallback[:500]
+        value = value.strip()
+        if len(value) <= 500:
+            return value
+        return value[:497].rstrip() + "..."
