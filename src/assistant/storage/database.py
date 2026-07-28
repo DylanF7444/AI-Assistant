@@ -3,11 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections import Counter
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from sqlalchemy import (
@@ -266,6 +268,26 @@ class ScheduleRunRow(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class NotificationRow(Base):
+    __tablename__ = "notifications"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    title: Mapped[str] = mapped_column(String(100), nullable=False)
+    message: Mapped[str] = mapped_column(String(500), nullable=False)
+    severity: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    category: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    schedule_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    read_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    dismissed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+
+
 class BackgroundAuthorizationRow(Base):
     __tablename__ = "background_authorizations"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -293,7 +315,7 @@ class BackgroundAuthorizationRow(Base):
 
 
 class Database:
-    CURRENT_SCHEMA_VERSION = 9
+    CURRENT_SCHEMA_VERSION = 10
 
     def __init__(self, url: str) -> None:
         self.url = url
@@ -366,6 +388,8 @@ class Database:
                     )
             if version == 8:
                 DashboardMetricSampleRow.__table__.create(self.engine, checkfirst=True)
+            if version == 9:
+                NotificationRow.__table__.create(self.engine, checkfirst=True)
             version += 1
         session.get(SchemaVersionRow, 1).version = version  # type: ignore[union-attr]
 
@@ -587,6 +611,7 @@ class AuditStore:
         "clipboard",
         "text",
     }
+    URL_PATTERN = re.compile(r"https?://[^\s<>\"']+", flags=re.IGNORECASE)
 
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -600,7 +625,24 @@ class AuditStore:
             }
         if isinstance(value, list):
             return [cls.redact(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(cls.redact(item) for item in value)
+        if isinstance(value, str):
+            return cls.URL_PATTERN.sub(cls._redact_url, value)
         return value
+
+    @staticmethod
+    def _redact_url(match: re.Match[str]) -> str:
+        parsed = urlparse(match.group(0))
+        hostname = parsed.hostname or "[redacted-host]"
+        host = f"[{hostname}]" if ":" in hostname and not hostname.startswith("[") else hostname
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        if port is not None:
+            host = f"{host}:{port}"
+        return urlunparse((parsed.scheme, host, parsed.path, "", "", ""))
 
     def record(
         self,
@@ -699,9 +741,7 @@ class MetricsStore:
                 statement = statement.where(MetricRow.timestamp <= until)
             if stages:
                 statement = statement.where(MetricRow.stage.in_(stages))
-            rows = session.scalars(
-                statement.order_by(MetricRow.id.desc()).limit(bounded_limit)
-            )
+            rows = session.scalars(statement.order_by(MetricRow.id.desc()).limit(bounded_limit))
             return [self._value(row) for row in rows]
 
     def outcome_counts(

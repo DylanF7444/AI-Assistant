@@ -51,4 +51,5 @@ def response_from_result(
         severity=severity,
         speak=True,
         sensitive=result.sensitive,
+        media_directive=result.media_directive,
     )

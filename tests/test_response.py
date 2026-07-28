@@ -1,4 +1,13 @@
-from assistant.contracts import ResponseType, ResultStatus, SkillError, SkillResult
+from uuid import uuid4
+
+from assistant.contracts import (
+    MediaAction,
+    MediaDirective,
+    ResponseType,
+    ResultStatus,
+    SkillError,
+    SkillResult,
+)
 from assistant.response import response_from_result
 
 
@@ -70,3 +79,20 @@ def test_detailed_mode_and_sensitive_display_privacy():
         hide_sensitive_display=True,
     )
     assert "42" not in hidden.display_text
+
+
+def test_response_mapping_keeps_media_directive():
+    directive = MediaDirective(
+        presentation_id=uuid4(),
+        action=MediaAction.PAUSE,
+    )
+
+    response = response_from_result(
+        SkillResult(
+            status=ResultStatus.COMPLETED,
+            summary="Paused.",
+            media_directive=directive,
+        )
+    )
+
+    assert response.media_directive == directive

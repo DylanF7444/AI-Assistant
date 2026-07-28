@@ -18,7 +18,7 @@ from assistant.contracts import (
     SkillResult,
 )
 from assistant.events import EventBus
-from assistant.execution.engine import ExecutionEngine
+from assistant.execution.engine import ExecutionEngine, _execution_timeout_seconds
 from assistant.policy.confirmations import ConfirmationManager
 from assistant.policy.permissions import GrantType, PermissionManager
 from assistant.skills.base import Skill
@@ -180,6 +180,10 @@ def make_call(skill_id, arguments=None, key="key"):
         permission_context=PermissionContext(session_id="session"),
         idempotency_key=key,
     )
+
+
+def test_media_execution_timeout_covers_maximum_remote_download_timeout():
+    assert _execution_timeout_seconds(make_call("media.present")) == 125.0
 
 
 @pytest.mark.asyncio

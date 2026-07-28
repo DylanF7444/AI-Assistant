@@ -93,6 +93,22 @@ occurrence, clear completed history, or persistently pause all automations.
 Emergency Stop applies an immediate volatile pause before canceling active work;
 use **Resume all** when it is safe to continue.
 
+Every reminder, approval request, failure, completed automation, and background
+report is also recorded in the durable **Inbox**. The unread count appears on
+the Inbox tab and on the compact/full Assistant buttons. Open the notification
+drawer for a quick preview, or open Inbox to mark items read, dismiss them, and
+follow an item to its exact automation run. Completed runs with displayable
+output open in a separate results window, so a daily report does not replace the
+active conversation.
+
+When the Assistant has focus, eligible notifications use a nonblocking in-app
+banner. When it is hidden or unfocused, they use a Windows notification whose
+click opens the stored item. Both are presentation layers over the same durable
+Inbox record. Settings can independently disable banners or Windows
+notifications and configure overnight quiet hours. Quiet hours suppress
+ordinary interruptions but never discard Inbox entries; errors may still
+interrupt so failures are not silently missed.
+
 Settings keeps durable reminders enabled by default while background skill
 actions are off by default. Enabling background actions does not grant broad
 authority: each fixed action or frozen macro is separately reviewed and bound to
@@ -185,12 +201,46 @@ Relational requests such as `open my browser` use an enabled browser preference
 when it names an already registered application; memory never introduces an
 unregistered executable path.
 
+## Images, audio, and video
+
+Ask the assistant to show an exact local media path, find a named media file in
+an approved folder, or use a numbered file-search result. For example:
+
+- `show C:\Users\Me\Pictures\diagram.png`
+- `show the vacation photo in Pictures`
+- `pull up the second result`
+- `play C:\Users\Me\Music\interview.wav`
+- `show https://cdn.example.com/demo.mp4`
+
+Local files request exact `filesystem.read` access. An explicit remote URL
+requests `network`, works only when offline lock is off, and is downloaded and
+verified before display. Web pages, generic image search, streaming manifests,
+DRM services, and YouTube pages are not media sources.
+
+Media opens in a separate, resizable results window instead of compressing or
+expanding the Assistant conversation. The window supports image fit, actual
+size, zoom, pan, rotation, fullscreen, and close. Audio/video controls include play/pause, stop, seek,
+ten-second skip, mute, volume, speed, and timestamps. The compact companion
+keeps a now-viewing card with open, play/pause, and close controls. Voice and
+typed phrases such as `pause it`, `skip ahead thirty seconds`, `set playback
+speed to 1.5x`, `mute this video`, and `close the viewer` affect only this
+in-app viewer; use ordinary Windows media commands for another application.
+
+Push-to-talk pauses playing viewer media and resumes it only if the same item
+was interrupted without another viewer command. Assistant speech takes
+priority, passive listening ignores speaker output, and Emergency Stop stops
+playback. Runtime formats, output devices, cache size, and decoder error codes
+appear in Diagnostics. See `MEDIA_VIEWER.md` for keyboard controls, supported
+workflow boundaries, and the release matrix.
+
 ## Microphone and privacy
 
 Use the microphone test and level meter before voice commands. Raw audio is not
 stored unless diagnostic recording is explicitly enabled. Transcript retention
 is configurable. Privacy controls separately clear transcript history, session
-memory, model cache, TTS cache, diagnostic audio, and audit records.
+memory, model cache, TTS cache, downloaded media cache, diagnostic audio, and
+audit records. Clearing downloaded media closes an active remote presentation
+but never deletes a local source file.
 
 Core features have no telemetry or cloud account. The offline lock blocks
 outbound connections, including isolated skill workers. MQTT, Home Assistant,

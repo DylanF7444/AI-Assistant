@@ -514,9 +514,7 @@ async def test_daily_amazon_deals_create_a_persistent_web_automation(settings, r
     assert schedule.trigger.local_time.isoformat() == "08:00:00"
     assert schedule.action.kind == "fixed_skill"
     assert schedule.action.call.skill_id == "web.headless_read"
-    assert schedule.action.call.arguments["url"] == (
-        "https://www.amazon.com/s?k=daily+tech+deals"
-    )
+    assert schedule.action.call.arguments["url"] == ("https://www.amazon.com/s?k=daily+tech+deals")
     assert schedule.action.call.arguments["extract"] == "tech deals"
     assert schedule.delivery_policy.on_success == "always"
     assert container.notification_center.history() == ()

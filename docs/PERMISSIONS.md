@@ -34,6 +34,21 @@ matching filesystem access even when a permission grant exists. A whitelist
 limits matching filesystem access to configured paths. Policy blocks are
 reported as policy denials, not as permissions the user can grant around.
 
+## In-app media
+
+`media.present` requests `filesystem.read` for one exact local source or one
+approved filename-search root. An explicit HTTPS media source instead requests
+`network` for the sanitized host/path target and is blocked before DNS or
+download while offline lock is enabled. Downloaded cache files are
+application-owned and are never treated as permission to read another local
+path.
+
+`media.viewer_control` needs no capability grant because it can target only the
+currently active in-memory presentation ID. It cannot send global media keys or
+control another application; that remains the separate `windows.media` skill
+and `media.control` capability. Both in-app media skills are foreground-only
+and cannot be scheduled for unattended execution.
+
 When a command needs permission, the Assistant tab shows the capability,
 reason, and exact target and offers to grant it directly. Normally you do not
 need to type a capability in Settings. Use the Permissions tab only to review,

@@ -160,3 +160,42 @@ compiled successfully at 4:05:30 PM.
 - Local deletion requires an action-time user confirmation even when the target
   is an acceptance fixture. Delete workflows may be tested through preview and
   Assistant confirmation generation without completing deletion.
+
+## In-App Media Implementation Acceptance — July 27, 2026
+
+This section records the automated and packaged checks for the in-app image,
+audio, and video presentation implementation. It does not replace the physical
+hardware and codec matrix in `docs/MEDIA_VIEWER.md`.
+
+| ID | Workflow | Result | Evidence |
+| --- | --- | --- | --- |
+| MEDIA-01 | Contracts and propagation | PASS | Strict media source/directive/action contracts and response propagation tests passed. |
+| MEDIA-02 | Local resolution and authorization | PASS | Canonical resolution, bounded signature probing, exact permission, changed-file, and session tests passed. |
+| MEDIA-03 | Routing and conversation references | PASS | Show/pull-up/play/control, selected-result, negative-routing, and ambiguity tests passed. |
+| MEDIA-04 | Image viewer | PASS | Offscreen Qt image load, error, zoom, pan, rotate, fullscreen, compact/full, stale-directive, and cleanup tests passed. |
+| MEDIA-05 | Audio/video viewer | PASS | Playback state, seek, skip, volume, mute, rate, decoder-error, matching-session, and runtime-format tests passed. |
+| MEDIA-06 | Audio focus and lifecycle | PASS | Viewer/TTS/capture priority, resume safety, Emergency Stop, replacement, and shutdown tests passed. |
+| MEDIA-07 | Remote and privacy safety | PASS | Offline, SSRF, redirects, MIME/signature, size, timeout, cancellation, cache retention/clear, and URL-redaction tests passed offline. |
+| MEDIA-08 | Full regression | PASS | The expanded 791-test production suite and 29 learning tests passed after detached results-window integration. |
+| MEDIA-09 | Static checks | PASS | Ruff format and lint checks passed across 259 Python files; `git diff --check` reported no whitespace errors. |
+| MEDIA-10 | Windows executable | PASS | PyInstaller produced `dist/LocalAssistant.exe`; packaged runtime inspection found Qt Multimedia, FFmpeg and Windows media backends, and JPEG/GIF/WebP decoders. |
+| MEDIA-11 | Packaged isolated startup | PASS | The executable created a fresh isolated database and completed a text command with exit code 0. |
+| MEDIA-12 | Inno Setup installer | BLOCKED | Inno Setup is not installed in this environment; the existing installer was not presented as a current build. |
+| MEDIA-13 | Physical packaged media matrix | BLOCKED | Requires a person to assess visible frames, audible output, microphone interaction, device routing, and target-hardware codecs. |
+
+The Windows app-control launcher was also tried against the current executable.
+It cannot pass the required `--data-dir` isolation argument, and the default
+profile did not expose a targetable window. The run did not change the user's
+real permission or privacy settings to bypass that isolation boundary.
+
+## Notification Inbox and Results Acceptance — July 28, 2026
+
+| ID | Workflow | Result | Evidence |
+| --- | --- | --- | --- |
+| NOTIFY-01 | Persistence and migration | PASS | Schema 10 migration, restart persistence, bounded retention, unread/read/dismissed state, and URL credential/query redaction tests passed. |
+| NOTIFY-02 | Inbox and foreground UI | PASS | Offscreen Qt tests covered unread badges, Inbox rows/details/actions, recent-item drawer, foreground banner activation, and exact notification selection. |
+| NOTIFY-03 | Run and report deep links | PASS | Completed run notifications opened the separate report view; approvals and non-result runs retained exact Automations row selection. |
+| NOTIFY-04 | Detached media results | PASS | Image presentation opened the independent results window while the Assistant remained compact; controls, cards, lifecycle, and saved geometry tests passed. |
+| NOTIFY-05 | Delivery policy | PASS | Settings validation covered independent in-app/system delivery, overnight quiet hours, durable recording, and error interruption policy. |
+| NOTIFY-06 | Full automated regression | PASS | `python -m pytest` passed 791 tests in 146.55 seconds; `python -m pytest learning_tests -q` passed 29 tests. |
+| NOTIFY-07 | Packaged Windows notification | PENDING | Installer shortcut AppUserModelID and runtime identity are configured; visible Windows notification-center delivery and activation still require a packaged interactive Windows acceptance run. |

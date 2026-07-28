@@ -59,6 +59,18 @@ read-only Home Assistant entity cards. External access honors the offline lock,
 keeps credentials in the encrypted vault, and stores numeric trend history only
 when the user enables it for a connection.
 
+The Assistant also has a permission-gated, separate results window for local or
+explicitly downloaded images, audio, video, and completed background reports.
+It provides image
+zoom/pan/rotate and audio/video transport, seek, volume, rate, mute, compact-card,
+fullscreen, voice, and keyboard controls. Remote media is downloaded into a
+bounded verified cache and is unavailable under offline lock. See
+`docs/MEDIA_VIEWER.md`.
+
+Background reminders and results are retained in a durable notification Inbox
+with unread badges, a recent-item drawer, in-app banners, Windows click-through,
+quiet hours, and links to the exact automation run.
+
 ## Safety model
 
 Transcripts and model output are treated as untrusted input. Only registered
@@ -69,4 +81,4 @@ confirmation request.
 See `docs/USER_GUIDE.md` for setup and operation and `docs/FEATURES.md` for
 the current implemented feature catalog. The remaining documents cover
 architecture, offline guarantees, threat model, permissions, compatibility,
-and plugin authoring.
+media presentation, and plugin authoring.

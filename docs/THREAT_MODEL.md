@@ -45,6 +45,20 @@ transcripts, permissions, and the integrity of audit records.
   HTTPS requests are allowed, private/local targets, mutating HTTP methods,
   downloads, service workers, and WebSockets are blocked, output and extracted
   result cards are bounded, and the user's normal browser profile is not reused.
+- Remote media SSRF and decoder abuse: only an explicit HTTPS URL without
+  credentials is accepted. Resolved and redirected targets must be public;
+  response bytes and time are bounded; MIME category and bounded signature
+  probing must agree; Qt receives only a verified local cache path; file
+  fingerprint and image dimensions are rechecked before decoding. Unsupported
+  codecs fail inside the viewer without falling back to an external process.
+- Media privacy: URL query strings and credentials are removed from provenance,
+  audit, and terminal diagnostics. Decoded frames, thumbnails, file content,
+  active paths, and playback positions are not persisted. Cache age and bytes
+  are bounded and the Privacy tab can clear downloads independently.
+- Speaker-to-microphone feedback: source-aware TTS and viewer focus keeps
+  capture suppressed until all output stops. Explicit push-to-talk pauses viewer
+  media; passive activation stays suppressed during speaker playback. Emergency
+  Stop and shutdown release playback resources.
 - Stored-action tampering and prompt injection: schedule payloads are typed data,
   never prompts interpreted at fire time. Action/policy digest mismatches,
   changed arguments, schema/permission/risk/version drift, disabled skills, and

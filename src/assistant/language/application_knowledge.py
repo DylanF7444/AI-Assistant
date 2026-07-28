@@ -47,6 +47,13 @@ APPLICATION_KNOWLEDGE: dict[str, Any] = {
         "Network and external integrations work only when configured, permitted, and not "
         "blocked by offline mode."
     ),
+    "media_presentation": (
+        "The Assistant has a foreground-only in-app viewer for approved local or "
+        "explicitly downloaded public HTTPS images, audio, and video. Local media uses "
+        "filesystem permission; remote media uses network permission, is blocked by "
+        "offline mode, and is downloaded into a bounded verified cache before display. "
+        "Viewer controls affect only the active in-app presentation, not other apps."
+    ),
     "self_knowledge_limits": (
         "The assistant can explain this supplied application design and live context, but it "
         "does not have subjective self-awareness or introspective access to hidden model "

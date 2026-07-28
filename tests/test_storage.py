@@ -9,6 +9,7 @@ from assistant.storage.database import (
     KnowledgeBaseRow,
     MacroRow,
     MemoryItemRow,
+    NotificationRow,
     SchemaVersionRow,
     SettingsStore,
     VectorItemRow,
@@ -36,11 +37,16 @@ def test_settings_and_audit_redaction(tmp_path: Path):
     audit.record(
         correlation_id="c",
         event_type="test",
-        details={"token": "private", "nested": {"password": "private"}},
+        details={
+            "token": "private",
+            "nested": {"password": "private"},
+            "url": "https://user:secret@example.com/photo.png?signature=private",
+        },
     )
     row = audit.query()[0]
     assert row["details"]["token"] == "[REDACTED]"
     assert row["details"]["nested"]["password"] == "[REDACTED]"
+    assert row["details"]["url"] == "https://example.com/photo.png"
 
 
 def test_upgrade_from_schema_version_one(tmp_path: Path):
@@ -51,7 +57,7 @@ def test_upgrade_from_schema_version_one(tmp_path: Path):
     MacroRow.__table__.drop(database.engine)
     database.migrate()
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 9
+        assert session.get(SchemaVersionRow, 1).version == 10
     assert inspect(database.engine).has_table("macros")
 
 
@@ -109,7 +115,7 @@ def test_upgrade_from_schema_version_three_adds_knowledge_bases(tmp_path: Path):
 
     assert inspect(database.engine).has_table("knowledge_bases")
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 9
+        assert session.get(SchemaVersionRow, 1).version == 10
 
 
 def test_upgrade_from_schema_version_four_adds_vector_items(tmp_path: Path):
@@ -123,7 +129,7 @@ def test_upgrade_from_schema_version_four_adds_vector_items(tmp_path: Path):
 
     assert inspect(database.engine).has_table("vector_items")
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 9
+        assert session.get(SchemaVersionRow, 1).version == 10
 
 
 def test_upgrade_from_schema_version_five_adds_memory_items(tmp_path: Path):
@@ -137,7 +143,7 @@ def test_upgrade_from_schema_version_five_adds_memory_items(tmp_path: Path):
 
     assert inspect(database.engine).has_table("memory_items")
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 9
+        assert session.get(SchemaVersionRow, 1).version == 10
 
 
 def test_upgrade_from_schema_version_eight_adds_dashboard_metric_samples(
@@ -153,4 +159,18 @@ def test_upgrade_from_schema_version_eight_adds_dashboard_metric_samples(
 
     assert inspect(database.engine).has_table("dashboard_metric_samples")
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 9
+        assert session.get(SchemaVersionRow, 1).version == 10
+
+
+def test_upgrade_from_schema_version_nine_adds_notification_inbox(tmp_path: Path):
+    database = Database(f"sqlite:///{tmp_path / 'old.db'}")
+    database.migrate()
+    with database.session() as session:
+        session.get(SchemaVersionRow, 1).version = 9
+    NotificationRow.__table__.drop(database.engine)
+
+    database.migrate()
+
+    assert inspect(database.engine).has_table("notifications")
+    with database.session() as session:
+        assert session.get(SchemaVersionRow, 1).version == 10

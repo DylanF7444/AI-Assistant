@@ -29,8 +29,8 @@ Source: "..\offline-models\llm\*"; DestDir: "{localappdata}\LocalAssistant\Local
 Source: "..\offline-models\tts\*"; DestDir: "{localappdata}\LocalAssistant\LocalAssistant\models\tts"; Components: "models\tts"; Flags: recursesubdirs skipifsourcedoesntexist
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: startup
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; AppUserModelID: "LocalAssistant.Desktop"
+Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; AppUserModelID: "LocalAssistant.Desktop"; Tasks: startup
 
 [Tasks]
 Name: "startup"; Description: "Start Local Assistant with Windows (required for on-time schedules after sign-in)"; Flags: unchecked

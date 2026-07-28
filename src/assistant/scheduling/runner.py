@@ -119,6 +119,7 @@ class BackgroundRunner:
                         title="Scheduled action needs approval",
                         message=f"{schedule.name} is waiting for your approval.",
                         severity="warning",
+                        category="approval",
                         schedule_id=schedule.schedule_id,
                         run_id=result.run_id,
                     )
@@ -381,6 +382,7 @@ class BackgroundRunner:
                 title=schedule.action.title,
                 message=schedule.action.message,
                 severity="info",
+                category="reminder",
                 schedule_id=schedule.schedule_id,
                 run_id=run.run_id,
             )
@@ -838,11 +840,13 @@ class BackgroundRunner:
             and schedule.delivery_policy.on_success != "silent"
             and not isinstance(schedule.action, NotificationAction)
         ):
+            category = self._success_notification_category(schedule, run)
             self.notifications.publish(
                 NotificationMessage(
-                    title="Automation completed",
+                    title=("Report ready" if category == "report" else "Automation completed"),
                     message=self._success_notification_message(schedule, run),
                     severity="success",
+                    category=category,
                     schedule_id=schedule.schedule_id,
                     run_id=run.run_id,
                 )
@@ -855,6 +859,7 @@ class BackgroundRunner:
                     title="Automation needs attention",
                     message=f"{schedule.name} did not complete. Review its run history.",
                     severity="error",
+                    category="automation",
                     schedule_id=schedule.schedule_id,
                     run_id=run.run_id,
                 )
@@ -895,3 +900,16 @@ class BackgroundRunner:
         if len(value) <= 500:
             return value
         return value[:497].rstrip() + "..."
+
+    @staticmethod
+    def _success_notification_category(
+        schedule: ScheduleDefinition,
+        run: ScheduleRun,
+    ) -> str:
+        if isinstance(run.result, dict):
+            presentation_kind = run.result.get("presentation_kind")
+            if presentation_kind == "report":
+                return "report"
+        report_terms = ("report", "digest", "briefing", "recap")
+        label = f"{schedule.name} {schedule.description}".casefold()
+        return "report" if any(term in label for term in report_terms) else "automation"

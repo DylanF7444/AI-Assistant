@@ -14,6 +14,7 @@ from assistant.dashboard.contracts import (
 )
 from assistant.execution.engine import ExecutionOutcome
 from assistant.policy.permissions import GrantType
+from assistant.presentation.session import MediaSessionRegistry
 
 
 class DesktopController:
@@ -29,6 +30,10 @@ class DesktopController:
         await self.container.audio_capture.stop()
         await self.container.stt.cancel()
         await self.container.orchestrator.cancel()
+
+    @property
+    def media_session_registry(self) -> MediaSessionRegistry:
+        return self.container.media_sessions
 
     def dashboard_layout(self) -> DashboardLayout:
         return self.container.dashboard.layout()

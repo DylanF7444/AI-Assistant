@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 
 from assistant.audio.capture import AudioCapture
+from assistant.audio.focus import AudioFocusCoordinator
 from assistant.audio.wakeword import OpenWakeWordProvider
 from assistant.config import Settings
 from assistant.context.providers import (
@@ -53,10 +54,13 @@ from assistant.orchestrator import AssistantOrchestrator
 from assistant.policy.confirmations import ConfirmationManager
 from assistant.policy.file_access import FileAccessPolicyStore
 from assistant.policy.permissions import PermissionManager
+from assistant.presentation.media_resolver import MediaResolver
+from assistant.presentation.remote_media import RemoteMediaCache
+from assistant.presentation.session import MediaSessionRegistry
 from assistant.providers import TTSProvider
 from assistant.router.deterministic import DeterministicRouter
 from assistant.scheduling.authoring import ScheduleAuthoringService
-from assistant.scheduling.notifications import NotificationCenter
+from assistant.scheduling.notifications import NotificationCenter, NotificationStore
 from assistant.scheduling.runner import BackgroundRunner
 from assistant.scheduling.runtime import BackgroundRuntime
 from assistant.scheduling.service import SchedulerService
@@ -75,6 +79,7 @@ from assistant.skills.builtin import (
 )
 from assistant.skills.diagnostic import DiagnosticSkill
 from assistant.skills.macros import MacroSkill
+from assistant.skills.media import MediaPresentSkill, MediaViewerControlSkill
 from assistant.skills.memory import MemorySkill
 from assistant.skills.network import CloudAskSkill, HeadlessReadSkill, WebFetchSkill, WebSearchSkill
 from assistant.skills.playbooks import PlaybookSkill
@@ -135,6 +140,7 @@ class Container:
     engine: ExecutionEngine
     orchestrator: AssistantOrchestrator
     audio_capture: AudioCapture
+    audio_focus: AudioFocusCoordinator
     stt: FasterWhisperProvider
     macro_store: MacroStore
     wakeword: OpenWakeWordProvider | None
@@ -151,11 +157,14 @@ class Container:
     workflow_template_indexer: WorkflowTemplateSemanticIndexer
     memory_store: MemoryStore
     schedule_store: ScheduleStore
+    notification_store: NotificationStore
     notification_center: NotificationCenter
     scheduler: SchedulerService
     background_runtime: BackgroundRuntime
     dashboard: DashboardService
     secret_vault: SecretVault
+    media_sessions: MediaSessionRegistry
+    media_cache: RemoteMediaCache
 
 
 def _decode_trusted_keys(encoded_keys: dict[str, str]) -> dict[str, bytes]:
@@ -340,6 +349,7 @@ class _StorageServices:
     vector_index: VectorIndex
     secret_vault: SecretVault
     schedule_store: ScheduleStore
+    notification_store: NotificationStore
 
 
 @dataclass
@@ -354,6 +364,7 @@ class _RetrievalServices:
 @dataclass
 class _AudioServices:
     capture: AudioCapture
+    focus: AudioFocusCoordinator
     stt: FasterWhisperProvider
     wakeword: OpenWakeWordProvider | None
     model_manager: ModelManager
@@ -376,6 +387,7 @@ def _build_storage_services(settings: Settings, database: Database) -> _StorageS
         vector_index=VectorIndex(database),
         secret_vault=SecretVault(settings.data_dir / "secrets"),
         schedule_store=ScheduleStore(database, audit=audit),
+        notification_store=NotificationStore(database),
     )
 
 
@@ -412,13 +424,34 @@ def _build_registry(
     settings: Settings,
     database: Database,
     storage: _StorageServices,
-) -> tuple[SkillRegistry, MacroStore]:
+    events: EventBus,
+) -> tuple[SkillRegistry, MacroStore, MediaSessionRegistry, RemoteMediaCache]:
     registry = SkillRegistry(
         settings.data_dir / "skills",
         trusted_signing_keys=_decode_trusted_keys(settings.trusted_skill_keys),
     )
     _register_core_skills(registry, storage.file_access_policy)
     _register_windows_skills(registry, storage.aliases, storage.memory_store)
+    media_sessions = MediaSessionRegistry()
+    media_resolver = MediaResolver()
+    media_cache = RemoteMediaCache(
+        settings.data_dir / "media-cache",
+        offline_lock=settings.offline_lock,
+        max_download_bytes=settings.remote_media_max_bytes,
+        max_cache_bytes=settings.media_cache_max_bytes,
+        retention_days=settings.media_cache_retention_days,
+        timeout_seconds=settings.remote_media_timeout_seconds,
+    )
+    media_cache.prune()
+    registry.register(
+        MediaPresentSkill(
+            media_resolver,
+            media_sessions,
+            media_cache,
+            events,
+        )
+    )
+    registry.register(MediaViewerControlSkill(media_sessions))
     macro_store = MacroStore(database)
     _register_productivity_skills(
         registry,
@@ -432,7 +465,7 @@ def _build_registry(
     _register_network_skills(registry, settings, storage.secret_vault)
     registry.register(MacroSkill(macro_store, registry, storage.permissions, storage.audit))
     registry.register(HelpSkill(registry.list))
-    return registry, macro_store
+    return registry, macro_store, media_sessions, media_cache
 
 
 def _build_context_providers(
@@ -475,6 +508,7 @@ def _build_audio_services(
             settings.data_dir / "diagnostic-audio" if settings.diagnostic_audio else None
         ),
     )
+    focus = AudioFocusCoordinator(capture.set_playback_active)
     stt = FasterWhisperProvider(settings.stt_model, settings.stt_device)
     wakeword = (
         OpenWakeWordProvider(
@@ -506,7 +540,7 @@ def _build_audio_services(
             speed=settings.tts_speed,
             volume=settings.tts_volume,
             cache_dir=settings.data_dir / "tts-cache",
-            playback_state=capture.set_playback_active,
+            playback_state=focus.output_callback("tts"),
         )
     elif settings.tts_provider == "elevenlabs" and settings.elevenlabs_voice_id:
         tts = ElevenLabsProvider(
@@ -517,10 +551,10 @@ def _build_audio_services(
             volume=settings.tts_volume,
             timeout_seconds=settings.elevenlabs_timeout_seconds,
             cache_dir=settings.data_dir / "tts-cache",
-            playback_state=capture.set_playback_active,
+            playback_state=focus.output_callback("tts"),
             offline_lock=settings.offline_lock,
         )
-    return _AudioServices(capture, stt, wakeword, model_manager, tts)
+    return _AudioServices(capture, focus, stt, wakeword, model_manager, tts)
 
 
 def build_container(settings: Settings | None = None) -> Container:
@@ -536,7 +570,13 @@ def build_container(settings: Settings | None = None) -> Container:
 
     storage = _build_storage_services(settings, database)
     retrieval = _build_retrieval_services(settings, storage)
-    registry, macro_store = _build_registry(settings, database, storage)
+    events = EventBus()
+    registry, macro_store, media_sessions, media_cache = _build_registry(
+        settings,
+        database,
+        storage,
+        events,
+    )
     extension_hub = ExtensionHubService(
         registry,
         ExtensionPlatformClient(
@@ -547,7 +587,6 @@ def build_container(settings: Settings | None = None) -> Container:
         audit=storage.audit,
     )
     context_providers = _build_context_providers(settings, storage)
-    events = EventBus()
     confirmations = ConfirmationManager()
     engine = ExecutionEngine(
         registry,
@@ -558,7 +597,7 @@ def build_container(settings: Settings | None = None) -> Container:
         storage.metrics,
         confirmation_overrides=settings.confirmation_overrides,
     )
-    notification_center = NotificationCenter()
+    notification_center = NotificationCenter(storage.notification_store)
     scheduler = SchedulerService(
         storage.schedule_store,
         BackgroundRunner(
@@ -638,6 +677,7 @@ def build_container(settings: Settings | None = None) -> Container:
         workflow_template_indexer=retrieval.workflow_indexer,
         playbook_store=storage.playbook_store,
         context_providers=context_providers,
+        media_sessions=media_sessions,
     )
     audio = _build_audio_services(settings, storage.secret_vault)
     orchestrator.tts = audio.tts
@@ -651,6 +691,8 @@ def build_container(settings: Settings | None = None) -> Container:
                 "tts": audio.tts,
                 "scheduler": scheduler,
             },
+            media_cache=media_cache,
+            media_sessions=media_sessions,
         )
     )
     for skill_id, error in registry.load_all_installed().items():
@@ -670,6 +712,7 @@ def build_container(settings: Settings | None = None) -> Container:
         engine=engine,
         orchestrator=orchestrator,
         audio_capture=audio.capture,
+        audio_focus=audio.focus,
         stt=audio.stt,
         macro_store=macro_store,
         wakeword=audio.wakeword,
@@ -686,9 +729,12 @@ def build_container(settings: Settings | None = None) -> Container:
         workflow_template_indexer=retrieval.workflow_indexer,
         memory_store=storage.memory_store,
         schedule_store=storage.schedule_store,
+        notification_store=storage.notification_store,
         notification_center=notification_center,
         scheduler=scheduler,
         background_runtime=background_runtime,
         dashboard=dashboard,
         secret_vault=storage.secret_vault,
+        media_sessions=media_sessions,
+        media_cache=media_cache,
     )

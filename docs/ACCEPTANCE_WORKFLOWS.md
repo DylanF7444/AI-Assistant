@@ -184,6 +184,75 @@ new target, or continues with stale confirmation.
 - Partial failure reports exactly what changed and what did not.
 - No deletion path silently hard-deletes.
 
+## 2A. In-App Media Presentation
+
+### Goal
+
+Present approved media in the Assistant without external application launch,
+stale references, unbounded decoding, or direct network playback.
+
+### Local selection and images
+
+- Show exact PNG, JPEG, GIF, BMP, and WebP files.
+- Search one approved Pictures subfolder for a unique name.
+- Return numbered choices for duplicate names and show the selected result.
+- Exercise fit, 100%, mouse-wheel and button zoom, pan, both rotations,
+  fullscreen/Escape, replacement, close, and compact/full transitions.
+- Change a file after authorization and verify the viewer rejects it.
+- Try malformed signatures, extension/type mismatches, and an over-limit image.
+
+### Audio and video
+
+- Play a WAV, MP3 or other runtime-listed compressed audio file.
+- Play MP4 and one alternate runtime-listed video container.
+- Exercise mouse, keyboard, typed, and spoken play/pause/stop, absolute and
+  relative seek, skip, mute, volume, playback rate, fullscreen, and close.
+- Verify a stale control directive cannot affect a replacement presentation.
+- Verify unsupported codecs show recovery guidance and a sanitized diagnostic
+  code without launching another application.
+
+### Audio coordination and lifecycle
+
+- Start push-to-talk while media plays; media pauses before capture.
+- Finish an unrelated command; the same untouched media resumes.
+- Say `pause it` during the interruption; it remains paused.
+- Trigger TTS while viewer and passive voice mode are active; only one output
+  focus aggregate suppresses capture until all speaker output stops.
+- Use Emergency Stop and Quit from each playback state; output and capture
+  resources are released and no pending resume fires.
+
+### Guarded remote media
+
+- Disable offline lock, approve the exact network target, and show a direct
+  public HTTPS image/audio/video URL containing a temporary query parameter.
+- Confirm the query parameter is absent from provenance, terminal output, audit,
+  and diagnostics.
+- Verify HTTP, URL credentials, loopback/private/link-local/reserved hosts,
+  unsafe redirects, HTML/wrong MIME, mismatched bytes, empty bodies, oversize
+  bodies, timeouts, and cancellation all fail without a cache artifact.
+- Re-enable offline lock and verify the request stops before DNS/download.
+- Exercise retention/size pruning and **Clear Downloaded Media Cache**. Confirm
+  local source files remain untouched.
+
+### Packaged matrix
+
+- Run `scripts/build.ps1` and require `verify_packaged_media.py` to find Qt
+  Multimedia modules/runtime, a media backend plugin, and image plugins.
+- Record Windows version, PySide/Qt version, Diagnostics format list and output
+  device, every sample filename/container/codec, and expected/actual behavior in
+  `ACCEPTANCE_RUN_LOG.md`.
+- Repeat the image/audio/video matrix from `MEDIA_VIEWER.md` from the packaged
+  executable, not only the source environment.
+
+### Done when
+
+- Every supported request reaches only the matching in-app presentation.
+- Local and remote permission scopes are exact and foreground-only.
+- Decoder success/failure is distinct from skill preparation success.
+- No stale callback or directive replaces or controls a newer session.
+- Cancellation leaves no temporary download or active playback resource.
+- The packaged runtime passes the documented matrix on Windows 10 and 11.
+
 ## 3. Browser Utility
 
 ### Goal
@@ -697,14 +766,21 @@ Keep planned actions trustworthy when real conditions change.
 
 1. Install with **Start Local Assistant with Windows**, sign out/in, and verify
    the tray runtime starts without administrator rights.
-2. Create a reminder, hide the window, and verify a nonblocking tray notification.
+2. Create a reminder, hide the window, and verify one nonblocking Windows
+   notification and one unread durable Inbox entry. Click the notification and
+   verify the exact item/run opens.
 3. Restart before a second reminder and sleep past a third; verify the configured
    run-once/misfire behavior and no duplicate notification.
 4. Review, approve, reject, revoke, pause, resume, run now, delete, and clear
    completed history from **Automations** using keyboard and mouse.
-5. Trigger Emergency Stop during a cancellable background job and verify new
+5. Complete a report-producing automation and verify its Inbox item opens the
+   separate results window without resizing or replacing the Assistant. Repeat
+   with an image while the Assistant is compact and on a second monitor.
+6. Enable overnight quiet hours and verify ordinary interruptions are suppressed
+   while Inbox entries persist and error notifications remain visible.
+7. Trigger Emergency Stop during a cancellable background job and verify new
    claims pause before the active job is canceled.
-6. Run the 24-hour soak and record memory, queue depth, duplicate count, database
+8. Run the 24-hour soak and record memory, queue depth, duplicate count, database
    growth, notification behavior, and shutdown thread/task state in the run log.
 
 The packaged, sleep, notification, startup, accessibility, and real-time soak

@@ -36,9 +36,7 @@ def _clock_time(value: str) -> str | None:
     return f"{hour:02d}:{minute:02d}:00"
 
 
-_DAILY_CADENCE = (
-    r"(?:every\s+day|everyday|each\s+day|daily|every\s+morning|each\s+morning)"
-)
+_DAILY_CADENCE = r"(?:every\s+day|everyday|each\s+day|daily|every\s+morning|each\s+morning)"
 _CLOCK_VALUE = (
     r"(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
     r"(?::\d{2})?\s*(?:a\.?\s*m\.?|p\.?\s*m\.?)"

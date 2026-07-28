@@ -66,10 +66,13 @@ from assistant.orchestration import (
     evaluate_voice_gate,
 )
 from assistant.policy.permissions import GrantType
+from assistant.presentation.media_resolver import is_explicit_media_path
+from assistant.presentation.remote_media import is_explicit_remote_media_url
+from assistant.presentation.session import MediaSessionRegistry
 from assistant.providers import STTProvider, TTSProvider
 from assistant.response import response_from_result
 from assistant.router.deterministic import DeterministicRouter
-from assistant.storage.database import MetricsStore
+from assistant.storage.database import AuditStore, MetricsStore
 from assistant.storage.history import HistoryStore
 from assistant.storage.knowledge import KnowledgeBaseStore
 from assistant.storage.memory import MemoryStore
@@ -108,6 +111,7 @@ class AssistantOrchestrator:
         workflow_template_indexer: WorkflowTemplateSemanticIndexer | None = None,
         playbook_store: PlaybookStore | None = None,
         context_providers: tuple[ContextProvider, ...] = (),
+        media_sessions: MediaSessionRegistry | None = None,
     ) -> None:
         self.router = router
         self.engine = engine
@@ -131,6 +135,7 @@ class AssistantOrchestrator:
         self.workflow_template_indexer = workflow_template_indexer
         self.playbook_store = playbook_store
         self.context_providers = context_providers
+        self.media_sessions = media_sessions or MediaSessionRegistry()
         self._active_correlation: UUID | None = None
         self._request_state_lock = threading.Lock()
         self._active_request_correlations: list[UUID] = []
@@ -270,7 +275,7 @@ class AssistantOrchestrator:
         lines = [
             "[assistant debug]",
             f"correlation_id={correlation_id}",
-            f"request={request_text}",
+            f"request={AuditStore.redact(request_text)}",
             f"intent={intent_name}",
             f"outcome={outcome_label}",
             f"response_type={response.response_type.value}",
@@ -281,7 +286,12 @@ class AssistantOrchestrator:
                 [
                     f"skill_id={call.skill_id}",
                     f"caller={call.caller}",
-                    "arguments=" + json.dumps(call.arguments, sort_keys=True, default=str),
+                    "arguments="
+                    + json.dumps(
+                        AuditStore.redact(call.arguments),
+                        sort_keys=True,
+                        default=str,
+                    ),
                 ]
             )
         if outcome.permission_requests:
@@ -815,6 +825,8 @@ class AssistantOrchestrator:
         paths = result.data.get("paths") if isinstance(result.data, dict) else None
         if isinstance(paths, list) and all(isinstance(path, str) for path in paths):
             self.remember_file_candidates(tuple(paths))
+        if result.media_directive is not None:
+            self.state.remember_media_directive(result.media_directive)
 
     def _select_file_candidate(self, selector: str) -> Response:
         if not self._file_candidates:
@@ -1016,6 +1028,22 @@ class AssistantOrchestrator:
     def _resolve_file_placeholders(
         self, intent: Intent, *, session_id: str, request_text: str
     ) -> Intent | Response:
+        if intent.name == "media.viewer_control":
+            if self.media_sessions.active_presentation_id() is None:
+                return Response(
+                    display_text="There is no active in-app media viewer to control.",
+                    speech_text="There is no active media viewer.",
+                    response_type=ResponseType.CLARIFICATION,
+                    severity="warning",
+                    speak=True,
+                )
+            return intent
+        if intent.name == "media.present":
+            return self._resolve_media_placeholders(
+                intent,
+                session_id=session_id,
+                request_text=request_text,
+            )
         if intent.name != "windows.file_operation":
             return intent
         arguments = dict(intent.arguments)
@@ -1089,6 +1117,93 @@ class AssistantOrchestrator:
                         speak=True,
                     )
             arguments["source"] = str(resolve_user_path(source))
+        return intent.model_copy(update={"arguments": arguments})
+
+    def _resolve_media_placeholders(
+        self,
+        intent: Intent,
+        *,
+        session_id: str,
+        request_text: str,
+    ) -> Intent | Response:
+        arguments = dict(intent.arguments)
+        source = arguments.get("source")
+        if isinstance(source, str):
+            if is_explicit_remote_media_url(source):
+                return intent
+            if source == "${selected_file}" or source.casefold() in {
+                "it",
+                "that",
+                "this",
+                "the selected file",
+                "the selected item",
+            }:
+                if not self._selected_file:
+                    return Response(
+                        display_text=("Select one of the file search results before showing it."),
+                        speech_text="Select a file first.",
+                        response_type=ResponseType.CLARIFICATION,
+                        severity="warning",
+                        speak=True,
+                    )
+                source = self._selected_file
+            else:
+                candidate = self._candidate_reference(source)
+                if isinstance(candidate, Response):
+                    return candidate
+                if candidate is not None:
+                    source = candidate
+                    self._selected_file = candidate
+            resolved_source = self._resolve_named_folder_path(
+                source,
+                session_id=session_id,
+                request_text=request_text,
+            )
+            if isinstance(resolved_source, Response):
+                return resolved_source
+            source = self._normalize_user_folder_reference(resolved_source)
+            if not is_explicit_media_path(source):
+                return Response(
+                    display_text=(
+                        f'I could not resolve "{source}" to one exact media file. '
+                        "Select a numbered result or name the folder to search."
+                    ),
+                    speech_text=("Select a media result or tell me which folder to search."),
+                    response_type=ResponseType.CLARIFICATION,
+                    severity="warning",
+                    speak=True,
+                )
+            try:
+                arguments["source"] = str(resolve_user_path(source))
+            except ValueError as exc:
+                return Response(
+                    display_text=f"I could not resolve that media path: {exc}",
+                    speech_text="I could not resolve that media path.",
+                    response_type=ResponseType.CLARIFICATION,
+                    severity="warning",
+                    speak=True,
+                )
+        root = arguments.get("root")
+        if isinstance(root, str):
+            resolved_root = self._resolve_named_folder_path(
+                root,
+                session_id=session_id,
+                request_text=request_text,
+            )
+            if isinstance(resolved_root, Response):
+                return resolved_root
+            try:
+                arguments["root"] = str(
+                    resolve_user_path(self._normalize_user_folder_reference(resolved_root))
+                )
+            except ValueError as exc:
+                return Response(
+                    display_text=f"I could not resolve that media folder: {exc}",
+                    speech_text="I could not resolve that media folder.",
+                    response_type=ResponseType.CLARIFICATION,
+                    severity="warning",
+                    speak=True,
+                )
         return intent.model_copy(update={"arguments": arguments})
 
     @staticmethod
@@ -1869,10 +1984,8 @@ class AssistantOrchestrator:
                 invoked_by_voice=invoked_by_voice,
             )
         if intent.name == "control.forget":
-            self._session_context.clear()
-            self._file_candidates = ()
-            self._selected_file = None
-            self._pending_clarification_follow_up = None
+            self.state.clear()
+            self.media_sessions.clear()
             response = Response(
                 display_text="I forgot the current session context.",
                 speech_text="Session context cleared.",
@@ -2582,8 +2695,8 @@ class AssistantOrchestrator:
             f"session_id={transcript.session_id}",
             "gate=sensitive_target_confidence",
             "decision=clarification",
-            f"raw_text={transcript.raw_text}",
-            f"normalized_text={transcript.normalized_text}",
+            f"raw_text={AuditStore.redact(transcript.raw_text)}",
+            f"normalized_text={AuditStore.redact(transcript.normalized_text)}",
             f"transcript_confidence={transcript.confidence}",
             "transcript_threshold=0.75",
             "word_threshold=0.65",
@@ -2591,7 +2704,11 @@ class AssistantOrchestrator:
             f"sensitive={sensitive}",
             f"intent={intent.name if intent else None}",
             "intent_arguments="
-            + json.dumps(intent.arguments if intent else {}, sort_keys=True, default=str),
+            + json.dumps(
+                AuditStore.redact(intent.arguments if intent else {}),
+                sort_keys=True,
+                default=str,
+            ),
             "sensitive_argument_keys="
             + json.dumps(sensitive_argument_keys, sort_keys=True, default=str),
             "low_confidence_words="

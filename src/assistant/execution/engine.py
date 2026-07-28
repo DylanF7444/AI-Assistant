@@ -40,6 +40,17 @@ from assistant.storage.database import AuditStore, MetricsStore
 logger = logging.getLogger("assistant.execution")
 
 
+def _execution_timeout_seconds(call: SkillCall) -> float:
+    if call.skill_id == "core.timer":
+        return max(30.0, float(call.arguments.get("seconds", 0)) + 1.0)
+    if call.skill_id == "web.headless_read":
+        return min(65.0, float(call.arguments.get("timeout_seconds", 30)) + 5.0)
+    if call.skill_id == "media.present":
+        # Remote media acquisition supports a configured timeout of up to 120 seconds.
+        return 125.0
+    return 30.0
+
+
 @dataclass(frozen=True)
 class ExecutionOutcome:
     result: SkillResult | None = None
@@ -510,13 +521,7 @@ class ExecutionEngine:
             if skill.manifest.safe_to_retry
             else 1
         )
-        timeout_seconds = (
-            max(30.0, float(call.arguments.get("seconds", 0)) + 1.0)
-            if call.skill_id == "core.timer"
-            else min(65.0, float(call.arguments.get("timeout_seconds", 30)) + 5.0)
-            if call.skill_id == "web.headless_read"
-            else 30.0
-        )
+        timeout_seconds = _execution_timeout_seconds(call)
         result = None
         attempts = 0
         try:
@@ -814,6 +819,14 @@ class ExecutionEngine:
                 }
             },
             sensitive=any(result.sensitive for result in results.values()),
+            media_directive=next(
+                (
+                    result.media_directive
+                    for result in reversed(tuple(results.values()))
+                    if result.media_directive is not None
+                ),
+                None,
+            ),
         )
 
     async def cancel(self, correlation_id: UUID | None = None) -> None:

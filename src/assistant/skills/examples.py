@@ -50,6 +50,37 @@ DEFAULT_SKILL_EXAMPLES: tuple[SkillExample, ...] = (
         notes="Bringing an existing application forward is a window focus operation.",
     ),
     SkillExample(
+        utterance="show the second photo result in the assistant",
+        skill_id="media.present",
+        arguments={
+            "source": "the second result",
+            "kind_hint": "image",
+            "autoplay": False,
+        },
+        notes=(
+            "In-app presentation is distinct from opening the file in its "
+            "registered Windows application."
+        ),
+    ),
+    SkillExample(
+        utterance="play the meeting recording from my Music folder",
+        skill_id="media.present",
+        arguments={
+            "query": "meeting",
+            "root": "music",
+            "kind_hint": "audio",
+            "autoplay": True,
+            "limit": 20,
+        },
+        notes="Autoplay is allowed only because the request explicitly says play.",
+    ),
+    SkillExample(
+        utterance="skip ahead thirty seconds in this video",
+        skill_id="media.viewer_control",
+        arguments={"action": "seek_relative", "delta_seconds": 30},
+        notes="This controls only the active in-app viewer, not global Windows media.",
+    ),
+    SkillExample(
         utterance="clean up my downloads",
         skill_id="windows.file_operation",
         notes=(

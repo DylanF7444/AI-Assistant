@@ -11,11 +11,64 @@ from typing import Any
 
 from assistant.audio.capture import enumerate_devices
 from assistant.config import Settings
+from assistant.presentation.remote_media import RemoteMediaCache
+from assistant.presentation.session import MediaSessionRegistry
 from assistant.skills.registry import SkillRegistry
 from assistant.storage.database import Database
 
 
-def hardware_report() -> dict[str, Any]:
+def multimedia_report(
+    *,
+    media_cache: RemoteMediaCache | None = None,
+    media_sessions: MediaSessionRegistry | None = None,
+) -> dict[str, Any]:
+    report: dict[str, Any] = {
+        "available": False,
+        "image_formats": (),
+        "audio_video_formats": (),
+        "output_devices": (),
+        "cache_bytes": media_cache.cache_size() if media_cache is not None else 0,
+        "last_error_code": None,
+    }
+    if media_sessions is not None:
+        snapshot = media_sessions.current()
+        if snapshot is not None:
+            report["last_error_code"] = snapshot.error_code
+    try:
+        from PySide6.QtGui import QImageReader
+        from PySide6.QtMultimedia import QMediaDevices
+
+        from assistant.ui.desktop.media_backend import QtMediaPlaybackBackend
+
+        report.update(
+            available=True,
+            image_formats=tuple(
+                sorted(
+                    bytes(value).decode("ascii", errors="ignore").casefold()
+                    for value in QImageReader.supportedImageFormats()
+                )
+            ),
+            audio_video_formats=QtMediaPlaybackBackend.supported_formats(),
+            output_devices=tuple(
+                sorted(
+                    {
+                        device.description()
+                        for device in QMediaDevices.audioOutputs()
+                        if device.description()
+                    }
+                )
+            ),
+        )
+    except Exception as error:
+        report["backend_error_type"] = type(error).__name__
+    return report
+
+
+def hardware_report(
+    *,
+    media_cache: RemoteMediaCache | None = None,
+    media_sessions: MediaSessionRegistry | None = None,
+) -> dict[str, Any]:
     report: dict[str, Any] = {
         "os": platform.platform(),
         "python": platform.python_version(),
@@ -23,6 +76,10 @@ def hardware_report() -> dict[str, Any]:
         "audio_devices": len(enumerate_devices()),
         "cuda_available": False,
         "gpu": None,
+        "multimedia": multimedia_report(
+            media_cache=media_cache,
+            media_sessions=media_sessions,
+        ),
     }
     nvidia_smi = shutil.which("nvidia-smi")
     if nvidia_smi:

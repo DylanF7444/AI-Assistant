@@ -28,7 +28,7 @@ from assistant.ui.desktop.workers import AsyncWorker, PassiveVoiceWorker
 
 @pytest.mark.ui
 def test_desktop_preserves_all_tab_labels():
-    assert len(TAB_LABELS) == 17
+    assert len(TAB_LABELS) == 18
     assert {label for labels in TAB_GROUPS.values() for label in labels} == set(TAB_LABELS)
 
 
@@ -152,7 +152,7 @@ def test_compact_companion_switches_views_renders_and_hides_to_tray(
 
     assert window._window_mode == "compact"
     assert window.view_stack.currentWidget() is window.compact_panel
-    assert window.tabs.count() == 17
+    assert window.tabs.count() == 18
     assert window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
     assert (window.minimumWidth(), window.minimumHeight()) == (380, 500)
     assert (window.maximumWidth(), window.maximumHeight()) == (520, 680)

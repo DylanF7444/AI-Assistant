@@ -1,8 +1,14 @@
+from datetime import datetime
+
+import pytest
+
 import assistant.bootstrap as bootstrap
 from assistant.bootstrap import build_container
+from assistant.config import Settings
 from assistant.storage.aliases import AliasStore
 from assistant.storage.database import SettingsStore
 from assistant.tts.elevenlabs import ElevenLabsProvider
+from assistant.ui.desktop.app import _notification_quiet_hours_active
 
 
 def test_database_path_and_url_are_pure(settings, tmp_path):
@@ -55,6 +61,27 @@ def test_persisted_settings_load_on_restart(settings):
 def test_duckduckgo_is_the_default_search_provider(settings):
     container = build_container(settings)
     assert container.settings.search_provider == "duckduckgo"
+
+
+def test_notification_quiet_hours_validate_and_handle_overnight_window(tmp_path):
+    settings = Settings(
+        profile="testing",
+        data_dir=tmp_path,
+        notification_quiet_hours_enabled=True,
+        notification_quiet_hours_start="22:00",
+        notification_quiet_hours_end="07:00",
+    )
+
+    assert _notification_quiet_hours_active(settings, datetime(2026, 7, 28, 23, 30))
+    assert _notification_quiet_hours_active(settings, datetime(2026, 7, 28, 6, 30))
+    assert not _notification_quiet_hours_active(settings, datetime(2026, 7, 28, 12, 0))
+
+    with pytest.raises(ValueError, match="HH:MM"):
+        Settings(
+            profile="testing",
+            data_dir=tmp_path,
+            notification_quiet_hours_start="night",
+        )
 
 
 def test_alias_store_batch_registers_applications(settings):

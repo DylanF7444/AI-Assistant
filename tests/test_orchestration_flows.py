@@ -1,6 +1,14 @@
 from uuid import uuid4
 
-from assistant.contracts import Intent, Response, ResponseType, Transcript, WordTimestamp
+from assistant.contracts import (
+    Intent,
+    MediaAction,
+    MediaDirective,
+    Response,
+    ResponseType,
+    Transcript,
+    WordTimestamp,
+)
 from assistant.orchestration import ConversationState, FileReferenceResolver, evaluate_voice_gate
 
 
@@ -9,6 +17,12 @@ def test_conversation_state_owns_file_selection_and_session_reset():
     state.session_context.append({"request": "hello"})
 
     state.remember_file_candidates(["report.txt"])
+    state.remember_media_directive(
+        MediaDirective(
+            presentation_id=uuid4(),
+            action=MediaAction.PAUSE,
+        )
+    )
 
     assert state.file_candidates == ("report.txt",)
     assert state.selected_file == "report.txt"
@@ -18,6 +32,7 @@ def test_conversation_state_owns_file_selection_and_session_reset():
     assert not state.session_context
     assert state.file_candidates == ()
     assert state.selected_file is None
+    assert state.active_presentation_id is None
 
 
 def test_file_reference_resolver_returns_typed_clarification():

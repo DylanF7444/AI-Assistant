@@ -8,6 +8,8 @@ from pydantic import BaseModel
 from assistant.audio.capture import enumerate_devices
 from assistant.contracts import ResultStatus, SkillCall, SkillResult
 from assistant.diagnostics import hardware_report
+from assistant.presentation.remote_media import RemoteMediaCache
+from assistant.presentation.session import MediaSessionRegistry
 from assistant.skills.base import Skill
 from assistant.skills.builtin import manifest
 from assistant.skills.registry import SkillRegistry
@@ -28,13 +30,24 @@ class DiagnosticSkill(Skill):
     input_model = DiagnosticInput
     output_model = DiagnosticOutput
 
-    def __init__(self, registry: SkillRegistry, providers: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        registry: SkillRegistry,
+        providers: dict[str, Any],
+        *,
+        media_cache: RemoteMediaCache | None = None,
+        media_sessions: MediaSessionRegistry | None = None,
+    ) -> None:
         self.registry = registry
         self.providers = providers
+        self.media_cache = media_cache
+        self.media_sessions = media_sessions
         self.manifest = manifest(
             skill_id="core.diagnostic",
             display_name="Diagnostic",
-            description="Report local hardware, microphone, model, and skill health.",
+            description=(
+                "Report local hardware, microphone, model, media runtime, and skill health."
+            ),
             input_model=self.input_model,
             output_model=self.output_model,
             safe_to_retry=True,
@@ -78,7 +91,10 @@ class DiagnosticSkill(Skill):
                     value = {"healthy": False, "error": str(exc)}
                 skill_health.append({"skill_id": item.skill_id, **value})
         output = DiagnosticOutput(
-            hardware=hardware_report(),
+            hardware=hardware_report(
+                media_cache=self.media_cache,
+                media_sessions=self.media_sessions,
+            ),
             providers=provider_health,
             skills=skill_health,
             guidance=guidance,

@@ -15,6 +15,30 @@
 8. Structured results produce display and optional speech responses.
 9. Permission decisions and outcomes are written to a separate audit log.
 
+## Media presentation
+
+`media.present` and `media.viewer_control` use the normal router, schema, policy,
+permission, engine, response, and audit flow. A successful preparation returns
+an immutable `MediaDirective`; it does not claim that decoding has succeeded.
+The desktop applies the directive only to its matching in-memory presentation
+session, rechecks the source fingerprint, and separately records loading, ready,
+playing, paused, stopped, failed, fullscreen, and closed state.
+
+Local sources are canonical exact files or bounded filename searches beneath an
+approved root. Explicit remote sources pass public-HTTPS and address validation,
+download into a size/age-bounded content-addressed cache, and pass MIME and
+signature validation before Qt receives a local path. Qt never receives an
+unvalidated network URL. Query-free provenance is retained in memory; URL query
+strings, decoded content, thumbnails, and frames are excluded from audit and
+diagnostic logs.
+
+Images decode on bounded worker threads through `QImageReader`. Audio and video
+use a testable backend around `QMediaPlayer`, `QAudioOutput`, and `QVideoWidget`.
+An audio-focus coordinator aggregates named TTS and viewer outputs before
+suppressing microphone capture. The desktop pauses viewer media for an explicit
+assistant interaction and resumes only the same unmodified session. Emergency
+Stop and shutdown stop playback.
+
 ## Application self-knowledge
 
 Open-ended questions about Local Assistant itself use the same planner path as
@@ -156,12 +180,20 @@ migration. Stable skill IDs are never inferred from display names.
 - `assistant.bootstrap` is the composition root and uses named builders for
   storage, retrieval, registry, context, and audio services.
 - `assistant.scheduling` owns trigger calculation, durable definitions and runs,
-  background authorization, notification delivery, leasing, approvals, and the
-  background runtime. It invokes skills only through `ExecutionEngine`.
+  background authorization, the database-backed notification Inbox, delivery,
+  leasing, approvals, and the background runtime. It invokes skills only
+  through `ExecutionEngine`.
 - `assistant.dashboard` owns metric contracts, providers, registry, validated
   layout/connection/sample storage, permission-aware refresh, history, and
   diagnostics. Qt dashboard widgets depend on it only through
   `DesktopController`.
+- `assistant.presentation` owns probing, local reference resolution, guarded
+  remote acquisition/cache policy, and in-memory presentation sessions.
+- `assistant.ui.desktop.notification_widgets` owns transient foreground
+  presentation while the scheduling notification store remains authoritative.
+- `assistant.ui.desktop.media_backend`, `media_viewer`, and `result_window` own
+  Qt decoding, detached presentation, playback, report display, controls, and
+  applied/failed lifecycle reporting.
 
 The dependency direction remains contracts/interfaces -> policy and domain
 services -> orchestration -> UI/composition. Model output never calls platform

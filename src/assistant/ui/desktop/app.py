@@ -46,6 +46,8 @@ from assistant.ui.desktop.tabs import TAB_LABELS
 from assistant.windows.adapters import LocalWindowsDeviceAdapter
 from assistant.windows.singleton import acquire_single_instance
 
+_WINDOWS_APP_USER_MODEL_ID = "LocalAssistant.Desktop"
+
 _DEMO_STRING_VALUES = {
     "application": "notepad",
     "body": "Created by the Skills tab demo.",
@@ -128,6 +130,28 @@ def _demo_arguments(input_schema: dict[str, Any]) -> dict[str, Any]:
 
     arguments = sample(input_schema)
     return arguments if isinstance(arguments, dict) else {}
+
+
+def _register_windows_app_identity() -> None:
+    if sys.platform != "win32":
+        return
+    with suppress(Exception):
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(_WINDOWS_APP_USER_MODEL_ID)
+
+
+def _notification_quiet_hours_active(settings: Any, now: datetime | None = None) -> bool:
+    if not settings.notification_quiet_hours_enabled:
+        return False
+    current = (now or datetime.now().astimezone()).time().replace(tzinfo=None)
+    start = datetime.strptime(settings.notification_quiet_hours_start, "%H:%M").time()
+    end = datetime.strptime(settings.notification_quiet_hours_end, "%H:%M").time()
+    if start == end:
+        return True
+    if start < end:
+        return start <= current < end
+    return current >= start or current < end
 
 
 def run_desktop(container: Container) -> int:
@@ -222,8 +246,11 @@ def run_desktop(container: Container) -> int:
         from PySide6.QtCore import QObject, QRect, QSize, Qt, QTimer, Signal
         from PySide6.QtGui import (
             QAction,
+            QColor,
             QIcon,
             QKeySequence,
+            QPainter,
+            QPixmap,
             QShortcut,
             QTextCursor,
         )
@@ -269,11 +296,34 @@ def run_desktop(container: Container) -> int:
     from assistant.ui.desktop.dashboard import DashboardPage
     from assistant.ui.desktop.dashboard_connections import DashboardConnectionsDialog
     from assistant.ui.desktop.dashboard_editor import DashboardEditor
+    from assistant.ui.desktop.media_viewer import MediaCompactCard, MediaViewer
+    from assistant.ui.desktop.notification_widgets import (
+        NotificationBanner,
+        NotificationDrawer,
+    )
+    from assistant.ui.desktop.result_window import ResultWindow
     from assistant.ui.desktop.workers import (
         AsyncWorker,
         PassiveVoiceWorker,
         VoicePromptWorker,
     )
+
+    def application_icon() -> QIcon:
+        pixmap = QPixmap(64, 64)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(QColor("#5a8cff"))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(4, 4, 56, 56, 16, 16)
+        painter.setPen(QColor("#ffffff"))
+        font = painter.font()
+        font.setBold(True)
+        font.setPointSize(25)
+        painter.setFont(font)
+        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "A")
+        painter.end()
+        return QIcon(pixmap)
 
     class RequestTextEdit(QTextEdit):
         submitted = Signal()
@@ -321,6 +371,7 @@ def run_desktop(container: Container) -> int:
         expand_requested = Signal()
         pinned_changed = Signal(bool)
         activation_mode_changed = Signal(str)
+        inbox_requested = Signal()
 
         def __init__(self, *, activation_mode: str, pinned: bool, wakeword_active: bool) -> None:
             super().__init__()
@@ -348,8 +399,13 @@ def run_desktop(container: Container) -> int:
             self.expand_button.setObjectName("compactHeaderButton")
             self.expand_button.setAccessibleName("Open full assistant")
             self.expand_button.clicked.connect(self.expand_requested.emit)
+            self.inbox_button = QPushButton("Inbox")
+            self.inbox_button.setObjectName("compactHeaderButton")
+            self.inbox_button.setAccessibleName("Open notification inbox")
+            self.inbox_button.clicked.connect(self.inbox_requested.emit)
             header.addWidget(self.status_dot)
             header.addWidget(self.status, 1)
+            header.addWidget(self.inbox_button)
             header.addWidget(self.pin_button)
             header.addWidget(self.expand_button)
             layout.addLayout(header)
@@ -436,6 +492,8 @@ def run_desktop(container: Container) -> int:
             self.response.setAccessibleName("Compact assistant response")
             self.response.setMinimumHeight(110)
             layout.addWidget(self.response, 1)
+            self.media_card = MediaCompactCard()
+            layout.addWidget(self.media_card)
 
             compose_label = QLabel("NEW REQUEST")
             compose_label.setObjectName("sectionLabel")
@@ -556,6 +614,7 @@ def run_desktop(container: Container) -> int:
             self._shutdown_started = False
             self._activity_started = time.perf_counter()
             self._background_correlations: dict[UUID, int] = {}
+            self._last_tray_notification_id: str | None = None
             self._status_frame = 0
             self._active_state = PipelineState.IDLE
             self._startup_offline_lock = container.settings.offline_lock
@@ -581,6 +640,7 @@ def run_desktop(container: Container) -> int:
             tab_factories = (
                 self._dashboard_tab,
                 self._command_tab,
+                self._notifications_tab,
                 self._active_scripts_tab,
                 self._skills_tab,
                 self._extension_hub_tab,
@@ -605,9 +665,7 @@ def run_desktop(container: Container) -> int:
                 "dashboard": TAB_LABELS.index("Dashboard"),
                 "assistant": TAB_LABELS.index("Assistant"),
             }
-            self.tabs.setCurrentIndex(
-                self._primary_tab_indices[self._desktop_state.primary_screen]
-            )
+            self.tabs.setCurrentIndex(self._primary_tab_indices[self._desktop_state.primary_screen])
             self.tabs.currentChanged.connect(self._full_tab_changed)
             self.compact_panel = CompactAssistantPanel(
                 activation_mode=container.settings.voice_activation_mode,
@@ -618,13 +676,24 @@ def run_desktop(container: Container) -> int:
             self.compact_panel.listen_requested.connect(self.listen)
             self.compact_panel.cancel_requested.connect(self.cancel)
             self.compact_panel.expand_requested.connect(lambda: self._switch_window_mode("full"))
+            self.compact_panel.inbox_requested.connect(self._toggle_notification_drawer)
             self.compact_panel.pinned_changed.connect(self._set_compact_pinned)
             self.compact_panel.activation_mode_changed.connect(self._set_voice_activation_mode)
+            self.media_viewer.session_changed.connect(self.compact_panel.media_card.set_snapshot)
+            self.compact_panel.media_card.open_requested.connect(self._open_media_viewer)
+            self.compact_panel.media_card.close_requested.connect(self.media_viewer.clear)
+            self.compact_panel.media_card.play_pause_requested.connect(self.media_viewer.play_pause)
             self.view_stack = QStackedWidget()
             self.view_stack.setObjectName("assistantViewStack")
             self.view_stack.addWidget(self.compact_panel)
             self.view_stack.addWidget(self.tabs)
             self.setCentralWidget(self.view_stack)
+            self.notification_banner = NotificationBanner(self)
+            self.notification_banner.open_requested.connect(self._open_notification)
+            self.notification_drawer = NotificationDrawer(self)
+            self.notification_drawer.open_requested.connect(self._open_notification)
+            self.notification_drawer.dismiss_requested.connect(self._dismiss_notification)
+            self.notification_drawer.see_all_requested.connect(self._open_notification_inbox)
             self._status_timer = QTimer(self)
             self._status_timer.setInterval(420)
             self._status_timer.timeout.connect(self._animate_status)
@@ -642,6 +711,7 @@ def run_desktop(container: Container) -> int:
             self._add_shortcut("Ctrl+Return", self._submit_current_view)
             self._register_global_hotkeys()
             self._apply_window_mode(self._window_mode, initial=True)
+            self._refresh_notification_ui()
             if container.wakeword:
                 self._start_wakeword()
             self._start_passive_voice()
@@ -679,7 +749,16 @@ def run_desktop(container: Container) -> int:
                 height=geometry.height(),
             )
             field = "compact_geometry" if self._window_mode == "compact" else "full_geometry"
-            self._desktop_state = self._desktop_state.model_copy(update={field: saved})
+            updates: dict[str, Any] = {field: saved}
+            if hasattr(self, "result_window"):
+                result = self.result_window.normalGeometry()
+                updates["result_geometry"] = WindowGeometry(
+                    x=result.x(),
+                    y=result.y(),
+                    width=result.width(),
+                    height=result.height(),
+                )
+            self._desktop_state = self._desktop_state.model_copy(update=updates)
 
         def _persist_window_state(self) -> None:
             self._desktop_state_store.set(
@@ -864,12 +943,8 @@ def run_desktop(container: Container) -> int:
             self.dashboard_page.refresh_requested.connect(self._refresh_dashboard)
             self.dashboard_page.refresh_due_requested.connect(self._refresh_dashboard)
             self.dashboard_page.customize_requested.connect(self._customize_dashboard)
-            self.dashboard_page.connections_requested.connect(
-                self._manage_dashboard_connections
-            )
-            self.dashboard_page.permission_requested.connect(
-                self._grant_dashboard_permission
-            )
+            self.dashboard_page.connections_requested.connect(self._manage_dashboard_connections)
+            self.dashboard_page.permission_requested.connect(self._grant_dashboard_permission)
             self.dashboard_page.became_visible.connect(self._refresh_dashboard)
             return self.dashboard_page
 
@@ -970,9 +1045,7 @@ def run_desktop(container: Container) -> int:
             payload: tuple[UUID, bool],
         ) -> None:
             try:
-                connection = controller.set_dashboard_connection_history_enabled(
-                    *payload
-                )
+                connection = controller.set_dashboard_connection_history_enabled(*payload)
             except (KeyError, RuntimeError, ValueError) as error:
                 dialog.operation_failed(str(error))
                 return
@@ -998,9 +1071,7 @@ def run_desktop(container: Container) -> int:
                     None,
                 )
             )
-            dialog.operation_status.setText(
-                f"Deleted {deleted} retained numeric sample(s)."
-            )
+            dialog.operation_status.setText(f"Deleted {deleted} retained numeric sample(s).")
 
         def _grant_dashboard_permission(self, card_id: UUID) -> None:
             try:
@@ -1116,6 +1187,260 @@ def run_desktop(container: Container) -> int:
                 QTimer.singleShot(0, self._refresh_dashboard)
             else:
                 QTimer.singleShot(0, self.transcript.setFocus)
+
+        def _notifications_tab(self) -> QWidget:
+            page = QWidget()
+            page.setObjectName("notificationsPage")
+            layout = QVBoxLayout(page)
+            layout.setContentsMargins(28, 24, 28, 24)
+            layout.setSpacing(12)
+
+            header = QHBoxLayout()
+            heading = QVBoxLayout()
+            title = QLabel("Inbox")
+            title.setObjectName("pageTitle")
+            subtitle = QLabel(
+                "Reminders, completed work, reports, and items that need your attention."
+            )
+            subtitle.setObjectName("pageSubtitle")
+            subtitle.setWordWrap(True)
+            heading.addWidget(title)
+            heading.addWidget(subtitle)
+            mark_all = QPushButton("Mark all read")
+            mark_all.clicked.connect(self._mark_all_notifications_read)
+            refresh = QPushButton("Refresh")
+            refresh.clicked.connect(self._refresh_notification_ui)
+            header.addLayout(heading, 1)
+            header.addWidget(mark_all)
+            header.addWidget(refresh)
+            layout.addLayout(header)
+
+            self.notification_table = QTableWidget(0, 5)
+            self.notification_table.setObjectName("notificationTable")
+            self.notification_table.setAccessibleName("Notification inbox")
+            self.notification_table.setHorizontalHeaderLabels(
+                ["Status", "Time", "Type", "Title", "Preview"]
+            )
+            self._configure_data_table(self.notification_table)
+            self.notification_table.horizontalHeader().setSectionResizeMode(
+                4, QHeaderView.ResizeMode.Stretch
+            )
+            self.notification_table.itemSelectionChanged.connect(self._update_notification_detail)
+            self.notification_table.cellDoubleClicked.connect(
+                lambda _row, _column: self._open_selected_notification()
+            )
+            layout.addWidget(self.notification_table, 1)
+
+            self.notification_detail = QTextEdit()
+            self.notification_detail.setObjectName("notificationDetail")
+            self.notification_detail.setAccessibleName("Selected notification details")
+            self.notification_detail.setReadOnly(True)
+            self.notification_detail.setPlaceholderText(
+                "Select a notification to see its full preview."
+            )
+            self.notification_detail.setMaximumHeight(150)
+            layout.addWidget(self.notification_detail)
+
+            actions = QHBoxLayout()
+            open_selected = QPushButton("Open result")
+            open_selected.setObjectName("primaryButton")
+            open_selected.clicked.connect(self._open_selected_notification)
+            mark_read = QPushButton("Mark read")
+            mark_read.clicked.connect(self._mark_selected_notification_read)
+            dismiss = QPushButton("Dismiss")
+            dismiss.clicked.connect(self._dismiss_selected_notification)
+            actions.addWidget(open_selected)
+            actions.addWidget(mark_read)
+            actions.addWidget(dismiss)
+            actions.addStretch()
+            layout.addLayout(actions)
+            return page
+
+        def _refresh_notification_ui(self) -> None:
+            notifications = container.notification_center.notifications(limit=200)
+            unread_count = container.notification_center.unread_count()
+            if hasattr(self, "notification_table"):
+                selected_id = self._selected_table_id(self.notification_table)
+                self.notification_table.setRowCount(0)
+                for row, notification in enumerate(notifications):
+                    self._set_table_row(
+                        self.notification_table,
+                        row,
+                        [
+                            "New" if notification.read_at is None else "Read",
+                            notification.created_at.astimezone().strftime("%b %d, %I:%M %p"),
+                            notification.category.replace("_", " ").title(),
+                            notification.title,
+                            notification.message,
+                        ],
+                    )
+                    id_item = self.notification_table.item(row, 0)
+                    id_item.setData(
+                        Qt.ItemDataRole.UserRole,
+                        str(notification.notification_id),
+                    )
+                    if selected_id == str(notification.notification_id):
+                        self.notification_table.selectRow(row)
+                self._update_notification_detail()
+            if hasattr(self, "notification_drawer"):
+                self.notification_drawer.refresh(
+                    notifications[:8],
+                    unread_count=unread_count,
+                )
+            badge = "99+" if unread_count > 99 else str(unread_count)
+            label = f"Inbox ({badge})" if unread_count else "Inbox"
+            if hasattr(self, "tabs"):
+                self.tabs.setTabText(TAB_LABELS.index("Inbox"), label)
+            if hasattr(self, "notification_button"):
+                self.notification_button.setText(label)
+            if hasattr(self, "compact_panel"):
+                self.compact_panel.inbox_button.setText(label)
+
+        def _selected_notification_id(self) -> UUID | None:
+            if not hasattr(self, "notification_table"):
+                return None
+            value = self._selected_table_id(self.notification_table)
+            try:
+                return UUID(value) if value else None
+            except ValueError:
+                return None
+
+        def _update_notification_detail(self) -> None:
+            if not hasattr(self, "notification_detail"):
+                return
+            notification_id = self._selected_notification_id()
+            if notification_id is None:
+                self.notification_detail.clear()
+                return
+            try:
+                notification = container.notification_center.get(notification_id)
+            except KeyError:
+                self.notification_detail.clear()
+                return
+            self.notification_detail.setPlainText(f"{notification.title}\n\n{notification.message}")
+
+        def _mark_selected_notification_read(self) -> None:
+            notification_id = self._selected_notification_id()
+            if notification_id is None:
+                self.statusBar().showMessage("Select a notification first.", 3000)
+                return
+            with suppress(KeyError):
+                container.notification_center.mark_read(notification_id)
+            self._refresh_notification_ui()
+
+        def _mark_all_notifications_read(self) -> None:
+            changed = container.notification_center.mark_all_read()
+            self.statusBar().showMessage(
+                f"Marked {changed} notification{'s' if changed != 1 else ''} as read.",
+                3000,
+            )
+            self._refresh_notification_ui()
+
+        def _dismiss_selected_notification(self) -> None:
+            notification_id = self._selected_notification_id()
+            if notification_id is None:
+                self.statusBar().showMessage("Select a notification first.", 3000)
+                return
+            self._dismiss_notification(str(notification_id))
+
+        def _dismiss_notification(self, notification_id: str) -> None:
+            with suppress(KeyError, ValueError):
+                container.notification_center.dismiss(UUID(notification_id))
+            self._refresh_notification_ui()
+
+        def _open_selected_notification(self) -> None:
+            notification_id = self._selected_notification_id()
+            if notification_id is None:
+                self.statusBar().showMessage("Select a notification first.", 3000)
+                return
+            self._open_notification(str(notification_id))
+
+        def _open_notification(self, notification_id: str) -> None:
+            try:
+                notification = container.notification_center.mark_read(UUID(notification_id))
+            except (KeyError, ValueError):
+                self._refresh_notification_ui()
+                return
+            self.notification_drawer.hide()
+            if notification.run_id is not None:
+                self._open_automation_run(notification.run_id)
+            elif notification.category == "media":
+                self._open_media_viewer()
+            else:
+                self._open_notification_inbox()
+            self._refresh_notification_ui()
+
+        def _open_automation_run(self, run_id: UUID) -> None:
+            try:
+                run = container.schedule_store.get_run(run_id)
+            except KeyError:
+                self._show_automation_run(run_id)
+                return
+            if isinstance(run.result, dict):
+                schedule = next(
+                    (
+                        item
+                        for item in container.schedule_store.list()
+                        if item.schedule_id == run.schedule_id
+                    ),
+                    None,
+                )
+                display = run.result.get("display_text")
+                summary = run.result.get("summary")
+                sections = []
+                if isinstance(display, str) and display.strip():
+                    sections.append(display.strip())
+                if isinstance(summary, str) and summary.strip() and summary.strip() not in sections:
+                    sections.append(summary.strip())
+                if not sections:
+                    sections.append(json.dumps(run.result, indent=2, default=str))
+                completed = run.completed_at or run.started_at or run.scheduled_for
+                metadata = (
+                    f"{completed.astimezone().strftime('%b %d, %Y at %I:%M %p')}"
+                    f"  ·  {run.state.value.replace('_', ' ').title()}"
+                )
+                self.result_window.show_report(
+                    title=schedule.name if schedule is not None else "Automation result",
+                    body="\n\n".join(sections),
+                    metadata=metadata,
+                    status=run.result_status or run.state.value,
+                    run_id=str(run_id),
+                )
+                return
+            self._show_automation_run(run_id)
+
+        def _show_automation_run(self, run_id: UUID) -> None:
+            if self._window_mode != "full":
+                self._switch_window_mode("full")
+            if self._window_mode != "full":
+                return
+            self.tabs.setCurrentIndex(TAB_LABELS.index("Automations"))
+            self._refresh_active_scripts()
+            for table in (self.pending_approvals, self.schedule_history):
+                for row in range(table.rowCount()):
+                    item = table.item(row, 0)
+                    if item is not None and item.data(Qt.ItemDataRole.UserRole) == str(run_id):
+                        table.selectRow(row)
+                        table.scrollToItem(item)
+                        return
+
+        def _open_notification_inbox(self) -> None:
+            self.notification_drawer.hide()
+            if self._window_mode != "full":
+                self._switch_window_mode("full")
+            if self._window_mode == "full":
+                self.tabs.setCurrentIndex(TAB_LABELS.index("Inbox"))
+                self._refresh_notification_ui()
+
+        def _toggle_notification_drawer(self) -> None:
+            if self.notification_drawer.isVisible():
+                self.notification_drawer.hide()
+                return
+            self._refresh_notification_ui()
+            self._position_notification_overlays()
+            self.notification_drawer.show()
+            self.notification_drawer.raise_()
+            self.notification_drawer.setFocus()
 
         def _active_scripts_tab(self) -> QWidget:
             page = QWidget()
@@ -1402,6 +1727,8 @@ def run_desktop(container: Container) -> int:
                         details,
                     ],
                 )
+                id_item = self.schedule_history.item(row, 0)
+                id_item.setData(Qt.ItemDataRole.UserRole, str(run.run_id))
 
             hooks = [
                 (
@@ -1657,11 +1984,16 @@ def run_desktop(container: Container) -> int:
             heading_row = QHBoxLayout()
             eyebrow = QLabel("PRIVATE  |  LOCAL  |  READY")
             eyebrow.setObjectName("eyebrow")
+            self.notification_button = QPushButton("Inbox")
+            self.notification_button.setObjectName("secondaryButton")
+            self.notification_button.setAccessibleName("Open notification drawer")
+            self.notification_button.clicked.connect(self._toggle_notification_drawer)
             self.compact_view_button = QPushButton("Compact view")
             self.compact_view_button.setObjectName("secondaryButton")
             self.compact_view_button.setAccessibleName("Open compact assistant")
             self.compact_view_button.clicked.connect(lambda: self._switch_window_mode("compact"))
             heading_row.addWidget(eyebrow, 1)
+            heading_row.addWidget(self.notification_button)
             heading_row.addWidget(self.compact_view_button)
             title = QLabel("What can I help with?")
             title.setObjectName("pageTitle")
@@ -1770,6 +2102,28 @@ def run_desktop(container: Container) -> int:
             self.response.setPlaceholderText("The response will appear here.")
             self.response.setAccessibleName("Assistant response")
             self.response.setMinimumHeight(160)
+            self.media_viewer = MediaViewer(
+                controller.media_session_registry,
+                audio_focus=container.audio_focus,
+            )
+            self.result_window = ResultWindow(self.media_viewer)
+            self.result_window.automation_requested.connect(
+                lambda run_id: self._show_automation_run(UUID(run_id))
+            )
+            self.result_window.setGeometry(
+                self._bounded_window_geometry(
+                    self._desktop_state.result_geometry,
+                    default_width=920,
+                    default_height=680,
+                    minimum_width=640,
+                    minimum_height=440,
+                )
+            )
+            self.full_media_card = MediaCompactCard()
+            self.full_media_card.open_requested.connect(self._open_media_viewer)
+            self.full_media_card.close_requested.connect(self.media_viewer.clear)
+            self.full_media_card.play_pause_requested.connect(self.media_viewer.play_pause)
+            self.media_viewer.session_changed.connect(self.full_media_card.set_snapshot)
             self.response_type = QLabel("READY")
             self.response_type.setObjectName("responseBadge")
             self.response_type.setAccessibleName("Assistant response type")
@@ -1778,6 +2132,7 @@ def run_desktop(container: Container) -> int:
             response_header.addWidget(self.response_type)
             compose_layout.addLayout(response_header)
             compose_layout.addWidget(self.response)
+            compose_layout.addWidget(self.full_media_card)
             compose_layout.addSpacing(4)
             compose_layout.addWidget(input_label)
             compose_layout.addWidget(self.transcript)
@@ -1853,6 +2208,13 @@ def run_desktop(container: Container) -> int:
             was_active = self._pipeline_is_busy()
             active = state in self.ACTIVE_PIPELINE_STATES
             self._active_state = state
+            if active:
+                self.media_viewer.suspend_for_assistant()
+            elif state in {
+                PipelineState.IDLE,
+                PipelineState.ERROR,
+            }:
+                self.media_viewer.resume_after_assistant()
             self._status_frame = 0
             self.status.setText(labels[state])
             detail = message or {
@@ -2094,7 +2456,18 @@ def run_desktop(container: Container) -> int:
 
         def _handle_background_notification(self, message: Any) -> None:
             tray = getattr(self, "tray", None)
-            if tray is not None:
+            foreground = self.isVisible() and self.isActiveWindow()
+            quiet = _notification_quiet_hours_active(container.settings)
+            may_interrupt = not quiet or message.severity == "error"
+            if foreground and container.settings.show_in_app_notifications and may_interrupt:
+                self.notification_banner.show_notification(message)
+                self._position_notification_overlays()
+            elif (
+                container.settings.show_system_notifications
+                and may_interrupt
+                and tray is not None
+                and QSystemTrayIcon.supportsMessages()
+            ):
                 icons = {
                     "info": QSystemTrayIcon.MessageIcon.Information,
                     "success": QSystemTrayIcon.MessageIcon.Information,
@@ -2107,7 +2480,9 @@ def run_desktop(container: Container) -> int:
                     icons.get(message.severity, QSystemTrayIcon.MessageIcon.Information),
                     10_000,
                 )
+                self._last_tray_notification_id = str(message.notification_id)
             self.statusBar().showMessage(message.message, 10_000)
+            self._refresh_notification_ui()
             self._refresh_active_scripts()
 
         def _show_voice_transcript(self, text: str) -> None:
@@ -2734,8 +3109,7 @@ def run_desktop(container: Container) -> int:
                 try:
                     manifest = container.registry.get(value["skill_id"]).manifest
                     principal = (
-                        f"{manifest.display_name} "
-                        f"({friendly_identifier(value['skill_id'])})"
+                        f"{manifest.display_name} ({friendly_identifier(value['skill_id'])})"
                     )
                 except KeyError:
                     principal = (
@@ -3164,6 +3538,40 @@ def run_desktop(container: Container) -> int:
             self.setting_pause_while_locked.setChecked(
                 container.settings.pause_background_while_locked
             )
+            self.setting_notify_background_success = QCheckBox()
+            self.setting_notify_background_success.setChecked(
+                container.settings.notify_on_background_success
+            )
+            self.setting_notify_background_failure = QCheckBox()
+            self.setting_notify_background_failure.setChecked(
+                container.settings.notify_on_background_failure
+            )
+            self.setting_show_in_app_notifications = QCheckBox()
+            self.setting_show_in_app_notifications.setChecked(
+                container.settings.show_in_app_notifications
+            )
+            self.setting_show_system_notifications = QCheckBox()
+            self.setting_show_system_notifications.setChecked(
+                container.settings.show_system_notifications
+            )
+            self.setting_quiet_hours_enabled = QCheckBox()
+            self.setting_quiet_hours_enabled.setChecked(
+                container.settings.notification_quiet_hours_enabled
+            )
+            quiet_hours = QWidget()
+            quiet_hours_layout = QHBoxLayout(quiet_hours)
+            quiet_hours_layout.setContentsMargins(0, 0, 0, 0)
+            self.setting_quiet_hours_start = QLineEdit(
+                container.settings.notification_quiet_hours_start
+            )
+            self.setting_quiet_hours_start.setPlaceholderText("22:00")
+            self.setting_quiet_hours_end = QLineEdit(
+                container.settings.notification_quiet_hours_end
+            )
+            self.setting_quiet_hours_end.setPlaceholderText("07:00")
+            quiet_hours_layout.addWidget(self.setting_quiet_hours_start)
+            quiet_hours_layout.addWidget(QLabel("to"))
+            quiet_hours_layout.addWidget(self.setting_quiet_hours_end)
             self.setting_default_timezone = QLineEdit(container.settings.default_timezone)
             self.setting_stt = QLineEdit(container.settings.stt_model)
             self.setting_llm = QLineEdit(container.settings.llm_model)
@@ -3367,6 +3775,18 @@ def run_desktop(container: Container) -> int:
             form.addRow("Enable durable scheduling", self.setting_scheduler_enabled)
             form.addRow("Enable background skill actions", self.setting_background_actions)
             form.addRow("Pause interactive actions while locked", self.setting_pause_while_locked)
+            form.addRow(
+                "Notify when background work completes",
+                self.setting_notify_background_success,
+            )
+            form.addRow(
+                "Notify when background work fails",
+                self.setting_notify_background_failure,
+            )
+            form.addRow("Show in-app notification banners", self.setting_show_in_app_notifications)
+            form.addRow("Show Windows notifications", self.setting_show_system_notifications)
+            form.addRow("Enable notification quiet hours", self.setting_quiet_hours_enabled)
+            form.addRow("Quiet hours (24-hour time)", quiet_hours)
             form.addRow("Default schedule time zone", self.setting_default_timezone)
             form.addRow("Input device", self.setting_input)
             form.addRow("STT model", self.setting_stt)
@@ -3591,6 +4011,25 @@ def run_desktop(container: Container) -> int:
                     "scheduler_enabled": self.setting_scheduler_enabled.isChecked(),
                     "background_actions_enabled": self.setting_background_actions.isChecked(),
                     "pause_background_while_locked": self.setting_pause_while_locked.isChecked(),
+                    "notify_on_background_success": (
+                        self.setting_notify_background_success.isChecked()
+                    ),
+                    "notify_on_background_failure": (
+                        self.setting_notify_background_failure.isChecked()
+                    ),
+                    "show_in_app_notifications": (
+                        self.setting_show_in_app_notifications.isChecked()
+                    ),
+                    "show_system_notifications": (
+                        self.setting_show_system_notifications.isChecked()
+                    ),
+                    "notification_quiet_hours_enabled": (
+                        self.setting_quiet_hours_enabled.isChecked()
+                    ),
+                    "notification_quiet_hours_start": (
+                        self.setting_quiet_hours_start.text().strip()
+                    ),
+                    "notification_quiet_hours_end": (self.setting_quiet_hours_end.text().strip()),
                     "default_timezone": self.setting_default_timezone.text().strip(),
                     "audio_input_device": self.setting_input.currentData(),
                     "stt_model": self.setting_stt.text().strip(),
@@ -3656,6 +4095,8 @@ def run_desktop(container: Container) -> int:
                 validated.background_actions_enabled
             )
             container.scheduler.runner.pause_while_locked = validated.pause_background_while_locked
+            container.scheduler.runner.notify_on_success = validated.notify_on_background_success
+            container.scheduler.runner.notify_on_failure = validated.notify_on_background_failure
             container.scheduler.max_concurrency = validated.max_background_concurrency
             container.scheduler.wake()
             vault = SecretVault(validated.data_dir / "secrets")
@@ -3673,6 +4114,7 @@ def run_desktop(container: Container) -> int:
                 container.orchestrator.tts.set_offline_lock(
                     validated.offline_lock or validated.tts_provider != "elevenlabs"
                 )
+            container.media_cache.set_offline_lock(validated.offline_lock)
             container.orchestrator.speech_mode = validated.speech_mode
             container.orchestrator.response_detail = validated.response_detail
             container.orchestrator.show_reasoning_steps = validated.show_reasoning_steps
@@ -3717,7 +4159,10 @@ def run_desktop(container: Container) -> int:
             return page
 
         def _refresh_diagnostics(self) -> None:
-            report = hardware_report()
+            report = hardware_report(
+                media_cache=container.media_cache,
+                media_sessions=container.media_sessions,
+            )
             recommendations = model_recommendations(report)
             recent_metrics = container.metrics.recent(100)
             dashboard = container.dashboard.diagnostics()
@@ -3726,6 +4171,7 @@ def run_desktop(container: Container) -> int:
                 for item in recent_metrics
                 if item["stage"] == "execution" and item["duration_ms"] is not None
             ]
+            multimedia = report["multimedia"]
             self.diagnostic_text.setPlainText(
                 "\n".join(
                     [
@@ -3734,6 +4180,18 @@ def run_desktop(container: Container) -> int:
                         f"Processor: {report['processor']}",
                         f"GPU: {report['gpu'] or 'Not detected'}",
                         f"Audio endpoints: {report['audio_devices']}",
+                        "",
+                        "In-app media",
+                        "Backend: " + ("Available" if multimedia["available"] else "Unavailable"),
+                        "Image formats: "
+                        + (", ".join(multimedia["image_formats"]) or "None detected"),
+                        "Audio/video formats: "
+                        + (", ".join(multimedia["audio_video_formats"]) or "None detected"),
+                        "Output devices: "
+                        + (", ".join(multimedia["output_devices"]) or "None detected"),
+                        f"Downloaded cache: {multimedia['cache_bytes'] / (1024 * 1024):.1f} MB",
+                        "Last decoder error: " + (multimedia["last_error_code"] or "None"),
+                        "",
                         f"Recommended STT: {recommendations['stt']}",
                         f"Recommended LLM: {recommendations['llm']}",
                         f"Recommended TTS: {recommendations['tts']}",
@@ -4264,6 +4722,7 @@ def run_desktop(container: Container) -> int:
                 ("Clear Playbooks", self._clear_playbooks),
                 ("Clear Stored Memories", self._clear_memories),
                 ("Clear TTS Cache", lambda: self._clear_directory("tts-cache")),
+                ("Clear Downloaded Media Cache", self._clear_media_cache),
                 (
                     "Clear Diagnostic Audio",
                     lambda: self._clear_directory("diagnostic-audio"),
@@ -4295,6 +4754,18 @@ def run_desktop(container: Container) -> int:
             for item in container.memory_store.list(include_disabled=True):
                 container.memory_store.delete(memory_id=item.id)
             self._reload_memories_if_visible()
+
+        def _clear_media_cache(self) -> None:
+            if not self._confirm("Close any remote media viewer and delete all downloaded media?"):
+                return
+            snapshot = container.media_sessions.current()
+            if snapshot is not None and snapshot.source.source_type.value == "remote_cache":
+                self.media_viewer.clear()
+            removed = container.media_cache.clear()
+            self.statusBar().showMessage(
+                f"Cleared {removed / (1024 * 1024):.1f} MB of downloaded media.",
+                5000,
+            )
 
         def _applications_tab(self) -> QWidget:
             page = QWidget()
@@ -4873,6 +5344,10 @@ def run_desktop(container: Container) -> int:
                 self._set_pipeline_state(PipelineState.ERROR, result.summary)
 
         def _display_response(self, response: Any) -> None:
+            if response.media_directive is not None:
+                self.media_viewer.apply_directive(response.media_directive)
+                if response.media_directive.action.value == "show":
+                    QTimer.singleShot(0, self._open_media_viewer)
             if not response.updates_display:
                 return
             self.response.setPlainText(response.display_text)
@@ -4880,6 +5355,12 @@ def run_desktop(container: Container) -> int:
             error = response.response_type == ResponseType.ERROR or response.severity == "error"
             self._print_to_terminal(response.display_text, error=error)
             self._set_response_type(response.response_type)
+
+        def _open_media_viewer(self) -> None:
+            self.result_window.show_media()
+
+        def _set_media_fullscreen(self, enabled: bool) -> None:
+            self.result_window.set_media_fullscreen(enabled)
 
         @staticmethod
         def _print_to_terminal(message: str, *, error: bool = False) -> None:
@@ -4920,6 +5401,7 @@ def run_desktop(container: Container) -> int:
 
         def cancel(self) -> None:
             container.scheduler.pause()
+            self.media_viewer.emergency_stop()
 
             async def cancel_all():
                 await controller.cancel()
@@ -4929,6 +5411,32 @@ def run_desktop(container: Container) -> int:
             worker.finished.connect(lambda: self._workers.remove(worker))
             self._workers.append(worker)
             worker.start()
+
+        def _position_notification_overlays(self) -> None:
+            margin = 16
+            drawer_width = min(420, max(320, self.width() - margin * 2))
+            drawer_height = min(620, max(260, self.height() - margin * 2))
+            self.notification_drawer.setGeometry(
+                max(margin, self.width() - drawer_width - margin),
+                margin,
+                drawer_width,
+                drawer_height,
+            )
+            banner_width = min(500, max(340, self.width() - margin * 2))
+            self.notification_banner.setFixedWidth(banner_width)
+            self.notification_banner.adjustSize()
+            self.notification_banner.move(
+                max(margin, self.width() - banner_width - margin),
+                margin,
+            )
+            self.notification_banner.raise_()
+            if self.notification_drawer.isVisible():
+                self.notification_drawer.raise_()
+
+        def resizeEvent(self, event) -> None:
+            super().resizeEvent(event)
+            if hasattr(self, "notification_drawer"):
+                self._position_notification_overlays()
 
         def closeEvent(self, event) -> None:
             self._save_current_geometry()
@@ -4959,6 +5467,8 @@ def run_desktop(container: Container) -> int:
                 worker.wait(1000)
                 self._discard_dashboard_worker(worker)
             self._stop_passive_voice()
+            self.result_window.hide()
+            self.media_viewer.shutdown()
             if container.wakeword:
                 asyncio.run(container.wakeword.cancel())
             with suppress(Exception):
@@ -4966,8 +5476,11 @@ def run_desktop(container: Container) -> int:
             with suppress(Exception):
                 asyncio.run(controller.cancel())
 
+    _register_windows_app_identity()
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("Local Assistant")
+    app_icon = application_icon()
+    app.setWindowIcon(app_icon)
     app.setQuitOnLastWindowClosed(False)
     app.setStyle("Fusion")
     app.setStyleSheet(
@@ -5033,10 +5546,65 @@ def run_desktop(container: Container) -> int:
             color: #8fa0b7;
             font-size: 10.5pt;
         }
-        #statusCard, #composeCard, #activityCard, #skillBrowserCard, #skillDetailCard {
+        #statusCard, #composeCard, #activityCard, #skillBrowserCard, #skillDetailCard,
+        #mediaViewer, #compactMediaCard {
             background: #101d30;
             border: 1px solid #1e304a;
             border-radius: 14px;
+        }
+        #notificationBanner, #notificationDrawer {
+            background: #13233a;
+            border: 1px solid #345681;
+            border-radius: 12px;
+        }
+        #notificationBanner[severity="success"] {
+            border-color: #2b8066;
+        }
+        #notificationBanner[severity="warning"] {
+            border-color: #a47735;
+        }
+        #notificationBanner[severity="error"] {
+            border-color: #9b4960;
+        }
+        #notificationBannerTitle, #notificationDrawerTitle {
+            color: #f7fbff;
+            font-size: 12pt;
+            font-weight: 650;
+        }
+        #notificationBannerMessage {
+            color: #c7d5e6;
+        }
+        #notificationUnreadBadge {
+            color: #ffffff;
+            background: #4f7fd1;
+            border-radius: 9px;
+            padding: 3px 7px;
+            font-weight: 700;
+        }
+        #notificationDrawerList {
+            background: #0b1524;
+        }
+        #notificationDrawerList::item {
+            border-bottom: 1px solid #263952;
+            padding: 10px;
+        }
+        #assistantResultWindow, #resultWindowStack {
+            background: #0c1626;
+        }
+        #resultWindowTitle {
+            color: #f7fbff;
+            font-size: 18pt;
+            font-weight: 650;
+        }
+        #resultWindowMetadata {
+            color: #8496ad;
+        }
+        #resultWindowBody {
+            background: #0d192a;
+            border: 1px solid #263952;
+            color: #e8f0fa;
+            font-size: 11pt;
+            padding: 16px;
         }
         #dashboardPage, #dashboardScroll, #dashboardCardContainer {
             background: #0c1626;
@@ -5189,6 +5757,36 @@ def run_desktop(container: Container) -> int:
             color: #e8f0fa;
             font-size: 10.5pt;
             padding: 14px;
+        }
+        #mediaImageCanvas {
+            background: #03070d;
+            border: 1px solid #263952;
+            border-radius: 8px;
+        }
+        #mediaVideoSurface {
+            background: #03070d;
+        }
+        #mediaAudioIcon {
+            color: #87aef8;
+            font-size: 25pt;
+            font-weight: 700;
+        }
+        #mediaViewerTitle, #compactMediaTitle {
+            color: #f7fbff;
+            font-weight: 650;
+        }
+        #mediaViewerStatus {
+            color: #87aef8;
+            font-size: 8pt;
+            font-weight: 700;
+        }
+        #mediaMessageTitle {
+            color: #dce7f3;
+            font-size: 13pt;
+            font-weight: 650;
+        }
+        #mediaMessageDetail {
+            color: #8496ad;
         }
         #responseBadge {
             color: #87aef8;
@@ -5359,8 +5957,9 @@ def run_desktop(container: Container) -> int:
         """
     )
     window = MainWindow()
+    window.setWindowIcon(app_icon)
     app.aboutToQuit.connect(window.shutdown)
-    tray = QSystemTrayIcon(QIcon(), app)
+    tray = QSystemTrayIcon(app_icon, app)
     menu = QMenu()
     show_action = QAction("Show Companion", app)
     show_action.triggered.connect(window.show_from_tray)
@@ -5368,6 +5967,8 @@ def run_desktop(container: Container) -> int:
     dashboard_action.triggered.connect(window.open_dashboard_from_tray)
     assistant_action = QAction("Open Assistant", app)
     assistant_action.triggered.connect(window.open_assistant_from_tray)
+    inbox_action = QAction("Open Inbox", app)
+    inbox_action.triggered.connect(window._open_notification_inbox)
     cancel_action = QAction("Emergency Stop", app)
     cancel_action.triggered.connect(window.cancel)
     quit_action = QAction("Quit", app)
@@ -5375,6 +5976,7 @@ def run_desktop(container: Container) -> int:
     menu.addAction(show_action)
     menu.addAction(dashboard_action)
     menu.addAction(assistant_action)
+    menu.addAction(inbox_action)
     menu.addAction(cancel_action)
     menu.addSeparator()
     menu.addAction(quit_action)
@@ -5384,6 +5986,13 @@ def run_desktop(container: Container) -> int:
             window.show_from_tray()
             if reason == QSystemTrayIcon.ActivationReason.DoubleClick
             else None
+        )
+    )
+    tray.messageClicked.connect(
+        lambda: (
+            window._open_notification(window._last_tray_notification_id)
+            if window._last_tray_notification_id
+            else window._open_notification_inbox()
         )
     )
     tray.setToolTip(

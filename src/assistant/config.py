@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
@@ -56,6 +57,18 @@ class Settings(BaseModel):
         ge=1024,
         le=100 * 1024 * 1024,
     )
+    remote_media_max_bytes: int = Field(
+        default=100 * 1024 * 1024,
+        ge=1024,
+        le=500 * 1024 * 1024,
+    )
+    media_cache_max_bytes: int = Field(
+        default=500 * 1024 * 1024,
+        ge=1024,
+        le=2 * 1024 * 1024 * 1024,
+    )
+    media_cache_retention_days: int = Field(default=7, ge=1, le=90)
+    remote_media_timeout_seconds: float = Field(default=30, gt=0, le=120)
     tts_provider: Literal["piper", "elevenlabs"] = "piper"
     piper_executable: Path | None = None
     piper_model: Path | None = None
@@ -88,6 +101,11 @@ class Settings(BaseModel):
     notify_on_background_success: bool = True
     notify_on_background_failure: bool = True
     pause_background_while_locked: bool = True
+    show_in_app_notifications: bool = True
+    show_system_notifications: bool = True
+    notification_quiet_hours_enabled: bool = False
+    notification_quiet_hours_start: str = "22:00"
+    notification_quiet_hours_end: str = "07:00"
 
     @field_validator("extension_catalog_url", mode="before")
     @classmethod
@@ -109,6 +127,19 @@ class Settings(BaseModel):
         if not keyword:
             raise ValueError("voice activation keyword cannot be blank")
         return keyword
+
+    @field_validator(
+        "notification_quiet_hours_start",
+        "notification_quiet_hours_end",
+    )
+    @classmethod
+    def _validate_quiet_hours_time(cls, value: str) -> str:
+        normalized = value.strip()
+        try:
+            parsed = datetime.strptime(normalized, "%H:%M")
+        except ValueError as error:
+            raise ValueError("quiet-hours time must use 24-hour HH:MM format") from error
+        return parsed.strftime("%H:%M")
 
     @field_validator("elevenlabs_voice_id", mode="before")
     @classmethod
@@ -141,6 +172,14 @@ class Settings(BaseModel):
             and not self.voice_activation_clap_enabled
         ):
             raise ValueError("keyword/clap voice activation needs a keyword or clap trigger")
+        return self
+
+    @model_validator(mode="after")
+    def _media_cache_must_fit_one_download(self) -> Settings:
+        if self.media_cache_max_bytes < self.remote_media_max_bytes:
+            raise ValueError(
+                "Media cache limit cannot be smaller than the remote media download limit"
+            )
         return self
 
     @field_validator("default_timezone")

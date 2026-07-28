@@ -31,6 +31,8 @@ the relevant setting, credential, local service, or device to be configured.
 | Network | `web.fetch` | Optional | Low | `network` | Read text from a specific public HTTPS page. |
 | Network | `web.headless_read` | Optional | Low | `network` | Render a public HTTPS page in a fresh non-persistent headless browser and return bounded visible text/links or matching deal, product, article, listing, and result cards without opening a user window. |
 | Network | `web.search` | Optional | Low | `network` | Search the public web through DuckDuckGo Instant Answer or Brave Search. |
+| Media | `media.present` | Implemented/Optional remote | Low | `filesystem.read` or `network` | Present an exact approved local file or explicitly downloaded public HTTPS image, audio file, or video in the Assistant. |
+| Media | `media.viewer_control` | Implemented | Low | None | Control only the active in-app viewer: playback, seek, volume, rate, mute, fullscreen, stop, or close. |
 | Windows | `windows.application_window` | Implemented | High | `process.window` | Focus, minimize, maximize, close, move, or resize an approved application window. |
 | Windows | `windows.browser_navigate` | Implemented | Low | `process.window`, `input.control`, `network` | Open a public HTTPS site in an existing browser window. |
 | Windows | `windows.clipboard` | Implemented | Medium | `clipboard.read`, `clipboard.write` | Read or write the local clipboard with separate permissions. |
@@ -67,6 +69,12 @@ the relevant setting, credential, local service, or device to be configured.
   local ONNX wake-word activation, plus streaming STT, provider-selectable local
   Piper or offline-lock-aware ElevenLabs TTS, voice-file discovery, cancellation,
   response-detail modes, and privacy controls.
+- A separate resizable image/audio/video results window with compact/full
+  now-viewing cards,
+  image zoom/pan/rotate, Qt audio/video transport controls, typed/voice/keyboard
+  actions, source-aware TTS/microphone coordination, fingerprint revalidation,
+  and optional verified public-HTTPS downloads in a bounded privacy-clearable
+  cache.
 - Deterministic routing plus schema-constrained local planner support for
   ambiguous or multi-step requests.
 - Default-deny scoped permissions, action-bound confirmations, audit logging,
@@ -89,9 +97,12 @@ the relevant setting, credential, local service, or device to be configured.
   with public-HTTPS-only navigation, bounded result-card extraction, read-only
   request methods, installed Edge/Chrome fallback, and no access to the user's
   browser profile.
+- A durable notification Inbox with unread/dismissed state, compact/full unread
+  badges, a nonblocking foreground banner and recent-item drawer, exact
+  automation-run deep links, quiet hours, and click-through Windows delivery.
 - Durable one-time and recurring schedules with SQLite persistence, IANA time
   zones, DST handling, bounded misfire catch-up, multi-instance leases, restart
-  reconciliation, nonblocking tray notifications, and an Automations control
+  reconciliation, durable result notifications, and an Automations control
   center.
 - Revocable schedule-scoped background authorization for exact low-risk fixed
   skills and frozen macro plans, with capability/target/risk/runtime/rate bounds,

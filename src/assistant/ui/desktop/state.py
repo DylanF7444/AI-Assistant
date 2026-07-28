@@ -18,3 +18,4 @@ class DesktopWindowState(BaseModel):
     compact_pinned: bool = True
     compact_geometry: WindowGeometry | None = None
     full_geometry: WindowGeometry | None = None
+    result_geometry: WindowGeometry | None = None

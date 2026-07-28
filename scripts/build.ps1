@@ -7,7 +7,7 @@ python -m ruff format --check .
 if ($LASTEXITCODE -ne 0) { throw "Format check failed with exit code $LASTEXITCODE" }
 python -m ruff check .
 if ($LASTEXITCODE -ne 0) { throw "Lint check failed with exit code $LASTEXITCODE" }
-python -m pytest
+python -m pytest tests --ignore=tests/ui
 if ($LASTEXITCODE -ne 0) { throw "Regression tests failed with exit code $LASTEXITCODE" }
 python -m pytest learning_tests -q
 if ($LASTEXITCODE -ne 0) { throw "Learning tests failed with exit code $LASTEXITCODE" }
@@ -15,6 +15,8 @@ python -m pytest -m ui tests/ui -q
 if ($LASTEXITCODE -ne 0) { throw "UI tests failed with exit code $LASTEXITCODE" }
 python -m PyInstaller --clean --noconfirm packaging/local-assistant.spec
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE" }
+python scripts/verify_packaged_media.py dist/LocalAssistant.exe
+if ($LASTEXITCODE -ne 0) { throw "Packaged media verification failed with exit code $LASTEXITCODE" }
 $isccCommand = Get-Command iscc -ErrorAction SilentlyContinue
 $isccPath = if ($isccCommand) { $isccCommand.Source } else { $null }
 if (-not $isccPath) {
