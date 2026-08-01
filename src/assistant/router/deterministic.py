@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Iterable
+from datetime import datetime
+from typing import Literal
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from assistant.contracts import Intent
@@ -15,8 +17,16 @@ class DeterministicRouter:
     def __init__(
         self,
         application_names: Callable[[], Iterable[str]] | Iterable[str] | None = None,
+        *,
+        skill_status: Callable[
+            [str], Literal["enabled", "disabled", "disconnected", "unavailable"]
+        ]
+        | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.application_names = application_names
+        self._skill_status = skill_status
+        self._clock = clock or (lambda: datetime.now().astimezone())
 
     APP_REGISTRATION_HELP = (
         "Open the Applications tab, choose Register Application, select the app's "
@@ -26,8 +36,13 @@ class DeterministicRouter:
 
     CONTROL = {
         "cancel": "control.cancel",
+        "cancel that": "control.cancel",
+        "cancel this": "control.cancel",
         "stop": "control.cancel",
         "never mind": "control.cancel",
+        "never mind that": "control.cancel",
+        "nevermind": "control.cancel",
+        "nevermind that": "control.cancel",
         "undo": "control.undo",
         "undo last command": "control.undo",
         "undo that": "control.undo",
@@ -40,6 +55,18 @@ class DeterministicRouter:
         "forget this session": "control.forget",
         "forget this conversation": "control.forget",
         "forget everything from this session": "control.forget",
+    }
+    COMMON_APPLICATIONS = {
+        "calculator",
+        "command prompt",
+        "explorer",
+        "file explorer",
+        "notepad",
+        "paint",
+        "powershell",
+        "settings",
+        "terminal",
+        "windows terminal",
     }
     BROWSER_APPLICATIONS = {
         "browser",
@@ -94,6 +121,17 @@ class DeterministicRouter:
                 return result
         raise RuntimeError("Deterministic router has no fallback handler")
 
+    def skill_availability(
+        self, skill_id: str
+    ) -> Literal["enabled", "disabled", "disconnected", "unavailable"]:
+        if self._skill_status is None:
+            return "enabled"
+        return self._skill_status(skill_id)
+
+    def now(self) -> datetime:
+        value = self._clock()
+        return value if value.tzinfo is not None else value.astimezone()
+
     def _registered_application_names(self) -> tuple[str, ...]:
         names = (
             self.application_names() if callable(self.application_names) else self.application_names
@@ -108,6 +146,19 @@ class DeterministicRouter:
                 key=len,
                 reverse=True,
             )
+        )
+
+    def _is_known_application_reference(self, application: str) -> bool:
+        normalized = re.sub(
+            r"^(?:my|the)\s+",
+            "",
+            application.strip().casefold(),
+        )
+        return (
+            normalized in self.BROWSER_APPLICATIONS
+            or normalized in self.COMMON_APPLICATIONS
+            or normalized in self._registered_application_names()
+            or normalized.endswith(".exe")
         )
 
     @staticmethod

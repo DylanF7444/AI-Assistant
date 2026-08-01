@@ -313,16 +313,51 @@ class SkillError(StrictModel):
     recoverable: bool = False
 
 
+class RequestResultItem(StrictModel):
+    """One addressable item returned by an assistant request.
+
+    ``item_id`` is stable within the result set, while ``value`` contains the
+    schema-friendly value a later request can use. Titles and descriptions are
+    presentation fields; callers should not have to parse display text to work
+    with a selected item.
+    """
+
+    item_id: str = Field(
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+    )
+    title: str = Field(min_length=1, max_length=500)
+    value: Any
+    kind: str = Field(
+        default="generic",
+        min_length=1,
+        max_length=80,
+        pattern=r"^[a-z][a-z0-9_.-]*$",
+    )
+    description: str | None = Field(default=None, min_length=1, max_length=2_000)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    sensitive: bool = False
+
+
 class SkillResult(StrictModel):
     status: ResultStatus
     summary: str
     data: dict[str, Any] = Field(default_factory=dict)
+    items: tuple[RequestResultItem, ...] | None = None
     error: SkillError | None = None
     rollback_token: str | None = None
     display_text: str | None = None
     speech_text: str | None = None
     media_directive: MediaDirective | None = None
     sensitive: bool = False
+
+    @model_validator(mode="after")
+    def _result_item_ids_are_unique(self) -> SkillResult:
+        item_ids = [item.item_id for item in self.items or ()]
+        if len(item_ids) != len(set(item_ids)):
+            raise ValueError("Request result item IDs must be unique")
+        return self
 
 
 class ConfirmationRequest(StrictModel):
@@ -347,6 +382,16 @@ class Response(StrictModel):
     sensitive: bool = False
     updates_display: bool = True
     media_directive: MediaDirective | None = None
+    items: tuple[RequestResultItem, ...] = ()
+    selected_item_id: str | None = None
+
+    @model_validator(mode="after")
+    def _selected_item_is_in_response_items(self) -> Response:
+        if self.selected_item_id is not None and self.selected_item_id not in {
+            item.item_id for item in self.items
+        }:
+            raise ValueError("selected_item_id must identify one of the response items")
+        return self
 
 
 class ActivityTrace(StrictModel):
@@ -355,6 +400,10 @@ class ActivityTrace(StrictModel):
     detail: str = Field(default="", max_length=500)
     invocation: Literal["interactive", "background"] = "interactive"
     skill_id: str | None = None
+    tool_name: str | None = Field(default=None, min_length=1, max_length=120)
+    action: str | None = Field(default=None, min_length=1, max_length=500)
+    status: ResultStatus | None = None
+    duration_ms: float | None = Field(default=None, ge=0)
 
 
 class PipelineEvent(StrictModel):

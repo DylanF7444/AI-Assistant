@@ -176,8 +176,13 @@ class ExtensionHubPage(QWidget):
         self.install_button.setObjectName("primaryButton")
         self.install_button.setEnabled(False)
         self.install_button.clicked.connect(self.install_selected)
+        self.connection_button = QPushButton("Configure Account")
+        self.connection_button.setObjectName("secondaryButton")
+        self.connection_button.setVisible(False)
+        self.connection_button.clicked.connect(self.configure_connection)
         install_layout.addWidget(install_heading)
         install_layout.addWidget(self.install_status)
+        install_layout.addWidget(self.connection_button, 0, Qt.AlignmentFlag.AlignRight)
         install_layout.addWidget(self.install_button, 0, Qt.AlignmentFlag.AlignRight)
         detail_layout.addWidget(install_card)
         detail_layout.addStretch()
@@ -190,11 +195,17 @@ class ExtensionHubPage(QWidget):
         self.offline = offline
         self._entries = self.service.catalog.extensions
         self._render_entries()
-        self.platform_label.setText(catalog_url or "No extension platform configured")
+        self.platform_label.setText(
+            catalog_url or "First-party extensions included with this build"
+        )
         self.refresh_button.setEnabled(bool(catalog_url) and not offline and not self._busy)
-        if not catalog_url:
+        if not catalog_url and not self._entries:
             self.install_status.setText(
                 "Configure an HTTPS extension catalog URL in Settings to browse extensions."
+            )
+        elif not catalog_url:
+            self.install_status.setText(
+                "First-party extensions can be installed without an external catalog."
             )
         elif offline:
             self.install_status.setText(
@@ -214,6 +225,7 @@ class ExtensionHubPage(QWidget):
         worker.start()
 
     def _catalog_loaded(self, entries: Any) -> None:
+        self._busy = False
         self._entries = tuple(entries)
         self._render_entries()
         count = len(self._entries)
@@ -279,6 +291,7 @@ class ExtensionHubPage(QWidget):
             self.description_label.clear()
             self.permission_table.setRowCount(0)
             self.install_button.setEnabled(False)
+            self.connection_button.setVisible(False)
             return
 
         self.detail_title.setText(extension.display_name)
@@ -292,7 +305,12 @@ class ExtensionHubPage(QWidget):
         self.security_badge.style().unpolish(self.security_badge)
         self.security_badge.style().polish(self.security_badge)
         self.publisher_label.setText(
-            f"Published by {extension.publisher}  ·  {extension.extension_type.title()} package"
+            f"Published by {extension.publisher}  ·  Managed first-party component"
+            if extension.source == "first_party"
+            else (
+                f"Published by {extension.publisher}  ·  "
+                f"{extension.extension_type.title()} package"
+            )
         )
         self.description_label.setText(extension.description)
         permissions = extension.permissions
@@ -309,6 +327,17 @@ class ExtensionHubPage(QWidget):
         self.permission_table.resizeRowsToContents()
 
         status = self.service.installation_status(extension.extension_id)
+        connection_service = self._connection_service(extension.extension_id)
+        self.connection_button.setVisible(connection_service is not None and status == "installed")
+        self.connection_button.setEnabled(not self._busy and not self.offline)
+        self.connection_button.setToolTip(
+            "Disable the global offline lock before connecting an account." if self.offline else ""
+        )
+        if connection_service is not None and status == "installed":
+            connected = connection_service.status().connected
+            self.connection_button.setText(
+                "Manage Connected Account" if connected else "Connect Account"
+            )
         enabled = extension.compatible and status == "available" and not self._busy
         self.install_button.setEnabled(enabled)
         if not extension.compatible:
@@ -320,6 +349,11 @@ class ExtensionHubPage(QWidget):
             message = "Installed locally. Review and enable it from the Skills tab."
         elif status == "id_in_use":
             message = "This extension ID is already used by a built-in skill."
+        elif extension.source == "first_party":
+            message = (
+                "Ready to install. This first-party implementation ships with the "
+                "application and remains disabled until you review and enable it."
+            )
         else:
             message = (
                 "Ready to install. The package digest, trusted signature, manifest, and "
@@ -345,13 +379,46 @@ class ExtensionHubPage(QWidget):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        self._set_busy(True, f"Downloading and verifying {extension.display_name}…")
+        action = (
+            f"Installing {extension.display_name} from this application build…"
+            if extension.source == "first_party"
+            else f"Downloading and verifying {extension.display_name}…"
+        )
+        self._set_busy(True, action)
         worker = AsyncWorker(self.service.install(extension.extension_id))
         worker.complete.connect(self._extension_installed)
         worker.failed.connect(self._operation_failed)
         worker.finished.connect(lambda: self._worker_finished(worker))
         self._workers.append(worker)
         worker.start()
+
+    def configure_connection(self) -> None:
+        extension = self._selected()
+        if extension is None:
+            return
+        service = self._connection_service(extension.extension_id)
+        if service is None:
+            return
+        from assistant.ui.desktop.google_calendar_connection import (
+            GoogleCalendarConnectionDialog,
+        )
+
+        dialog = GoogleCalendarConnectionDialog(service, self)
+        dialog.connection_changed.connect(
+            lambda: self._sync_connection_state(extension.extension_id)
+        )
+        dialog.exec()
+        self._sync_connection_state(extension.extension_id)
+
+    def _sync_connection_state(self, extension_id: str) -> None:
+        sync = getattr(self.service, "sync_connection_state", None)
+        if callable(sync):
+            sync(extension_id)
+        self._show_selected()
+
+    def _connection_service(self, extension_id: str) -> Any | None:
+        resolver = getattr(self.service, "connection_service", None)
+        return resolver(extension_id) if resolver else None
 
     def _extension_installed(self, manifest: Any) -> None:
         self.install_status.setText(
@@ -377,11 +444,4 @@ class ExtensionHubPage(QWidget):
         if worker in self._workers:
             self._workers.remove(worker)
         self._set_busy(False)
-        extension = self._selected()
-        self.install_button.setEnabled(
-            bool(
-                extension
-                and extension.compatible
-                and self.service.installation_status(extension.extension_id) == "available"
-            )
-        )
+        self._show_selected()

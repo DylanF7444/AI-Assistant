@@ -11,14 +11,20 @@ import socket
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 USER_AGENT = "LocalAssistant/0.1"
+DUCKDUCKGO_HTML_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/126.0 Safari/537.36"
+)
 
 
 class _TextExtractor(HTMLParser):
@@ -38,6 +44,74 @@ class _TextExtractor(HTMLParser):
     def handle_data(self, data: str) -> None:
         if not self.ignored:
             self.parts.append(data)
+
+
+class _DuckDuckGoHTMLParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.results: list[dict[str, str]] = []
+        self._field: str | None = None
+        self._depth = 0
+        self._parts: list[str] = []
+        self._url = ""
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if self._field is not None:
+            self._depth += 1
+            return
+        attributes = dict(attrs)
+        classes = set(str(attributes.get("class", "")).split())
+        if tag == "a" and "result__a" in classes:
+            url = self._result_url(str(attributes.get("href", "")))
+            if url:
+                self._begin("title", url)
+        elif "result__snippet" in classes and self.results:
+            self._begin("description", self.results[-1]["url"])
+
+    def handle_endtag(self, _tag: str) -> None:
+        if self._field is None:
+            return
+        self._depth -= 1
+        if self._depth:
+            return
+        value = re.sub(r"\s+", " ", html.unescape("".join(self._parts))).strip()
+        if self._field == "title" and value:
+            self.results.append(
+                {
+                    "title": value,
+                    "url": self._url,
+                    "description": "",
+                }
+            )
+        elif self._field == "description" and self.results:
+            self.results[-1]["description"] = value
+        self._field = None
+        self._parts = []
+        self._url = ""
+
+    def handle_data(self, data: str) -> None:
+        if self._field is not None:
+            self._parts.append(data)
+
+    def _begin(self, field: str, url: str) -> None:
+        self._field = field
+        self._depth = 1
+        self._parts = []
+        self._url = url
+
+    @staticmethod
+    def _result_url(raw_url: str) -> str:
+        if raw_url.startswith("//"):
+            raw_url = f"https:{raw_url}"
+        parsed = urlparse(raw_url)
+        if parsed.hostname and parsed.hostname.casefold().endswith("duckduckgo.com"):
+            redirected = parse_qs(parsed.query).get("uddg", ())
+            if redirected:
+                raw_url = redirected[0]
+                parsed = urlparse(raw_url)
+        if parsed.scheme != "https" or not parsed.hostname:
+            return ""
+        return raw_url
 
 
 def _validate_public_https(url: str) -> None:
@@ -102,6 +176,76 @@ class WebClient:
             return await self._search_brave(query, api_key, count)
         raise ValueError(f"Unsupported search provider: {provider}")
 
+    async def search_news(
+        self,
+        query: str,
+        count: int = 5,
+    ) -> list[dict[str, str]]:
+        return await asyncio.to_thread(self._search_google_news, query, count)
+
+    def _search_google_news(
+        self,
+        query: str,
+        count: int,
+    ) -> list[dict[str, str]]:
+        url = "https://news.google.com/rss/search?" + urlencode(
+            {
+                "q": query,
+                "hl": "en-US",
+                "gl": "US",
+                "ceid": "US:en",
+            }
+        )
+        _validate_public_https(url)
+        request = Request(
+            url,
+            headers={
+                "Accept": "application/rss+xml, application/xml",
+                "User-Agent": USER_AGENT,
+            },
+        )
+        try:
+            with (self.opener or build_opener(_SafeRedirectHandler())).open(
+                request,
+                timeout=30,
+            ) as response:
+                content_type = response.headers.get_content_type()
+                if content_type not in {"application/rss+xml", "application/xml", "text/xml"}:
+                    raise ValueError(f"Unsupported news content type: {content_type}")
+                raw = response.read(1_000_001)
+                if len(raw) > 1_000_000:
+                    raise ValueError("News response exceeds the 1 MB download limit")
+        except HTTPError as error:
+            raise RuntimeError(f"HTTP {error.code} while searching news") from error
+        except URLError as error:
+            raise RuntimeError(f"News search failed: {error}") from error
+        lowered_raw = raw.lower()
+        if b"<!doctype" in lowered_raw or b"<!entity" in lowered_raw:
+            raise RuntimeError("News search returned unsupported XML declarations")
+        try:
+            root = ET.fromstring(raw)
+        except ET.ParseError as error:
+            raise RuntimeError("News search returned invalid XML") from error
+        results: list[dict[str, str]] = []
+        for item in root.findall("./channel/item"):
+            title = (item.findtext("title") or "").strip()
+            item_url = (item.findtext("link") or "").strip()
+            source = (item.findtext("source") or "").strip()
+            published = (item.findtext("pubDate") or "").strip()
+            if not title or not item_url:
+                continue
+            details = " — ".join(value for value in (source, published) if value)
+            results.append(
+                {
+                    "title": title,
+                    "url": item_url,
+                    "description": details,
+                }
+            )
+            if len(results) >= count:
+                break
+        return results
+
     async def _search_duckduckgo(self, query: str, count: int) -> list[dict[str, str]]:
         url = "https://api.duckduckgo.com/?" + urlencode(
             {
@@ -137,7 +281,44 @@ class WebClient:
                     self._append_duckduckgo_result(results, topic)
             else:
                 self._append_duckduckgo_result(results, item)
-        return results[:count]
+        if results:
+            return results[:count]
+        return await asyncio.to_thread(self._search_duckduckgo_html, query, count)
+
+    def _search_duckduckgo_html(
+        self,
+        query: str,
+        count: int,
+    ) -> list[dict[str, str]]:
+        url = "https://html.duckduckgo.com/html/?" + urlencode({"q": query})
+        _validate_public_https(url)
+        request = Request(
+            url,
+            headers={
+                "Accept": "text/html",
+                "User-Agent": DUCKDUCKGO_HTML_USER_AGENT,
+            },
+        )
+        try:
+            with (self.opener or build_opener(_SafeRedirectHandler())).open(
+                request,
+                timeout=30,
+            ) as response:
+                content_type = response.headers.get_content_type()
+                if content_type != "text/html":
+                    raise ValueError(f"Unsupported search content type: {content_type}")
+                raw = response.read(1_000_001)
+                if len(raw) > 1_000_000:
+                    raise ValueError("Search response exceeds the 1 MB download limit")
+                charset = response.headers.get_content_charset() or "utf-8"
+                page = raw.decode(charset, errors="replace")
+        except HTTPError as error:
+            raise RuntimeError(f"HTTP {error.code} while searching the web") from error
+        except URLError as error:
+            raise RuntimeError(f"Web search failed: {error}") from error
+        parser = _DuckDuckGoHTMLParser()
+        parser.feed(page)
+        return parser.results[:count]
 
     @staticmethod
     def _append_duckduckgo_result(results: list[dict[str, str]], item: Any) -> None:

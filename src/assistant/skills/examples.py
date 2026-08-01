@@ -18,6 +18,60 @@ class SkillExample(BaseModel):
 
 DEFAULT_SKILL_EXAMPLES: tuple[SkillExample, ...] = (
     SkillExample(
+        utterance="Check my calendar",
+        skill_id="integration.google_calendar",
+        arguments={
+            "operation": "list_events",
+            "calendar_id": "primary",
+            "max_results": 10,
+            "single_events": True,
+            "order_by": "startTime",
+        },
+        notes="A request to check the calendar reads upcoming events from the primary calendar.",
+    ),
+    SkillExample(
+        utterance="Add dentist tomorrow at 3 PM to my calendar",
+        skill_id="integration.google_calendar",
+        arguments={
+            "operation": "quick_add",
+            "calendar_id": "primary",
+            "quick_add_text": "dentist tomorrow at 3 PM",
+        },
+        notes=(
+            "Natural-language event creation should use Calendar quick-add when the "
+            "request already contains the title and timing."
+        ),
+    ),
+    SkillExample(
+        utterance="Find the quarterly planning meeting on my calendar",
+        skill_id="integration.google_calendar",
+        arguments={
+            "operation": "list_events",
+            "calendar_id": "primary",
+            "query": "quarterly planning meeting",
+            "max_results": 50,
+            "single_events": True,
+        },
+        notes="Searching the calendar maps the descriptive event text to the query field.",
+    ),
+    SkillExample(
+        utterance="List my Google calendars",
+        skill_id="integration.google_calendar",
+        arguments={"operation": "list_calendars", "max_results": 50},
+    ),
+    SkillExample(
+        utterance="Give me a briefing on the latest news about AI and the economy",
+        skill_id="web.news_search",
+        arguments={
+            "query": "latest news artificial intelligence economy",
+            "count": 5,
+        },
+        notes=(
+            "Current-news requests require live web results. Search first, then use "
+            "the observed result data to write the requested briefing."
+        ),
+    ),
+    SkillExample(
         utterance="Go to Slickdeals and give me the first deal",
         skill_id="web.headless_read",
         arguments={

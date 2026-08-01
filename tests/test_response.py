@@ -3,6 +3,7 @@ from uuid import uuid4
 from assistant.contracts import (
     MediaAction,
     MediaDirective,
+    RequestResultItem,
     ResponseType,
     ResultStatus,
     SkillError,
@@ -81,6 +82,20 @@ def test_detailed_mode_and_sensitive_display_privacy():
     assert "42" not in hidden.display_text
 
 
+def test_detailed_mode_keeps_skill_display_text_human_friendly():
+    response = response_from_result(
+        SkillResult(
+            status=ResultStatus.COMPLETED,
+            summary="I couldn't find any calendar events.",
+            display_text="You don't have any upcoming events on your calendar.",
+            data={"operation": "list_events", "resources": []},
+        ),
+        detail="detailed",
+    )
+
+    assert response.display_text == "You don't have any upcoming events on your calendar."
+
+
 def test_response_mapping_keeps_media_directive():
     directive = MediaDirective(
         presentation_id=uuid4(),
@@ -96,3 +111,24 @@ def test_response_mapping_keeps_media_directive():
     )
 
     assert response.media_directive == directive
+
+
+def test_response_mapping_preserves_and_presents_request_result_items():
+    item = RequestResultItem(
+        item_id="task-7",
+        title="Review release notes",
+        value={"id": 7},
+        kind="task",
+        description="Open",
+    )
+
+    response = response_from_result(
+        SkillResult(
+            status=ResultStatus.COMPLETED,
+            summary="Found one task.",
+            items=(item,),
+        )
+    )
+
+    assert response.items == (item,)
+    assert response.display_text == "Found one task.\n1. Review release notes — Open"

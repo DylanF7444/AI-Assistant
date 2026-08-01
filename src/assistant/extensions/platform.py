@@ -55,6 +55,7 @@ class CatalogExtension(_StrictModel):
     permissions: tuple[PermissionScope, ...] = ()
     risk: RiskLevel = RiskLevel.LOW
     featured: bool = False
+    source: Literal["platform", "first_party"] = "platform"
 
     @field_validator("package_url")
     @classmethod
@@ -175,11 +176,22 @@ class ExtensionHubService:
         client: ExtensionPlatformClient,
         *,
         audit: AuditStore | None = None,
+        managed_extensions: tuple[tuple[CatalogExtension, SkillManifest], ...] = (),
+        connection_services: dict[str, Any] | None = None,
     ) -> None:
         self.registry = registry
         self.client = client
         self.audit = audit
-        self._catalog = ExtensionCatalog()
+        self._managed_extensions = {
+            extension.extension_id: (extension, manifest)
+            for extension, manifest in managed_extensions
+        }
+        self._connection_services = connection_services or {}
+        self._catalog = ExtensionCatalog(
+            extensions=tuple(
+                extension for extension, _manifest in self._managed_extensions.values()
+            )
+        )
 
     @property
     def catalog_url(self) -> str | None:
@@ -193,10 +205,25 @@ class ExtensionHubService:
         previous_url = self.client.catalog_url
         self.client.configure(catalog_url, timeout_seconds=timeout_seconds)
         if previous_url != self.client.catalog_url:
-            self._catalog = ExtensionCatalog()
+            self._catalog = ExtensionCatalog(
+                extensions=tuple(
+                    extension for extension, _manifest in self._managed_extensions.values()
+                )
+            )
 
     async def refresh(self) -> tuple[CatalogExtension, ...]:
-        catalog = await asyncio.to_thread(self.client.fetch_catalog)
+        remote = await asyncio.to_thread(self.client.fetch_catalog)
+        managed = tuple(extension for extension, _manifest in self._managed_extensions.values())
+        catalog = ExtensionCatalog(
+            extensions=(
+                *managed,
+                *(
+                    extension
+                    for extension in remote.extensions
+                    if extension.extension_id not in self._managed_extensions
+                ),
+            )
+        )
         self._catalog = catalog
         self._record(
             event_type="extension_catalog_refreshed",
@@ -220,6 +247,44 @@ class ExtensionHubService:
             return "available"
         return "id_in_use"
 
+    def connection_service(self, extension_id: str) -> Any | None:
+        return self._connection_services.get(extension_id)
+
+    def skill_availability(
+        self, extension_id: str
+    ) -> Literal["enabled", "disabled", "disconnected", "unavailable"]:
+        availability = self.registry.availability(extension_id)
+        service = self.connection_service(extension_id)
+        if availability != "unavailable" and service is not None:
+            status = service.status()
+            if not bool(getattr(status, "connected", False)):
+                return "disconnected"
+        return availability
+
+    def sync_connection_state(self, extension_id: str) -> bool:
+        """Enable an installed connection skill while its account remains connected."""
+        service = self.connection_service(extension_id)
+        if service is None:
+            return False
+        try:
+            self.registry.inspect(extension_id)
+        except KeyError:
+            return False
+        status = service.status()
+        connected = bool(getattr(status, "connected", False))
+        if connected:
+            self.registry.enable(extension_id)
+        else:
+            self.registry.disable(extension_id)
+        return connected
+
+    def sync_connected_extensions(self) -> tuple[str, ...]:
+        return tuple(
+            extension_id
+            for extension_id in self._connection_services
+            if self.sync_connection_state(extension_id)
+        )
+
     async def install(self, extension_id: str) -> SkillManifest:
         extension = next(
             (item for item in self._catalog.extensions if item.extension_id == extension_id),
@@ -238,7 +303,10 @@ class ExtensionHubService:
         if status == "id_in_use":
             raise ValueError("This extension ID is already used by a built-in skill")
         try:
-            manifest = await asyncio.to_thread(self._install_skill, extension)
+            if extension_id in self._managed_extensions:
+                manifest = await asyncio.to_thread(self._install_managed, extension)
+            else:
+                manifest = await asyncio.to_thread(self._install_skill, extension)
         except Exception as error:
             self._record(
                 event_type="extension_installation",
@@ -256,6 +324,17 @@ class ExtensionHubService:
             details={"version": manifest.version, "publisher": extension.publisher},
         )
         return manifest
+
+    def _install_managed(self, extension: CatalogExtension) -> SkillManifest:
+        _catalog_entry, manifest = self._managed_extensions[extension.extension_id]
+        _verify_catalog_metadata(extension, manifest)
+        installed = self.registry.install_managed(manifest)
+        try:
+            self.registry.load_installed(installed.skill_id)
+        except Exception:
+            self.registry.uninstall(installed.skill_id)
+            raise
+        return installed
 
     def _install_skill(self, extension: CatalogExtension) -> SkillManifest:
         payload = self.client.download(extension)

@@ -18,12 +18,14 @@ def response_from_result(
         ResultStatus.CANCELLED: "warning",
         ResultStatus.TIMED_OUT: "error",
     }[result.status]
-    display = result.display_text or result.summary
+    display = result.display_text or _display_with_items(result)
     if result.sensitive and hide_sensitive_display:
         display = "Sensitive result hidden by privacy settings."
     elif detail == "detailed":
         details = []
-        if result.data:
+        # A skill-provided display is already the human-facing rendering of its
+        # structured result. Do not append the internal payload over it.
+        if result.data and not result.display_text:
             details.append(json.dumps(result.data, indent=2, default=str))
         if result.error:
             details.append(f"{result.error.code}: {result.error.message}")
@@ -52,4 +54,17 @@ def response_from_result(
         speak=True,
         sensitive=result.sensitive,
         media_directive=result.media_directive,
+        items=result.items or (),
     )
+
+
+def _display_with_items(result: SkillResult) -> str:
+    if not result.items:
+        return result.summary
+    lines = [result.summary]
+    for index, item in enumerate(result.items, 1):
+        line = f"{index}. {item.title}"
+        if item.description:
+            line += f" — {item.description}"
+        lines.append(line)
+    return "\n".join(lines)

@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from assistant.contracts import (
     BackgroundMode,
     PermissionScope,
+    RequestResultItem,
     ResultStatus,
     SkillCall,
     SkillResult,
@@ -63,8 +64,8 @@ class WebSearchSkill(Skill):
             skill_id="web.search",
             display_name="Web Search",
             description=(
-                "Search the current public internet using DuckDuckGo Instant "
-                "Answer or Brave Search."
+                "Search the current public internet for up-to-date pages, articles, "
+                "sources, and research using DuckDuckGo or Brave Search."
             ),
             input_model=self.input_model,
             output_model=self.output_model,
@@ -92,6 +93,62 @@ class WebSearchSkill(Skill):
             summary=f"Found {len(results)} web results.",
             display_text="\n\n".join(lines),
             data=WebSearchOutput(results=results).model_dump(),
+            items=tuple(
+                RequestResultItem(
+                    item_id=f"web-{index}",
+                    title=item["title"] or item["url"],
+                    value=item["url"],
+                    kind="web_page",
+                    description=item["description"][:2_000] or None,
+                    metadata={"url": item["url"]},
+                )
+                for index, item in enumerate(results, 1)
+            ),
+        )
+
+
+class NewsSearchSkill(Skill):
+    input_model = WebSearchInput
+    output_model = WebSearchOutput
+
+    def __init__(self, client: WebClient) -> None:
+        self.client = client
+        self.manifest = manifest(
+            skill_id="web.news_search",
+            display_name="News Search",
+            description=(
+                "Find current news headlines with source and publication time for "
+                "latest-news questions, briefings, digests, reports, and recaps."
+            ),
+            input_model=self.input_model,
+            output_model=self.output_model,
+            permissions=NETWORK_PERMISSION,
+            safe_to_retry=True,
+        )
+
+    async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult:
+        args = self.validate(call.arguments)
+        results = await self.client.search_news(args.query, count=args.count)
+        lines = [
+            f"{index}. {item['title']}\n{item['url']}\n{item['description']}"
+            for index, item in enumerate(results, 1)
+        ]
+        return SkillResult(
+            status=ResultStatus.COMPLETED,
+            summary=f"Found {len(results)} current news headlines.",
+            display_text="\n\n".join(lines),
+            data=WebSearchOutput(results=results).model_dump(),
+            items=tuple(
+                RequestResultItem(
+                    item_id=f"news-{index}",
+                    title=item["title"] or item["url"],
+                    value=item["url"],
+                    kind="news_article",
+                    description=item["description"][:2_000] or None,
+                    metadata={"url": item["url"]},
+                )
+                for index, item in enumerate(results, 1)
+            ),
         )
 
 
@@ -237,6 +294,17 @@ class HeadlessReadSkill(Skill):
             summary=summary,
             display_text=display,
             data=output.model_dump(),
+            items=tuple(
+                RequestResultItem(
+                    item_id=f"page-{index}",
+                    title=item["title"] or item["url"],
+                    value=item["url"],
+                    kind="web_page",
+                    description=item["text"][:2_000] or None,
+                    metadata={"url": item["url"]},
+                )
+                for index, item in enumerate(page.items, 1)
+            ),
         )
 
 

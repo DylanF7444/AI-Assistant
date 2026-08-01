@@ -104,13 +104,10 @@ class DeviceControlHandler:
                     source="rule",
                 )
             )
-        if routed in {
-            "lock device",
-            "lock the device",
-            "lock my device",
-            "lock computer",
-            "lock the computer",
-        }:
+        if re.fullmatch(
+            r"lock (?:my |the )?(?:device|computer|pc|system)",
+            routed,
+        ):
             return RouteResult(
                 Intent(
                     name="windows.device_control",
@@ -119,14 +116,10 @@ class DeviceControlHandler:
                     source="rule",
                 )
             )
-        if routed in {
-            "restart device",
-            "restart the device",
-            "restart computer",
-            "restart the computer",
-            "reboot device",
-            "reboot computer",
-        }:
+        if re.fullmatch(
+            r"(?:restart|reboot) (?:my |the )?(?:device|computer|pc|system)",
+            routed,
+        ):
             return RouteResult(
                 Intent(
                     name="windows.device_control",
@@ -135,14 +128,11 @@ class DeviceControlHandler:
                     source="rule",
                 )
             )
-        if routed in {
-            "shut down device",
-            "shutdown device",
-            "shut down the device",
-            "shutdown the device",
-            "shut down computer",
-            "shutdown computer",
-        }:
+        if re.fullmatch(
+            r"(?:shut down|shutdown|turn off|power off) "
+            r"(?:my |the )?(?:device|computer|pc|system)",
+            routed,
+        ):
             return RouteResult(
                 Intent(
                     name="windows.device_control",
@@ -154,7 +144,8 @@ class DeviceControlHandler:
         if re.fullmatch(
             r"(?:(?:show|check) (?:my |the )?battery(?: status| level)?|"
             r"what(?:'s|s| is) (?:my |the )?battery(?: status| level)?|"
-            r"battery(?: status| level))",
+            r"battery(?: status| level)|"
+            r"how much battery (?:do i have|is)(?: left| remaining)?)",
             routed,
         ):
             return RouteResult(
@@ -166,7 +157,11 @@ class DeviceControlHandler:
                 )
             )
         if match := re.fullmatch(
-            r"(?:show|check) (?:my |the )?storage status(?: for ([a-z]:?))?",
+            r"(?:(?:show|check|report)(?: me)? (?:my |the )?"
+            r"(?:storage(?: status| space| usage)?|disk space|free space)|"
+            r"how much (?:storage|disk space)(?: do i have| is)? "
+            r"(?:left|available|free|remaining))"
+            r"(?: (?:for|on) (?:drive )?([a-z]:?))?",
             routed,
         ):
             arguments = {"operation": "storage_status"}
@@ -200,13 +195,11 @@ class DeviceControlHandler:
                     source="rule",
                 )
             )
-        if routed in {
-            "show connected devices",
-            "list connected devices",
-            "manage connected devices",
-            "show devices",
-            "list devices",
-        }:
+        if re.fullmatch(
+            r"(?:show|list|manage) (?:my |the )?"
+            r"(?:(?:connected|paired) devices|devices)",
+            routed,
+        ):
             return RouteResult(
                 Intent(
                     name="windows.device_control",
@@ -216,7 +209,7 @@ class DeviceControlHandler:
                 )
             )
         if match := re.fullmatch(
-            r"(enable|disable) connected device (.+)",
+            r"(enable|disable) (?:connected )?device (.+)",
             routed,
         ):
             return RouteResult(
@@ -230,12 +223,50 @@ class DeviceControlHandler:
                     source="rule",
                 )
             )
-        if match := re.fullmatch(r"(?:play|pause|play pause)(?: the)? music", routed):
+        if re.fullmatch(
+            r"(?:play|pause|resume|play pause)(?: the)? (?:music|playback)",
+            routed,
+        ):
             return RouteResult(
                 Intent(
                     name="windows.media",
                     arguments={"action": "play_pause"},
                     confidence=0.95,
+                    source="rule",
+                )
+            )
+        if re.fullmatch(
+            r"(?:next|skip)(?: the| this)? (?:song|track)|"
+            r"(?:skip|go) to (?:the )?next (?:song|track)",
+            routed,
+        ):
+            return RouteResult(
+                Intent(
+                    name="windows.media",
+                    arguments={"action": "next"},
+                    confidence=0.97,
+                    source="rule",
+                )
+            )
+        if re.fullmatch(
+            r"(?:previous|last|back)(?: the| this)? (?:song|track)|"
+            r"(?:go|skip) (?:back )?to (?:the )?(?:previous|last) (?:song|track)",
+            routed,
+        ):
+            return RouteResult(
+                Intent(
+                    name="windows.media",
+                    arguments={"action": "previous"},
+                    confidence=0.97,
+                    source="rule",
+                )
+            )
+        if re.fullmatch(r"stop(?: the)? (?:music|playback)", routed):
+            return RouteResult(
+                Intent(
+                    name="windows.media",
+                    arguments={"action": "stop"},
+                    confidence=0.97,
                     source="rule",
                 )
             )
@@ -248,7 +279,15 @@ class DeviceControlHandler:
                     source="rule",
                 )
             )
-        if routed in {"volume up", "turn volume up", "increase volume"}:
+        if routed in {
+            "volume up",
+            "turn volume up",
+            "turn up the volume",
+            "increase volume",
+            "increase the volume",
+            "raise the volume",
+            "louder",
+        }:
             return RouteResult(
                 Intent(
                     name="windows.media",
@@ -257,7 +296,15 @@ class DeviceControlHandler:
                     source="rule",
                 )
             )
-        if routed in {"volume down", "turn volume down", "decrease volume"}:
+        if routed in {
+            "volume down",
+            "turn volume down",
+            "turn down the volume",
+            "decrease volume",
+            "decrease the volume",
+            "lower the volume",
+            "quieter",
+        }:
             return RouteResult(
                 Intent(
                     name="windows.media",

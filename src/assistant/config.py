@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -42,6 +43,8 @@ class Settings(BaseModel):
     stt_device: Literal["auto", "cuda", "cpu"] = "auto"
     llm_provider: str = "ollama"
     llm_model: str = "qwen2.5:3b"
+    llm_keep_alive: str = "30m"
+    llm_preload: bool = True
     planner_timeout_seconds: float = Field(default=60.0, gt=0)
     embedding_provider: Literal["lexical", "ollama"] = "lexical"
     embedding_model: str = "nomic-embed-text"
@@ -127,6 +130,16 @@ class Settings(BaseModel):
         if not keyword:
             raise ValueError("voice activation keyword cannot be blank")
         return keyword
+
+    @field_validator("llm_keep_alive")
+    @classmethod
+    def _validate_llm_keep_alive(cls, value: str) -> str:
+        normalized = value.strip().casefold()
+        if not re.fullmatch(r"-?\d+(?:\.\d+)?(?:ms|s|m|h)?", normalized):
+            raise ValueError(
+                "LLM keep-alive must be a duration such as 30m, 2h, 0, or -1"
+            )
+        return normalized
 
     @field_validator(
         "notification_quiet_hours_start",

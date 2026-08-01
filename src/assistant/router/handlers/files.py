@@ -23,10 +23,10 @@ class FileSearchHandler:
             r"(?P<root>.+?) for (?:a |the |my )?"
             r"(?:(?:file|document)(?: named| called)? )?"
             r"(?P<query>.+)",
-            # Location first without a preposition requires an explicit file noun so
-            # ordinary web/application searches do not become filesystem searches.
+            # A known folder name is enough disambiguation for concise wording such
+            # as "search Downloads for resume"; arbitrary roots are rejected below.
             r"(?:look|search|check) (?:my |the )?(?P<root>.+?) for "
-            r"(?:a |the |my )?(?:file|document)(?: named| called)? (?P<query>.+)",
+            r"(?:a |the |my )?(?P<query>.+)",
             # Target first with an explicit file noun.
             r"(?:find|locate|search for|look for) (?:a |the |my )?"
             r"(?:file|document)(?: named| called)? (?P<query>.+?) "
@@ -40,11 +40,17 @@ class FileSearchHandler:
                 root = _normalized_file_search_root(match.group("root"))
                 if root is None:
                     continue
+                query = re.sub(
+                    r"^(?:file|document)(?: named| called)?\s+",
+                    "",
+                    match.group("query").strip(),
+                    flags=re.IGNORECASE,
+                )
                 return RouteResult(
                     Intent(
                         name="windows.file_search",
                         arguments={
-                            "query": match.group("query").strip().strip("\"'"),
+                            "query": query.strip("\"'"),
                             "root": root,
                             "limit": 20,
                         },
@@ -171,6 +177,25 @@ class FileMutationHandler:
                         arguments={
                             "operation": "create_text",
                             "source": f"{target}/{filename}",
+                        },
+                        confidence=0.94,
+                        source="rule",
+                    )
+                )
+        if match := re.fullmatch(
+            r"(?:add|create|make) (?:a |an )?(?:new |blank )?file"
+            r" (?:named|called) ([a-z0-9][a-z0-9_. -]*\.txt)"
+            r" (?:to|in|inside|into) (.+)",
+            routed,
+        ):
+            target = router._file_destination_folder(match.group(2))
+            if target:
+                return RouteResult(
+                    Intent(
+                        name="windows.file_operation",
+                        arguments={
+                            "operation": "create_text",
+                            "source": f"{target}/{router._text_filename(match.group(1))}",
                         },
                         confidence=0.94,
                         source="rule",

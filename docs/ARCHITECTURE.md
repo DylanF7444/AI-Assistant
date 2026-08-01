@@ -5,8 +5,10 @@
 1. A push-to-talk source emits mono 16 kHz PCM and pipeline events.
 2. An interchangeable offline STT provider emits immutable raw and normalized
    transcripts.
-3. Deterministic routing handles common commands. Only unmatched requests may
-   reach a local schema-constrained planner.
+3. Deterministic routing handles common commands. For an unmatched request,
+   semantic candidate selection gates demand-driven context collection and one
+   schema-constrained local-model completion jointly interprets and answers or
+   plans the request.
 4. The selected registered skill validates its Pydantic input schema.
 5. Policy checks user, skill, capability, session, and target scopes.
 6. Sensitive calls produce an immutable, expiring confirmation instead of
@@ -14,6 +16,24 @@
 7. The execution engine revalidates and reauthorizes immediately before work.
 8. Structured results produce display and optional speech responses.
 9. Permission decisions and outcomes are written to a separate audit log.
+
+## Request results and selection
+
+`SkillResult.items` is the shared result-item envelope for any skill that
+returns an addressable collection. Each `RequestResultItem` has an ID, kind,
+display title and description, a schema-friendly value for later work,
+metadata, and an optional sensitivity marker. `None` means the request did not
+produce an item collection; an empty tuple is an intentional empty result set.
+The response layer carries the typed items separately from display text, so the
+assistant and UI never need to scrape numbered prose.
+
+Conversation state retains the latest item set, its producing skill and the
+current selection. Users can select an item by ordinal, item ID, or
+unambiguous title. The session context provider exposes bounded
+`results.recent_items` and `results.selected` records, including their concrete
+values, to grounded follow-up planning. Sensitive item values are redacted.
+Legacy `files.selected` and `files.recent_candidates` context remains as a
+compatibility view over file-kind items.
 
 ## Media presentation
 
@@ -109,6 +129,22 @@ searched with bounded lexical retrieval. Relevant excerpts are included as
 untrusted reference data in the schema-constrained planner prompt. Knowledge
 files are stored as local database content and never execute instructions.
 
+The planner latency path performs retrieval first, derives a bounded set of
+candidate skills, and collects only context relevant to the request or those
+candidates. Independent context providers run concurrently while process and
+device snapshots use short thread-safe caches. The collected context,
+retrieval results, and interpretation fields share one grounded completion
+schema, avoiding a separate interpretation model round trip. Simple factual
+answers receive a smaller output-token ceiling than detailed explanations or
+settings guidance.
+
+The Ollama adapter sends a configurable `keep_alive` value on every completion
+and can preload the selected model in a background startup request. Native
+Ollama load, prompt-evaluation, generation, token, and total-duration fields
+are recorded alongside planner retrieval/context/grounded stages and total
+request latency. Metrics are correlated per request and contain timing and
+counts rather than prompt or response text.
+
 Enabled user playbooks are loaded from validated Markdown files under the local
 data directory and indexed in a separate retrieval namespace. Unlike knowledge,
 they are explicit user-authored planning guidance. Their structured skill IDs
@@ -127,7 +163,8 @@ and device implementations are injected behind typed interfaces.
 `assistant.dashboard` is a UI-independent read model. Strict card, layout,
 connection, definition, request, snapshot, and numeric point contracts flow
 through `DashboardService` and a provider registry. Built-in providers aggregate
-only bounded `MetricsStore` and scheduler data. The Windows device provider
+only bounded `MetricsStore` and scheduler data, including request, model, and
+skill-execution latency cards. The Windows device provider
 uses the existing device interface, and the Home Assistant provider exposes
 only health and exact entity-state reads.
 

@@ -13,6 +13,7 @@ BUILT_IN_CAPABILITIES = (
     "filesystem.write",
     "input.control",
     "integration.read",
+    "integration.write",
     "media.control",
     "messaging",
     "network",

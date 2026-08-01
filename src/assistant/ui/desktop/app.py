@@ -169,6 +169,10 @@ def run_desktop(container: Container) -> int:
             "Read integration data",
             "Read exact metrics from a configured external application.",
         ),
+        "integration.write": (
+            "Change integration data",
+            "Create, update, move, share, or delete data in a configured external service.",
+        ),
         "media.control": ("Control media", "Change playback, volume, or media state."),
         "messaging": ("Send messages", "Send messages through configured accounts."),
         "network": ("Use the network", "Open websites or call network services."),
@@ -2140,14 +2144,14 @@ def run_desktop(container: Container) -> int:
 
             activity_card = QFrame()
             activity_card.setObjectName("activityCard")
-            activity_card.setMinimumWidth(250)
-            activity_card.setMaximumWidth(330)
+            activity_card.setMinimumWidth(280)
+            activity_card.setMaximumWidth(390)
             activity_layout = QVBoxLayout(activity_card)
             activity_layout.setContentsMargins(18, 18, 18, 18)
             activity_layout.setSpacing(10)
-            activity_title = QLabel("ACTIVITY")
+            activity_title = QLabel("TOOLS + ACTIONS")
             activity_title.setObjectName("sectionLabel")
-            self.activity_hint = QLabel("Safe decision and action trace")
+            self.activity_hint = QLabel("Tool names, safe inputs, live actions, and outcomes")
             self.activity_hint.setObjectName("activityHint")
             self.activity_hint.setWordWrap(True)
             self.background_activity = QLabel("BACKGROUND  •  IDLE")
@@ -2155,6 +2159,8 @@ def run_desktop(container: Container) -> int:
             self.activity_log = QListWidget()
             self.activity_log.setObjectName("activityLog")
             self.activity_log.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self.activity_log.setWordWrap(True)
+            self.activity_log.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self.activity_log.setSizePolicy(
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
             )
@@ -2178,6 +2184,26 @@ def run_desktop(container: Container) -> int:
             while self.activity_log.count() > 200:
                 self.activity_log.takeItem(0)
             self.activity_log.scrollToBottom()
+
+        def _append_trace_activity(self, trace: Any) -> None:
+            prefix = "Background · " if trace.invocation == "background" else ""
+            label = prefix + trace.label
+            if trace.tool_name:
+                label += f" · {trace.tool_name}"
+            lines = []
+            if trace.skill_id:
+                lines.append(f"TOOL    {trace.skill_id}")
+            if trace.action:
+                lines.append(f"ACTION  {trace.action}")
+            if trace.detail and trace.detail.casefold() != (trace.action or "").casefold():
+                lines.append(trace.detail)
+            if trace.status is not None:
+                status = trace.status.value.replace("_", " ").upper()
+                duration = (
+                    f"  ·  {trace.duration_ms / 1000:.2f}s" if trace.duration_ms is not None else ""
+                )
+                lines.append(f"STATUS  {status}{duration}")
+            self._append_activity(label, "\n".join(lines))
 
         def _update_background_activity(self) -> None:
             count = sum(self._background_correlations.values())
@@ -2429,8 +2455,7 @@ def run_desktop(container: Container) -> int:
 
         def _handle_pipeline_event(self, event: PipelineEvent) -> None:
             if event.trace is not None:
-                prefix = "Background · " if event.trace.invocation == "background" else ""
-                self._append_activity(prefix + event.trace.label, event.trace.detail)
+                self._append_trace_activity(event.trace)
                 if event.trace.invocation == "background":
                     if event.trace.phase.value == "action":
                         self._background_correlations[event.correlation_id] = (
@@ -3575,6 +3600,10 @@ def run_desktop(container: Container) -> int:
             self.setting_default_timezone = QLineEdit(container.settings.default_timezone)
             self.setting_stt = QLineEdit(container.settings.stt_model)
             self.setting_llm = QLineEdit(container.settings.llm_model)
+            self.setting_llm_keep_alive = QLineEdit(container.settings.llm_keep_alive)
+            self.setting_llm_keep_alive.setPlaceholderText("30m")
+            self.setting_llm_preload = QCheckBox()
+            self.setting_llm_preload.setChecked(container.settings.llm_preload)
             self.setting_openai_model = QLineEdit(container.settings.openai_model)
             self.setting_openai_codex_model = QLineEdit(container.settings.openai_codex_model)
             self.setting_anthropic_model = QLineEdit(container.settings.anthropic_model)
@@ -3791,6 +3820,8 @@ def run_desktop(container: Container) -> int:
             form.addRow("Input device", self.setting_input)
             form.addRow("STT model", self.setting_stt)
             form.addRow("Local LLM model", self.setting_llm)
+            form.addRow("Local LLM keep-alive", self.setting_llm_keep_alive)
+            form.addRow("Preload local LLM at startup", self.setting_llm_preload)
             form.addRow("OpenAI model", self.setting_openai_model)
             form.addRow("OpenAI Codex model", self.setting_openai_codex_model)
             form.addRow("OpenAI API key", self.setting_openai_key)
@@ -4034,6 +4065,8 @@ def run_desktop(container: Container) -> int:
                     "audio_input_device": self.setting_input.currentData(),
                     "stt_model": self.setting_stt.text().strip(),
                     "llm_model": self.setting_llm.text().strip(),
+                    "llm_keep_alive": self.setting_llm_keep_alive.text().strip(),
+                    "llm_preload": self.setting_llm_preload.isChecked(),
                     "openai_model": self.setting_openai_model.text().strip(),
                     "openai_codex_model": (self.setting_openai_codex_model.text().strip()),
                     "anthropic_model": self.setting_anthropic_model.text().strip(),
@@ -4117,6 +4150,25 @@ def run_desktop(container: Container) -> int:
             container.media_cache.set_offline_lock(validated.offline_lock)
             container.orchestrator.speech_mode = validated.speech_mode
             container.orchestrator.response_detail = validated.response_detail
+            if container.orchestrator.planner is not None:
+                container.orchestrator.planner.response_detail = validated.response_detail
+                planner_provider = getattr(
+                    container.orchestrator.planner,
+                    "provider",
+                    None,
+                )
+                if planner_provider is not None and hasattr(planner_provider, "keep_alive"):
+                    planner_provider.keep_alive = validated.llm_keep_alive
+                    if validated.llm_preload and hasattr(
+                        planner_provider,
+                        "preload_in_background",
+                    ):
+                        planner_provider.preload_in_background(
+                            timeout_seconds=min(
+                                15.0,
+                                validated.planner_timeout_seconds,
+                            )
+                        )
             container.orchestrator.show_reasoning_steps = validated.show_reasoning_steps
             container.orchestrator.terminal_debug = validated.terminal_debug
             container.orchestrator.hide_sensitive_display = validated.hide_sensitive_display
@@ -5324,9 +5376,7 @@ def run_desktop(container: Container) -> int:
             worker.start()
 
         def _show_skill_result(self, result: Any) -> None:
-            paths = result.data.get("paths") if isinstance(result.data, dict) else None
-            if isinstance(paths, list):
-                container.orchestrator.remember_file_candidates(paths)
+            container.orchestrator.remember_result(result)
             if isinstance(result.data, dict) and "memories" in result.data:
                 self._reload_memories_if_visible()
             response = response_from_result(

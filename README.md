@@ -12,6 +12,16 @@ python -m pytest
 python -m assistant.app
 ```
 
+On Windows, `scripts/run.ps1` starts the app from the repository root without
+requiring a manually composed `cd` command:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run.ps1
+```
+
+If you change directories explicitly, quote paths containing spaces:
+`Set-Location -LiteralPath 'C:\path with spaces\Assistant'`.
+
 Development and release checks:
 
 ```powershell

@@ -40,6 +40,30 @@ async def test_default_dashboard_aggregates_privacy_bounded_local_metrics(settin
         duration_ms=80,
         outcome="failed",
     )
+    container.metrics.record(
+        correlation_id="completed",
+        stage="request.total",
+        duration_ms=100,
+        outcome="answer",
+    )
+    container.metrics.record(
+        correlation_id="failed",
+        stage="request.total",
+        duration_ms=300,
+        outcome="error",
+    )
+    container.metrics.record(
+        correlation_id="completed",
+        stage="model.total",
+        duration_ms=40,
+        outcome="planner.grounded",
+    )
+    container.metrics.record(
+        correlation_id="failed",
+        stage="model.total",
+        duration_ms=60,
+        outcome="planner.grounded",
+    )
     container.dashboard.set_pipeline_state(PipelineState.THINKING)
 
     layout = container.dashboard.layout()
@@ -49,6 +73,8 @@ async def test_default_dashboard_aggregates_privacy_bounded_local_metrics(settin
     assert [card.metric_id for card in layout.cards] == [
         "assistant.status",
         "assistant.request_outcomes",
+        "assistant.request_latency",
+        "assistant.model_latency",
         "assistant.execution_latency",
         "automations.summary",
         "assistant.recent_activity",
@@ -56,6 +82,10 @@ async def test_default_dashboard_aggregates_privacy_bounded_local_metrics(settin
     assert SettingsStore(container.database).get(DashboardLayoutStore.KEY) is not None
     assert by_metric["assistant.status"].value == "Thinking"
     assert by_metric["assistant.request_outcomes"].value == 2
+    assert by_metric["assistant.request_latency"].value == 200
+    assert "p95 300.0 ms" in by_metric["assistant.request_latency"].summary
+    assert by_metric["assistant.model_latency"].value == 50
+    assert "p95 60.0 ms" in by_metric["assistant.model_latency"].summary
     assert by_metric["assistant.execution_latency"].value == 50
     assert "p95 80.0 ms" in by_metric["assistant.execution_latency"].summary
     assert by_metric["automations.summary"].state == MetricState.READY

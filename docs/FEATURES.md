@@ -30,7 +30,9 @@ the relevant setting, credential, local service, or device to be configured.
 | Network | `cloud.ask` | Optional | Low | `network`, `process.launch` for Codex | Ask configured OpenAI, Anthropic, or local Codex CLI providers. |
 | Network | `web.fetch` | Optional | Low | `network` | Read text from a specific public HTTPS page. |
 | Network | `web.headless_read` | Optional | Low | `network` | Render a public HTTPS page in a fresh non-persistent headless browser and return bounded visible text/links or matching deal, product, article, listing, and result cards without opening a user window. |
-| Network | `web.search` | Optional | Low | `network` | Search the public web through DuckDuckGo Instant Answer or Brave Search. |
+| Network | `web.news_search` | Optional | Low | `network` | Retrieve current headlines with source and publication time for reports and briefings. |
+| Network | `web.search` | Optional | Low | `network` | Search the public web through DuckDuckGo or Brave Search. |
+| Connections | `integration.google_calendar` | Extension Hub/Optional | Dynamic | `integration.read`, `integration.write`, `network` | Install the first-party Hub extension, connect Google with in-app encrypted OAuth, and list or manage calendars, events, availability, invitations, settings, and sharing rules. |
 | Media | `media.present` | Implemented/Optional remote | Low | `filesystem.read` or `network` | Present an exact approved local file or explicitly downloaded public HTTPS image, audio file, or video in the Assistant. |
 | Media | `media.viewer_control` | Implemented | Low | None | Control only the active in-app viewer: playback, seek, volume, rate, mute, fullscreen, stop, or close. |
 | Windows | `windows.application_window` | Implemented | High | `process.window` | Focus, minimize, maximize, close, move, or resize an approved application window. |
@@ -50,6 +52,9 @@ the relevant setting, credential, local service, or device to be configured.
 
 ## Implemented Platform Features
 
+- Typed request-result items for files, media candidates, tasks, notes,
+  web/news results, and extracted page items; generic selection by number, ID,
+  or title; and bounded selected-item context for follow-up actions.
 - PySide6 tray UI with a pinned compact companion, expandable assistant,
   settings, skills, permissions, audit, privacy, diagnostics, applications,
   macros, models, and benchmark views. Closing hides to the tray so background
@@ -58,7 +63,8 @@ the relevant setting, credential, local service, or device to be configured.
   for each, a responsive one-to-four-column metric grid, manual and per-card
   refresh, and staged add/remove/disable/reorder/resize/title/presentation
   customization.
-- Privacy-bounded local assistant and automation metrics; default-deny CPU,
+- Privacy-bounded request, planner, native Ollama model, skill-execution, and
+  automation metrics with request/model/execution latency cards; default-deny CPU,
   memory, storage, and battery cards; and read-only Home Assistant entity cards
   with exact origin/entity scopes, encrypted tokens, offline/stale behavior,
   connection health controls, and optional finite-numeric trend retention.
@@ -75,8 +81,9 @@ the relevant setting, credential, local service, or device to be configured.
   actions, source-aware TTS/microphone coordination, fingerprint revalidation,
   and optional verified public-HTTPS downloads in a bounded privacy-clearable
   cache.
-- Deterministic routing plus schema-constrained local planner support for
-  ambiguous or multi-step requests.
+- Deterministic routing plus a single grounded schema-constrained planner
+  completion for unmatched requests, demand-driven concurrent cached context,
+  proportional response budgets, and configurable Ollama preload/keep-alive.
 - Default-deny scoped permissions, action-bound confirmations, audit logging,
   emergency stop, rollback where supported, and file access allow/block policy.
 - Signed skill-package validation, isolated worker execution, update review for
@@ -93,6 +100,11 @@ the relevant setting, credential, local service, or device to be configured.
   Playbooks guide planning but cannot grant permissions or execute directly.
 - Optional MQTT, Home Assistant, Wyoming, web search/fetch, and cloud-model
   integrations behind explicit configuration and permissions.
+- Optional Google Calendar integration with desktop OAuth 2.0 PKCE, encrypted
+  refresh/access tokens, exact calendar/event permission targets, bounded typed
+  results, calendar and event CRUD, recurring instances, RSVP, free/busy,
+  colors, settings, and confirmation-gated sharing and Workspace-admin
+  ownership transfer.
 - Optional Playwright headless rendering in a fresh non-persistent context,
   with public-HTTPS-only navigation, bounded result-card extraction, read-only
   request methods, installed Edge/Chrome fallback, and no access to the user's

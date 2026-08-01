@@ -10,6 +10,7 @@ import time
 import urllib.error
 from collections import deque
 from collections.abc import Callable
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -33,9 +34,11 @@ from assistant.contracts import (
     PipelineEvent,
     PipelineState,
     PlanStep,
+    RequestResultItem,
     Response,
     ResponseType,
     SkillCall,
+    SkillResult,
     TracePhase,
     Transcript,
     WordTimestamp,
@@ -63,7 +66,10 @@ from assistant.orchestration import (
     InteractionRecorder,
     PendingClarificationFollowUp,
     PlannerCoordinator,
+    contextual_result_selector,
     evaluate_voice_gate,
+    select_result_item,
+    selection_index,
 )
 from assistant.policy.permissions import GrantType
 from assistant.presentation.media_resolver import is_explicit_media_path
@@ -192,6 +198,31 @@ class AssistantOrchestrator:
         self.state.remember_file_candidates(paths)
 
     @property
+    def _result_items(self) -> tuple[RequestResultItem, ...]:
+        return self.state.result_items
+
+    @property
+    def _selected_result_item(self) -> RequestResultItem | None:
+        return self.state.selected_result_item
+
+    def remember_result_items(
+        self,
+        items: tuple[RequestResultItem, ...] | list[RequestResultItem],
+        *,
+        source: str | None = None,
+        summary: str | None = None,
+    ) -> None:
+        self.state.remember_result_items(items, source=source, summary=summary)
+
+    def remember_result(
+        self,
+        result: SkillResult,
+        *,
+        source: str | None = None,
+    ) -> None:
+        self._remember_result(result, source=source)
+
+    @property
     def request_in_progress(self) -> bool:
         with self._request_state_lock:
             return bool(self._active_request_correlations)
@@ -240,7 +271,14 @@ class AssistantOrchestrator:
         if final_outcome.confirmation is not None:
             self._pending_confirmation = final_outcome
         if final_outcome.result:
-            self._remember_file_result(final_outcome.result)
+            self._remember_result(
+                final_outcome.result,
+                source=(
+                    final_outcome.call.skill_id
+                    if final_outcome.call is not None
+                    else intent_name
+                ),
+            )
         self._print_terminal_debug(
             correlation_id,
             request_text,
@@ -524,11 +562,15 @@ class AssistantOrchestrator:
         text: str,
         *,
         session_id: str,
+        candidate_skill_ids: tuple[str, ...] | None = None,
     ) -> ContextSnapshot:
         providers = [
             SessionContextProvider(
                 recent_context=lambda: tuple(self._session_context),
                 pending_clarification=self._pending_clarification_context,
+                selected_result_item=lambda: self._selected_result_item,
+                result_items=lambda: self._result_items,
+                result_source=lambda: self.state.result_source,
                 selected_file=lambda: self._selected_file,
                 file_candidates=lambda: self._file_candidates,
             ),
@@ -545,6 +587,7 @@ class AssistantOrchestrator:
             text,
             session_id=session_id,
             providers=tuple(providers),
+            candidate_skill_ids=candidate_skill_ids,
         )
 
     def _pending_clarification_context(self) -> dict[str, str] | None:
@@ -559,6 +602,7 @@ class AssistantOrchestrator:
 
     async def _interpret_planner_goal(
         self,
+        correlation_id: UUID,
         text: str,
         *,
         session_id: str,
@@ -601,7 +645,16 @@ class AssistantOrchestrator:
                         source="rule",
                     )
                 )
+        retrieval_started = time.perf_counter()
         retrieved = await self._retrieve_planner_goal_context(text)
+        if self.metrics is not None:
+            self.metrics.record(
+                correlation_id=str(correlation_id),
+                stage="planner.retrieval",
+                duration_ms=(time.perf_counter() - retrieval_started) * 1000,
+                value=len(retrieved),
+                outcome="completed",
+            )
         if explicit_playbook is not None:
             playbook, _ = explicit_playbook
             assert playbook is not None
@@ -611,10 +664,61 @@ class AssistantOrchestrator:
                 for item in retrieved
                 if not (item.namespace == "playbook" and item.source_id == playbook.playbook_id)
             )
+        candidate_skills = None
+        candidate_skill_ids = None
+        select_candidates = getattr(self.planner, "candidate_skills", None)
+        if callable(select_candidates):
+            candidate_skills = select_candidates(text, retrieved)
+            select_context_candidates = getattr(
+                self.planner,
+                "context_candidate_skill_ids",
+                None,
+            )
+            candidate_skill_ids = (
+                select_context_candidates(retrieved, candidate_skills)
+                if callable(select_context_candidates)
+                else tuple(manifest.skill_id for manifest in candidate_skills)
+            )
+        context_started = time.perf_counter()
         context = await self._context_snapshot_for_planner_goal(
             text,
             session_id=session_id,
+            candidate_skill_ids=candidate_skill_ids,
         )
+        if self.metrics is not None:
+            self.metrics.record(
+                correlation_id=str(correlation_id),
+                stage="planner.context",
+                duration_ms=(time.perf_counter() - context_started) * 1000,
+                value=len(context.items),
+                outcome="completed",
+            )
+        plan_grounded = getattr(self.planner, "plan_grounded", None)
+        if callable(plan_grounded):
+            grounded_started = time.perf_counter()
+            decision = await plan_grounded(
+                text,
+                context=context,
+                retrieved=retrieved,
+                candidate_skills=candidate_skills,
+            )
+            if self.metrics is not None:
+                outcome = (
+                    decision.intent.name
+                    if decision.intent is not None
+                    else "plan"
+                    if decision.steps
+                    else "clarification"
+                    if decision.clarification
+                    else "empty"
+                )
+                self.metrics.record(
+                    correlation_id=str(correlation_id),
+                    stage="planner.grounded",
+                    duration_ms=(time.perf_counter() - grounded_started) * 1000,
+                    outcome=outcome,
+                )
+            return decision
         interpretation = await self.planner.interpret(
             text,
             context=context,
@@ -821,67 +925,90 @@ class AssistantOrchestrator:
             return outcome.result.status.value
         return "none"
 
-    def _remember_file_result(self, result: Any) -> None:
-        paths = result.data.get("paths") if isinstance(result.data, dict) else None
-        if isinstance(paths, list) and all(isinstance(path, str) for path in paths):
-            self.remember_file_candidates(tuple(paths))
+    def _remember_result(self, result: SkillResult, *, source: str | None = None) -> None:
+        if result.items is not None:
+            self.remember_result_items(
+                result.items,
+                source=source,
+                summary=result.summary,
+            )
+        else:
+            # Compatibility for installed skills that predate the official item
+            # contract and return file-search candidates only in result data.
+            paths = result.data.get("paths") if isinstance(result.data, dict) else None
+            if (
+                isinstance(paths, list)
+                and all(isinstance(path, str) for path in paths)
+                and (paths or source == "windows.file_search")
+            ):
+                self.remember_file_candidates(tuple(paths))
         if result.media_directive is not None:
             self.state.remember_media_directive(result.media_directive)
 
-    def _select_file_candidate(self, selector: str) -> Response:
-        if not self._file_candidates:
+    def _select_result_item(self, selector: str) -> Response:
+        selection = select_result_item(self._result_items, selector)
+        if selection.item is None:
+            if selection.failure == "no_results":
+                display = "There are no recent request result items to select from."
+                speech = "There are no recent results to select from."
+            elif selection.failure == "out_of_range":
+                display = (
+                    "I do not have that many recent results. Select one of the "
+                    'numbered items, for example "select 1".'
+                )
+                speech = "I do not have that many recent results."
+            elif selection.failure == "ambiguous":
+                display = (
+                    "That name matches more than one recent result. Select it by "
+                    'number or item ID, for example "select 1".'
+                )
+                speech = "That name matches more than one result."
+            else:
+                display = (
+                    "I could not match that reference to a recent result. Select an "
+                    'item by number, ID, or title, for example "select 1".'
+                )
+                speech = "I could not match that recent result."
             return Response(
-                display_text="There are no file search results to select from.",
-                speech_text="There are no file results to select from.",
+                display_text=display,
+                speech_text=speech,
                 response_type=ResponseType.CLARIFICATION,
                 severity="warning",
                 speak=True,
             )
-        index = self._selection_index(selector)
-        if index == -1:
-            index = len(self._file_candidates) - 1
-        if index is None or index < 0 or index >= len(self._file_candidates):
-            return Response(
-                display_text=('Select one of the numbered file results, for example "select 1".'),
-                speech_text="Please select one of the numbered file results.",
-                response_type=ResponseType.CLARIFICATION,
-                severity="warning",
-                speak=True,
-            )
-        self._selected_file = self._file_candidates[index]
+        item = selection.item
+        self.state.select_result_item(item)
+        position = self._result_items.index(item) + 1
+        title = "[sensitive item]" if item.sensitive else item.title
         return Response(
-            display_text=f"Selected file:\n{self._selected_file}",
+            display_text=f"Selected item {position}: {title}",
             speech_text="Selected.",
             response_type=ResponseType.STATUS,
             severity="success",
             speak=True,
+            sensitive=item.sensitive,
+            items=(item,),
+            selected_item_id=item.item_id,
         )
+
+    def _select_contextual_result_reference(self, text: str) -> None:
+        """Resolve an explicit numbered result reference before planner context is built."""
+
+        selector = contextual_result_selector(text)
+        if selector is None:
+            return
+        selection = select_result_item(self._result_items, selector)
+        if selection.item is not None:
+            self.state.select_result_item(selection.item)
+
+    def _select_file_candidate(self, selector: str) -> Response:
+        """Compatibility alias for callers using the former file-only system."""
+
+        return self._select_result_item(selector)
 
     @staticmethod
     def _selection_index(selector: str) -> int | None:
-        value = selector.strip().casefold()
-        value = re.sub(r"^(?:the|that|this)\s+", "", value)
-        value = re.sub(r"\s+(?:one|file|item|result|match)$", "", value).strip()
-        value = re.sub(r"^(?:file|item|result|match|number)\s+", "", value).strip()
-        words = {
-            "first": 1,
-            "one": 1,
-            "second": 2,
-            "two": 2,
-            "third": 3,
-            "three": 3,
-            "fourth": 4,
-            "four": 4,
-            "fifth": 5,
-            "five": 5,
-            "last": -1,
-        }
-        if value in words:
-            number = words[value]
-            return number - 1 if number > 0 else -1
-        if match := re.fullmatch(r"(\d+)(?:st|nd|rd|th)?", value):
-            return int(match.group(1)) - 1
-        return None
+        return selection_index(selector)
 
     def _candidate_reference(self, value: str) -> str | Response | None:
         if not self._file_candidates:
@@ -1494,12 +1621,26 @@ class AssistantOrchestrator:
         conversion_text = self._conversion_follow_up_request_text(pending, answer)
         if conversion_text:
             return conversion_text
+        calendar_text = self._calendar_follow_up_request_text(pending, answer)
+        if calendar_text:
+            return calendar_text
         return (
             f"{pending.original_text}\n"
             f"Clarifying question: {pending.clarification}\n"
             f"Follow-up answer: {answer}\n"
             "Use the follow-up answer to complete the previous request."
         )
+
+    @staticmethod
+    def _calendar_follow_up_request_text(
+        pending: PendingClarificationFollowUp, answer: str
+    ) -> str | None:
+        if "calendar" not in pending.original_text.casefold():
+            return None
+        if "what event should" not in pending.clarification.casefold():
+            return None
+        value = answer.strip()
+        return f"add {value} to my calendar" if value else None
 
     @staticmethod
     def _file_search_limit_follow_up_intent(
@@ -1702,16 +1843,38 @@ class AssistantOrchestrator:
         invoked_by_voice: bool = False,
     ) -> tuple[Response, ExecutionOutcome]:
         correlation_id = uuid4()
+        request_started = time.perf_counter()
+        request_outcome = "error"
         with self._request_state_lock:
             self._active_request_correlations.append(correlation_id)
+        provider = getattr(self.planner, "provider", None)
+        metric_scope = getattr(provider, "metric_scope", None)
+        scope = (
+            metric_scope(str(correlation_id))
+            if callable(metric_scope)
+            else nullcontext()
+        )
         try:
-            return await self._handle_text(
-                correlation_id,
-                text,
-                session_id=session_id,
-                invoked_by_voice=invoked_by_voice,
-            )
+            with scope:
+                result = await self._handle_text(
+                    correlation_id,
+                    text,
+                    session_id=session_id,
+                    invoked_by_voice=invoked_by_voice,
+                )
+            request_outcome = result[0].response_type.value
+            return result
+        except asyncio.CancelledError:
+            request_outcome = "cancelled"
+            raise
         finally:
+            if self.metrics is not None:
+                self.metrics.record(
+                    correlation_id=str(correlation_id),
+                    stage="request.total",
+                    duration_ms=(time.perf_counter() - request_started) * 1000,
+                    outcome=request_outcome,
+                )
             with self._request_state_lock:
                 if correlation_id in self._active_request_correlations:
                     self._active_request_correlations.remove(correlation_id)
@@ -1748,6 +1911,7 @@ class AssistantOrchestrator:
                     invoked_by_voice=invoked_by_voice,
                 )
             self._pending_clarification_follow_up = None
+        self._select_contextual_result_reference(text)
         route_started = time.perf_counter()
         route = self.router.route(text)
         route_duration = (time.perf_counter() - route_started) * 1000
@@ -1779,16 +1943,32 @@ class AssistantOrchestrator:
                 invoked_by_voice=invoked_by_voice,
             )
         if route.needs_llm:
+            planner_started = time.perf_counter()
             planner_resolution = await self.planner_flow.resolve(
                 self.planner,
                 text,
                 intent,
                 tuple(self._session_context),
                 interpret_goal=lambda: self._interpret_planner_goal(
+                    correlation_id,
                     text,
                     session_id=session_id,
                 ),
             )
+            if self.metrics is not None:
+                planner_outcome = (
+                    "unavailable"
+                    if planner_resolution.unavailable
+                    else "failed"
+                    if planner_resolution.error is not None
+                    else "completed"
+                )
+                self.metrics.record(
+                    correlation_id=str(correlation_id),
+                    stage="planner.total",
+                    duration_ms=(time.perf_counter() - planner_started) * 1000,
+                    outcome=planner_outcome,
+                )
             if planner_resolution.unavailable:
                 response = self._planner_unavailable_response()
                 response = self._with_reasoning_steps(
@@ -2014,8 +2194,8 @@ class AssistantOrchestrator:
                 session_id=session_id,
                 invoked_by_voice=invoked_by_voice,
             )
-        if intent.name == "control.file_select":
-            response = self._select_file_candidate(intent.arguments["selector"])
+        if intent.name in {"control.result_select", "control.file_select"}:
+            response = self._select_result_item(intent.arguments["selector"])
             response = self._with_reasoning_steps(
                 response,
                 request_text=text,
@@ -2312,13 +2492,24 @@ class AssistantOrchestrator:
                 observations=tuple(observations),
             )
             if revision.disposition == "next_step":
-                current_intent = Intent(
-                    name=revision.skill_id,
-                    arguments=revision.arguments,
-                    confidence=revision.confidence,
-                    source="llm",
+                if revision.skill_id.strip():
+                    current_intent = Intent(
+                        name=revision.skill_id,
+                        arguments=revision.arguments,
+                        confidence=revision.confidence,
+                        source="llm",
+                    )
+                    continue
+                revision = revision.model_copy(
+                    update={
+                        "disposition": "clarify",
+                        "arguments": {},
+                        "clarification": (
+                            "I could not map the next step to a registered skill. "
+                            "What exact action should I take next?"
+                        ),
+                    }
                 )
-                continue
             if revision.disposition == "clarify":
                 question = revision.clarification or "What should I do next?"
                 self._set_pending_clarification(
@@ -2424,6 +2615,7 @@ class AssistantOrchestrator:
             "data_keys": (
                 sorted(result.data.keys()) if result and isinstance(result.data, dict) else []
             ),
+            "result_data": result.data if result else {},
         }
 
     async def _handle_planner_intent(

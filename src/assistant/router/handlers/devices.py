@@ -130,7 +130,41 @@ class DeviceStatusHandler:
                 )
             )
         if match := re.fullmatch(
-            r"connect (?:to )?(?:my |the )?(?:wi-?fi|wifi|wireless)(?: network)? (.+)",
+            r"(increase|raise|decrease|lower|turn up|turn down) "
+            r"(?:the )?(?:screen )?brightness",
+            routed,
+        ):
+            direction = -1 if match.group(1) in {"decrease", "lower", "turn down"} else 1
+            return RouteResult(
+                Intent(
+                    name="windows.device_control",
+                    arguments={
+                        "operation": "change_brightness",
+                        "delta": direction * 10,
+                    },
+                    confidence=0.92,
+                    source="rule",
+                )
+            )
+        if match := re.fullmatch(
+            r"turn (?:the )?(?:screen )?brightness (up|down)",
+            routed,
+        ):
+            direction = -1 if match.group(1) == "down" else 1
+            return RouteResult(
+                Intent(
+                    name="windows.device_control",
+                    arguments={
+                        "operation": "change_brightness",
+                        "delta": direction * 10,
+                    },
+                    confidence=0.92,
+                    source="rule",
+                )
+            )
+        if match := re.fullmatch(
+            r"connect (?:to )?(?:my |the )?(?:wi-?fi|wifi|wireless)"
+            r"(?: network)? (?:named |called )?(.+)",
             routed,
         ):
             return RouteResult(

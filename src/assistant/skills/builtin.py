@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, field_validator
 from assistant.contracts import (
     BackgroundMode,
     PermissionScope,
+    RequestResultItem,
     ResultStatus,
     RiskLevel,
     SkillCall,
@@ -77,7 +78,7 @@ def _category_for_skill(skill_id: str) -> str:
     if skill_id.startswith(("web.", "cloud.")):
         return "Web & Cloud"
     if skill_id.startswith("integration."):
-        return "Connected Devices"
+        return "Connections"
     if skill_id in {
         "core.timer",
         "core.datetime",
@@ -272,6 +273,20 @@ class FileSearchSkill(Skill):
             status=ResultStatus.COMPLETED,
             summary=f"Found {len(values)} matching item{'s' if len(values) != 1 else ''}.",
             data=FileSearchOutput(paths=values).model_dump(),
+            items=tuple(
+                RequestResultItem(
+                    item_id=f"file-{index}",
+                    title=path,
+                    value=path,
+                    kind="file",
+                    metadata={
+                        "path": path,
+                        "name": Path(path).name,
+                        "extension": Path(path).suffix.casefold(),
+                    },
+                )
+                for index, path in enumerate(values, 1)
+            ),
             display_text=display,
         )
 

@@ -1,5 +1,6 @@
 from assistant.router.handlers.applications import ApplicationWindowHandler
 from assistant.router.handlers.applications_launch import ApplicationHandler
+from assistant.router.handlers.calendar import CalendarHandler
 from assistant.router.handlers.control import ControlHandler, MemoryConversationHandler
 from assistant.router.handlers.devices import DeviceStatusHandler
 from assistant.router.handlers.devices_control import DeviceControlHandler
@@ -14,6 +15,7 @@ from assistant.router.types import RouteHandler
 DEFAULT_ROUTE_HANDLERS: tuple[RouteHandler, ...] = (
     ControlHandler(),
     MemoryConversationHandler(),
+    CalendarHandler(),
     ProductivityHandler(),
     NetworkHandler(),
     DeviceStatusHandler(),

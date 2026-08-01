@@ -4,10 +4,29 @@ import re
 from typing import TYPE_CHECKING
 
 from assistant.contracts import Intent
+from assistant.router.handlers.common import has_explicit_file_extension
 from assistant.router.types import RouteContext, RouteResult
 
 if TYPE_CHECKING:
     from assistant.router.deterministic import DeterministicRouter
+
+
+def _looks_like_file_request(text: str) -> bool:
+    folded = text.strip().casefold()
+    return bool(
+        re.search(r"\b(?:file|document|folder)\b", folded)
+        or re.search(
+            r"\b(?:in|inside|on|from) (?:my |the )?"
+            r"(?:desktop|documents?|downloads?|pictures?|music|videos?)\b",
+            folded,
+        )
+        or re.match(
+            r"^(?:[a-z]:[\\/]|\\\\|/|~[\\/])",
+            folded,
+            flags=re.IGNORECASE,
+        )
+        or has_explicit_file_extension(folded)
+    )
 
 
 class NetworkHandler:
@@ -18,7 +37,13 @@ class NetworkHandler:
     ) -> RouteResult | None:
         text = context.text
         routed = context.routed
-        if match := re.fullmatch(r"(?:search the web|web search) for (.+)", routed):
+        if match := re.fullmatch(
+            r"(?:(?:search|look on) (?:the )?(?:web|internet|online) for|"
+            r"web search for|look up|google|bing|duckduckgo) (.+)",
+            routed,
+        ):
+            if _looks_like_file_request(match.group(1)):
+                return None
             return RouteResult(
                 Intent(
                     name="web.search",
@@ -60,7 +85,11 @@ class NetworkHandler:
                     source="rule",
                 )
             )
-        if match := re.fullmatch(r"open (https://\S+)", text.strip(), re.I):
+        if match := re.fullmatch(
+            r"(?:open|visit|go to|navigate to|browse to) (https://\S+)",
+            text.strip(),
+            re.I,
+        ):
             return RouteResult(
                 Intent(
                     name="windows.browser_navigate",
@@ -69,6 +98,22 @@ class NetworkHandler:
                     source="rule",
                 )
             )
+        if match := re.fullmatch(
+            r"(?:open|visit|go to|navigate to|browse to) (.+)",
+            routed,
+        ):
+            target = match.group(1).strip()
+            if not _looks_like_file_request(target) and (
+                url := router._website_url(target)
+            ):
+                return RouteResult(
+                    Intent(
+                        name="windows.browser_navigate",
+                        arguments={"url": url},
+                        confidence=0.97,
+                        source="rule",
+                    )
+                )
         if match := re.fullmatch(r"ask (chatgpt|codex|openai|claude) (?:for )?(.+)", routed):
             provider = {
                 "claude": "anthropic",

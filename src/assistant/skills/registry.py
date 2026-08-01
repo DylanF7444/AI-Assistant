@@ -3,7 +3,9 @@ from __future__ import annotations
 import importlib
 import shutil
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
 from packaging.version import Version
 
@@ -21,12 +23,14 @@ class SkillRegistry:
         *,
         trusted_signing_keys: dict[str, bytes] | None = None,
         require_signatures: bool = True,
+        managed_skill_factories: dict[str, Callable[[], Skill]] | None = None,
     ) -> None:
         self._skills: dict[str, Skill] = {}
         self._enabled: set[str] = set()
         self.install_dir = install_dir
         self.verifier = PackageVerifier(trusted_signing_keys or {})
         self.require_signatures = require_signatures
+        self.managed_skill_factories = managed_skill_factories or {}
 
     def register(self, skill: Skill, *, enabled: bool = True) -> None:
         manifest = SkillManifest.model_validate(skill.manifest)
@@ -59,6 +63,15 @@ class SkillRegistry:
 
     def is_enabled(self, skill_id: str) -> bool:
         return skill_id in self._enabled
+
+    def availability(
+        self, skill_id: str
+    ) -> Literal["enabled", "disabled", "unavailable"]:
+        if skill_id in self._enabled:
+            return "enabled"
+        if skill_id in self._skills:
+            return "disabled"
+        return "unavailable"
 
     def enable(self, skill_id: str) -> None:
         if skill_id not in self._skills:
@@ -112,6 +125,28 @@ class SkillRegistry:
         shutil.copytree(package_dir, target)
         return manifest
 
+    def install_managed(self, manifest: SkillManifest) -> SkillManifest:
+        """Persist installation of trusted implementation shipped by the application."""
+        if self.install_dir is None:
+            raise RuntimeError("No skill install directory configured")
+        validated = SkillManifest.model_validate(manifest)
+        factory = self.managed_skill_factories.get(validated.skill_id)
+        if factory is None:
+            raise ValueError("Managed extension implementation is unavailable")
+        implementation = factory()
+        if implementation.manifest != validated:
+            raise ValueError("Managed extension manifest does not match its implementation")
+        target = self.install_dir / validated.skill_id
+        if target.exists():
+            raise FileExistsError(validated.skill_id)
+        target.mkdir(parents=True)
+        (target / "manifest.json").write_text(
+            validated.model_dump_json(indent=2),
+            encoding="utf-8",
+        )
+        (target / ".managed").write_text("first-party\n", encoding="utf-8")
+        return validated
+
     def update(
         self, package_dir: Path, *, permission_reviewed: bool = False
     ) -> tuple[SkillManifest, tuple[str, ...]]:
@@ -158,10 +193,22 @@ class SkillRegistry:
         *,
         timeout_seconds: float = 30,
         memory_limit_mb: int = 256,
-    ) -> IsolatedSkill:
+    ) -> Skill:
         if self.install_dir is None:
             raise RuntimeError("No skill install directory configured")
         package_dir = self.install_dir / skill_id
+        if (package_dir / ".managed").is_file():
+            manifest = SkillManifest.model_validate_json(
+                (package_dir / "manifest.json").read_text("utf-8")
+            )
+            factory = self.managed_skill_factories.get(skill_id)
+            if factory is None:
+                raise ValueError("Managed extension implementation is unavailable")
+            implementation = factory()
+            if implementation.manifest != manifest:
+                raise ValueError("Managed extension manifest does not match its implementation")
+            self.register(implementation, enabled=False)
+            return implementation
         manifest = self.validate_package(package_dir)
         isolated = IsolatedSkill(
             package_dir,

@@ -5,6 +5,7 @@ import hashlib
 import io
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -201,3 +202,85 @@ def test_trusted_skill_key_can_be_represented_in_settings(tmp_path: Path):
     encoded = base64.b64encode(b"x" * 32).decode("ascii")
     settings = Settings(data_dir=tmp_path, trusted_skill_keys={"publisher": encoded})
     assert settings.trusted_skill_keys == {"publisher": encoded}
+
+
+@pytest.mark.asyncio
+async def test_first_party_managed_extension_is_visible_without_remote_catalog(tmp_path: Path):
+    namespace: dict = {}
+    exec(SKILL_SOURCE, namespace)
+    factory = namespace["EchoSkill"]
+    manifest = factory().manifest
+    extension = _catalog_entry(
+        b"managed",
+        manifest,
+        publisher="Local Assistant",
+        source="first_party",
+        featured=True,
+    )
+    registry = SkillRegistry(
+        tmp_path / "installed",
+        managed_skill_factories={manifest.skill_id: factory},
+    )
+    service = ExtensionHubService(
+        registry,
+        ExtensionPlatformClient(None),
+        managed_extensions=((extension, manifest),),
+    )
+
+    assert service.catalog.extensions == (extension,)
+    assert service.installation_status(manifest.skill_id) == "available"
+
+    installed = await service.install(manifest.skill_id)
+
+    assert installed == manifest
+    assert service.installation_status(manifest.skill_id) == "installed"
+    assert registry.inspect(manifest.skill_id).manifest == manifest
+    assert registry.is_enabled(manifest.skill_id) is False
+    assert (registry.install_dir / manifest.skill_id / ".managed").is_file()
+
+    restarted = SkillRegistry(
+        registry.install_dir,
+        managed_skill_factories={manifest.skill_id: factory},
+    )
+    assert restarted.load_all_installed() == {}
+    assert restarted.inspect(manifest.skill_id).manifest == manifest
+    assert restarted.is_enabled(manifest.skill_id) is False
+
+
+@pytest.mark.asyncio
+async def test_connected_managed_extension_is_enabled_and_disconnect_disables_it(tmp_path: Path):
+    namespace: dict = {}
+    exec(SKILL_SOURCE, namespace)
+    factory = namespace["EchoSkill"]
+    manifest = factory().manifest
+    extension = _catalog_entry(
+        b"managed",
+        manifest,
+        publisher="Local Assistant",
+        source="first_party",
+    )
+    connection = SimpleNamespace(
+        connected=True,
+        status=lambda: SimpleNamespace(connected=connection.connected),
+    )
+    registry = SkillRegistry(
+        tmp_path / "installed",
+        managed_skill_factories={manifest.skill_id: factory},
+    )
+    service = ExtensionHubService(
+        registry,
+        ExtensionPlatformClient(None),
+        managed_extensions=((extension, manifest),),
+        connection_services={manifest.skill_id: connection},
+    )
+    await service.install(manifest.skill_id)
+
+    assert service.skill_availability(manifest.skill_id) == "disabled"
+    assert service.sync_connected_extensions() == (manifest.skill_id,)
+    assert registry.is_enabled(manifest.skill_id) is True
+    assert service.skill_availability(manifest.skill_id) == "enabled"
+
+    connection.connected = False
+    assert service.skill_availability(manifest.skill_id) == "disconnected"
+    assert service.sync_connection_state(manifest.skill_id) is False
+    assert registry.is_enabled(manifest.skill_id) is False

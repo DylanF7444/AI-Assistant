@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from assistant.context.budget import ContextBudget
@@ -13,6 +15,7 @@ from assistant.context.providers import (
     collect_context_snapshot,
 )
 from assistant.context.snapshot import ContextItem, ContextSnapshot
+from assistant.contracts import RequestResultItem
 from assistant.policy.file_access import FileAccessPolicyStore
 from assistant.policy.permissions import GrantType, PermissionManager
 from assistant.skills.builtin import CalculatorSkill, FileSearchSkill
@@ -91,6 +94,36 @@ class FakeDeviceAdapter:
         return [{"drive": "C:", "percent_free": 50}]
 
 
+class CountingProcessAdapter(FakeProcessAdapter):
+    def __init__(self):
+        self.calls = 0
+
+    async def list(self, name_filter=None):
+        self.calls += 1
+        return await super().list(name_filter)
+
+
+class ConcurrentProvider:
+    def __init__(self, name, started, ready):
+        self.name = name
+        self.started = started
+        self.ready = ready
+
+    async def collect(self, request_text, *, session_id, budget):
+        self.started.append(self.name)
+        if len(self.started) == 2:
+            self.ready.set()
+        await asyncio.wait_for(self.ready.wait(), timeout=0.5)
+        return [
+            ContextItem(
+                key=f"test.{self.name}",
+                title=self.name,
+                value=self.name,
+                source=self.name,
+            )
+        ]
+
+
 def test_context_snapshot_redacted_debug_items_hide_sensitive_values():
     snapshot = ContextSnapshot(
         request_text="Use this.",
@@ -167,10 +200,73 @@ async def test_session_context_provider_collects_recent_and_file_state():
     assert [item.key for item in items] == [
         "session.recent_interactions",
         "session.pending_clarification",
+        "results.selected",
+        "results.recent_items",
         "files.selected",
         "files.recent_candidates",
     ]
     assert items[0].source == "session"
+    assert items[2].value["item_id"] == "file-1"
+    assert items[3].value["items"][0]["reference"] == "item 1"
+
+
+@pytest.mark.asyncio
+async def test_session_context_provider_exposes_generic_selected_result_without_parsing_text():
+    selected = RequestResultItem(
+        item_id="task-42",
+        title="Review the release",
+        value={"id": 42, "completed": False},
+        kind="task",
+        metadata={"item_id": 42},
+    )
+    provider = SessionContextProvider(
+        selected_result_item=lambda: selected,
+        result_items=lambda: (selected,),
+        result_source=lambda: "core.tasks",
+    )
+
+    items = await provider.collect(
+        "Complete it.",
+        session_id="s1",
+        budget=ContextBudget(),
+    )
+
+    assert [item.key for item in items] == [
+        "results.selected",
+        "results.recent_items",
+    ]
+    assert items[0].value["source"] == "core.tasks"
+    assert items[0].value["value"]["id"] == 42
+
+
+@pytest.mark.asyncio
+async def test_recent_result_context_stays_structured_when_item_values_are_long():
+    results = tuple(
+        RequestResultItem(
+            item_id=f"news-{index}",
+            title=f"Technology headline {index} with enough detail to identify it",
+            value="https://news.example/" + ("long-path-" * 50) + str(index),
+            kind="news_article",
+            description="Example News — today",
+            metadata={"url": "https://news.example/" + ("long-path-" * 50) + str(index)},
+        )
+        for index in range(1, 6)
+    )
+    provider = SessionContextProvider(
+        result_items=lambda: results,
+        result_source=lambda: "web.news_search",
+    )
+
+    snapshot = await collect_context_snapshot(
+        "Tell me more about the first one",
+        session_id="s1",
+        providers=(provider,),
+    )
+
+    recent = snapshot.items_by_key()["results.recent_items"].value
+    assert isinstance(recent, dict)
+    assert [item["position"] for item in recent["items"]] == [1, 2, 3, 4, 5]
+    assert recent["items"][0]["title"].startswith("Technology headline 1")
 
 
 @pytest.mark.asyncio
@@ -364,3 +460,57 @@ async def test_file_context_provider_summarizes_folders_without_reading_contents
     assert summary["extensions"] == {".pdf": 1, ".txt": 1}
     assert summary["contents_read"] is False
     assert "secret" not in str(items)
+
+
+@pytest.mark.asyncio
+async def test_context_providers_collect_concurrently_but_preserve_provider_order():
+    started = []
+    ready = asyncio.Event()
+
+    snapshot = await collect_context_snapshot(
+        "Use relevant context.",
+        session_id="s1",
+        providers=(
+            ConcurrentProvider("first", started, ready),
+            ConcurrentProvider("second", started, ready),
+        ),
+    )
+
+    assert set(started) == {"first", "second"}
+    assert [item.key for item in snapshot.items] == ["test.first", "test.second"]
+
+
+@pytest.mark.asyncio
+async def test_candidate_skills_skip_irrelevant_expensive_context_and_cache_relevant_results():
+    adapter = CountingProcessAdapter()
+    provider = ProcessContextProvider(adapter, cache_ttl_seconds=30)
+
+    irrelevant = await collect_context_snapshot(
+        "What is the capital of France?",
+        session_id="s1",
+        providers=(provider,),
+        candidate_skill_ids=("web.search",),
+    )
+    first = await collect_context_snapshot(
+        "Which applications are running?",
+        session_id="s1",
+        providers=(provider,),
+        candidate_skill_ids=("windows.process",),
+    )
+    second = await collect_context_snapshot(
+        "Which applications are running?",
+        session_id="s1",
+        providers=(provider,),
+        candidate_skill_ids=("windows.process",),
+    )
+
+    assert irrelevant.items == []
+    assert [item.key for item in first.items] == [
+        "processes.user_apps",
+        "processes.high_resource",
+    ]
+    assert [item.key for item in second.items] == [
+        "processes.user_apps",
+        "processes.high_resource",
+    ]
+    assert adapter.calls == 1

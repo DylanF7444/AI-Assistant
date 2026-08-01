@@ -7,7 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 
-from assistant.contracts import ResultStatus, SkillCall, SkillResult
+from assistant.contracts import RequestResultItem, ResultStatus, SkillCall, SkillResult
 from assistant.scheduling.store import ScheduleStore
 from assistant.skills.base import Skill
 from assistant.skills.builtin import manifest
@@ -74,6 +74,17 @@ class TaskSkill(Skill):
             summary=f"{len(values)} tasks in the local list.",
             display_text=display,
             data=TaskOutput(items=values).model_dump(),
+            items=tuple(
+                RequestResultItem(
+                    item_id=f"task-{item['id']}",
+                    title=item["title"],
+                    value=item,
+                    kind="task",
+                    description="Completed" if item["completed"] else "Open",
+                    metadata={"item_id": item["id"], "completed": item["completed"]},
+                )
+                for item in values
+            ),
         )
 
 
@@ -142,6 +153,18 @@ class NoteSkill(Skill):
             summary=f"Found {len(values)} local notes.",
             display_text=display,
             data=NoteOutput(notes=values).model_dump(),
+            items=tuple(
+                RequestResultItem(
+                    item_id=f"note-{item['id']}",
+                    title=item["title"],
+                    value=item,
+                    kind="note",
+                    description=item["body"][:200] or None,
+                    metadata={"item_id": item["id"]},
+                    sensitive=True,
+                )
+                for item in values
+            ),
             sensitive=True,
         )
 

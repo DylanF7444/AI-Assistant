@@ -20,7 +20,10 @@ class ApplicationWindowHandler:
         routed = context.routed
         if (
             match := re.fullmatch(
-                r"(?:move|place|put|switch) (.+?) (?:window )?(?:to|on) (?:my |the )?(?:(?:monitor|screen|display) )?(.+?)(?: (?:monitor|screen|display))?",
+                r"(?:move|place|put|switch) (?:the |my )?(.+?) "
+                r"(?:window )?(?:to|on) (?:my |the )?"
+                r"(?:(?:monitor|screen|display) )?(.+?)"
+                r"(?: (?:monitor|screen|display))?",
                 routed,
             )
         ) and (monitor := router._monitor_index(match.group(2))):
@@ -37,7 +40,8 @@ class ApplicationWindowHandler:
                 )
             )
         if match := re.fullmatch(
-            r"(?:move|place|put) (.+?) (?:window )?to x ?(-?\d+) y ?(-?\d+)",
+            r"(?:move|place|put) (?:the |my )?(.+?) "
+            r"(?:window )?to x ?(-?\d+) y ?(-?\d+)",
             routed,
         ):
             return RouteResult(
@@ -54,7 +58,7 @@ class ApplicationWindowHandler:
                 )
             )
         if match := re.fullmatch(
-            r"resize (.+?) (?:window )?to (\d+) (?:by|x) (\d+)",
+            r"resize (?:the |my )?(.+?) (?:window )?to (\d+) (?:by|x) (\d+)",
             routed,
         ):
             return RouteResult(

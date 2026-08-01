@@ -37,6 +37,9 @@ class _FakeHub:
             display_name=self.extension.display_name,
         )
 
+    def connection_service(self, _extension_id: str):
+        return None
+
 
 @pytest.mark.ui
 def test_extension_hub_page_browses_reviews_and_installs(qtbot, monkeypatch):
@@ -84,3 +87,29 @@ def test_extension_hub_page_browses_reviews_and_installs(qtbot, monkeypatch):
     qtbot.waitUntil(lambda: service.installed, timeout=2000)
     assert not page.install_button.isEnabled()
     assert "Skills tab" in page.install_status.text()
+
+
+@pytest.mark.ui
+def test_first_party_extension_is_visible_without_platform_catalog(qtbot):
+    extension = CatalogExtension(
+        extension_id="integration.google_calendar",
+        version="1.0.0",
+        api_version="1.0",
+        display_name="Google Calendar",
+        description="Read and manage Google Calendar.",
+        publisher="Local Assistant",
+        category="Connections",
+        package_url="https://extensions.localassistant.invalid/google-calendar",
+        package_sha256="0" * 64,
+        source="first_party",
+    )
+    service = _FakeHub(extension)
+    service.catalog = ExtensionCatalog(extensions=(extension,))
+
+    page = ExtensionHubPage(service, offline=False)
+    qtbot.addWidget(page)
+
+    assert page.extension_list.count() == 1
+    assert page.detail_title.text() == "Google Calendar"
+    assert page.install_button.isEnabled()
+    assert "first-party" in page.install_status.text().casefold()

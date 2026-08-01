@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import re
 from dataclasses import dataclass
@@ -31,7 +32,16 @@ from assistant.dashboard.storage import (
 )
 from assistant.events import EventBus
 from assistant.execution.engine import ExecutionEngine
-from assistant.extensions.platform import ExtensionHubService, ExtensionPlatformClient
+from assistant.extensions.platform import (
+    CatalogExtension,
+    ExtensionHubService,
+    ExtensionPlatformClient,
+)
+from assistant.integrations.google_calendar import (
+    GoogleCalendarAdapter,
+    GoogleCalendarConnectionService,
+    GoogleCalendarTokenManager,
+)
 from assistant.integrations.headless_browser import PlaywrightHeadlessBrowser
 from assistant.integrations.web import CloudModelClient, WebClient
 from assistant.language.embeddings import (
@@ -39,7 +49,7 @@ from assistant.language.embeddings import (
     LexicalFallbackEmbeddingProvider,
     OllamaEmbeddingProvider,
 )
-from assistant.language.ollama import OllamaProvider
+from assistant.language.ollama import OllamaProvider, OllamaUsage
 from assistant.language.planner import LocalPlanner, SkillRetriever
 from assistant.language.retrieval import (
     KnowledgeSemanticIndexer,
@@ -78,10 +88,17 @@ from assistant.skills.builtin import (
     TimerSkill,
 )
 from assistant.skills.diagnostic import DiagnosticSkill
+from assistant.skills.google_calendar import GoogleCalendarSkill
 from assistant.skills.macros import MacroSkill
 from assistant.skills.media import MediaPresentSkill, MediaViewerControlSkill
 from assistant.skills.memory import MemorySkill
-from assistant.skills.network import CloudAskSkill, HeadlessReadSkill, WebFetchSkill, WebSearchSkill
+from assistant.skills.network import (
+    CloudAskSkill,
+    HeadlessReadSkill,
+    NewsSearchSkill,
+    WebFetchSkill,
+    WebSearchSkill,
+)
 from assistant.skills.playbooks import PlaybookSkill
 from assistant.skills.productivity import (
     NoteSkill,
@@ -177,6 +194,36 @@ def _settings_with_persisted_values(settings: Settings, database: Database) -> S
         return settings
     return Settings.model_validate(
         {**settings.model_dump(), **persisted, "data_dir": settings.data_dir}
+    )
+
+
+def _record_ollama_usage(metrics: MetricsStore, usage: OllamaUsage) -> None:
+    correlation_id = usage.correlation_id or "startup"
+    metrics.record(
+        correlation_id=correlation_id,
+        stage="model.preload" if usage.operation == "preload" else "model.total",
+        duration_ms=usage.total_duration_ms or usage.wall_duration_ms,
+        outcome=usage.operation,
+    )
+    metrics.record(
+        correlation_id=correlation_id,
+        stage="model.load",
+        duration_ms=usage.load_duration_ms,
+        outcome=usage.operation,
+    )
+    metrics.record(
+        correlation_id=correlation_id,
+        stage="model.prompt_eval",
+        duration_ms=usage.prompt_eval_duration_ms,
+        value=usage.prompt_tokens,
+        outcome=usage.operation,
+    )
+    metrics.record(
+        correlation_id=correlation_id,
+        stage="model.generation",
+        duration_ms=usage.generation_duration_ms,
+        value=usage.output_tokens,
+        outcome=usage.operation,
     )
 
 
@@ -319,6 +366,7 @@ def _register_network_skills(
 ) -> None:
     web_client = WebClient()
     registry.register(WebSearchSkill(web_client, secret_vault.get, settings.search_provider))
+    registry.register(NewsSearchSkill(web_client))
     registry.register(WebFetchSkill(web_client))
     registry.register(
         HeadlessReadSkill(PlaywrightHeadlessBrowser(offline_mode=settings.offline_lock))
@@ -334,6 +382,34 @@ def _register_network_skills(
             },
         )
     )
+
+
+def _google_calendar_skill_factory(secret_vault: SecretVault):
+    return lambda: GoogleCalendarSkill(
+        GoogleCalendarAdapter(GoogleCalendarTokenManager(secret_vault))
+    )
+
+
+def _google_calendar_extension(secret_vault: SecretVault):
+    skill = _google_calendar_skill_factory(secret_vault)()
+    manifest = skill.manifest
+    extension = CatalogExtension(
+        extension_id=manifest.skill_id,
+        extension_type="skill",
+        version=manifest.version,
+        api_version=manifest.api_version,
+        display_name=manifest.display_name,
+        description=manifest.description,
+        publisher="Local Assistant",
+        category=manifest.category,
+        package_url="https://extensions.localassistant.invalid/google-calendar",
+        package_sha256=hashlib.sha256(manifest.model_dump_json().encode("utf-8")).hexdigest(),
+        permissions=manifest.permissions,
+        risk=manifest.risk,
+        featured=True,
+        source="first_party",
+    )
+    return extension, manifest
 
 
 @dataclass
@@ -426,9 +502,13 @@ def _build_registry(
     storage: _StorageServices,
     events: EventBus,
 ) -> tuple[SkillRegistry, MacroStore, MediaSessionRegistry, RemoteMediaCache]:
+    google_calendar_factory = _google_calendar_skill_factory(storage.secret_vault)
     registry = SkillRegistry(
         settings.data_dir / "skills",
         trusted_signing_keys=_decode_trusted_keys(settings.trusted_skill_keys),
+        managed_skill_factories={
+            "integration.google_calendar": google_calendar_factory,
+        },
     )
     _register_core_skills(registry, storage.file_access_policy)
     _register_windows_skills(registry, storage.aliases, storage.memory_store)
@@ -585,6 +665,10 @@ def build_container(settings: Settings | None = None) -> Container:
             package_max_bytes=settings.extension_package_max_bytes,
         ),
         audit=storage.audit,
+        managed_extensions=(_google_calendar_extension(storage.secret_vault),),
+        connection_services={
+            "integration.google_calendar": GoogleCalendarConnectionService(storage.secret_vault),
+        },
     )
     context_providers = _build_context_providers(settings, storage)
     confirmations = ConfirmationManager()
@@ -636,7 +720,15 @@ def build_container(settings: Settings | None = None) -> Container:
         offline_lock=settings.offline_lock,
         history_retention_days=settings.dashboard_history_retention_days,
     )
-    llm = OllamaProvider(settings.llm_model) if settings.llm_provider == "ollama" else None
+    llm = (
+        OllamaProvider(
+            settings.llm_model,
+            keep_alive=settings.llm_keep_alive,
+            usage_callback=lambda usage: _record_ollama_usage(storage.metrics, usage),
+        )
+        if settings.llm_provider == "ollama"
+        else None
+    )
     planner = (
         LocalPlanner(
             llm,
@@ -649,6 +741,7 @@ def build_container(settings: Settings | None = None) -> Container:
             ),
             storage.knowledge_bases,
             timeout_seconds=settings.planner_timeout_seconds,
+            response_detail=settings.response_detail,
             argument_validator=lambda skill_id, arguments: registry.get(skill_id).validate(
                 arguments
             ),
@@ -656,8 +749,15 @@ def build_container(settings: Settings | None = None) -> Container:
         if llm
         else None
     )
+    if llm is not None and settings.llm_preload and settings.profile != "testing":
+        llm.preload_in_background(
+            timeout_seconds=min(15.0, settings.planner_timeout_seconds),
+        )
     orchestrator = AssistantOrchestrator(
-        DeterministicRouter(application_names=lambda: storage.aliases.all("application")),
+        DeterministicRouter(
+            application_names=lambda: storage.aliases.all("application"),
+            skill_status=extension_hub.skill_availability,
+        ),
         engine,
         events,
         HistoryStore(database, settings.retain_transcripts_days),
@@ -700,6 +800,7 @@ def build_container(settings: Settings | None = None) -> Container:
             "Installed extension could not be loaded",
             extra={"skill_id": skill_id, "outcome": error},
         )
+    extension_hub.sync_connected_extensions()
     return Container(
         settings=settings,
         database=database,

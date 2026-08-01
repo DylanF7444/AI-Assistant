@@ -4,6 +4,7 @@ from assistant.contracts import (
     Intent,
     MediaAction,
     MediaDirective,
+    RequestResultItem,
     Response,
     ResponseType,
     Transcript,
@@ -33,6 +34,34 @@ def test_conversation_state_owns_file_selection_and_session_reset():
     assert state.file_candidates == ()
     assert state.selected_file is None
     assert state.active_presentation_id is None
+
+
+def test_conversation_state_owns_generic_result_items_and_selection():
+    state = ConversationState()
+    first = RequestResultItem(
+        item_id="task-1",
+        title="First task",
+        value={"id": 1},
+        kind="task",
+    )
+    second = RequestResultItem(
+        item_id="task-2",
+        title="Second task",
+        value={"id": 2},
+        kind="task",
+    )
+
+    state.remember_result_items(
+        [first, second],
+        source="core.tasks",
+        summary="Two tasks.",
+    )
+    state.select_result_item(second)
+
+    assert state.result_items == (first, second)
+    assert state.selected_result_item == second
+    assert state.result_source == "core.tasks"
+    assert state.file_candidates == ()
 
 
 def test_file_reference_resolver_returns_typed_clarification():

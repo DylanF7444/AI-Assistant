@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import re
+import threading
+import time
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Protocol
 
 from assistant.context.budget import ContextBudget
 from assistant.context.snapshot import ContextItem, ContextSnapshot
-from assistant.contracts import RiskLevel, SkillManifest
+from assistant.contracts import RequestResultItem, RiskLevel, SkillManifest
 from assistant.policy.file_access import FileAccessPolicyStore
 from assistant.policy.permissions import PermissionManager
+from assistant.results import result_item_context
 from assistant.skills.registry import SkillRegistry
 from assistant.storage.memory import MemoryStore
 from assistant.windows.paths import KNOWN_USER_FOLDERS, resolve_user_path
@@ -35,11 +39,17 @@ class SessionContextProvider:
         *,
         recent_context: Callable[[], Iterable[dict[str, str]]] | None = None,
         pending_clarification: Callable[[], Mapping[str, str] | None] | None = None,
+        selected_result_item: Callable[[], RequestResultItem | None] | None = None,
+        result_items: Callable[[], Iterable[RequestResultItem]] | None = None,
+        result_source: Callable[[], str | None] | None = None,
         selected_file: Callable[[], str | None] | None = None,
         file_candidates: Callable[[], Iterable[str]] | None = None,
     ) -> None:
         self.recent_context = recent_context or (lambda: ())
         self.pending_clarification = pending_clarification or (lambda: None)
+        self.selected_result_item = selected_result_item
+        self.result_items = result_items
+        self.result_source = result_source or (lambda: None)
         self.selected_file = selected_file or (lambda: None)
         self.file_candidates = file_candidates or (lambda: ())
 
@@ -75,7 +85,75 @@ class SessionContextProvider:
                     summary="A clarification is waiting for the user's answer.",
                 )
             )
+        candidates = list(self.file_candidates())
+        generic_items = list(self.result_items()) if self.result_items is not None else []
+        if not generic_items and candidates:
+            generic_items = [
+                RequestResultItem(
+                    item_id=f"file-{index}",
+                    title=path,
+                    value=path,
+                    kind="file",
+                    metadata={"path": path},
+                )
+                for index, path in enumerate(candidates, 1)
+            ]
         selected = self.selected_file()
+        selected_item = (
+            self.selected_result_item()
+            if self.selected_result_item is not None
+            else next(
+                (
+                    item
+                    for item in generic_items
+                    if item.kind == "file" and item.value == selected
+                ),
+                None,
+            )
+        )
+        source = self.result_source()
+        if selected_item is not None:
+            try:
+                position = generic_items.index(selected_item) + 1
+            except ValueError:
+                position = 1
+            items.append(
+                ContextItem(
+                    key="results.selected",
+                    title="Selected request result",
+                    value=_selected_result_context(
+                        selected_item,
+                        position=position,
+                        source=source,
+                        budget=budget,
+                    ),
+                    sensitivity="local",
+                    source=self.name,
+                    summary=(
+                        f"Selected {selected_item.kind} result {position} is available "
+                        "for a follow-up request."
+                    ),
+                )
+            )
+        if generic_items:
+            items.append(
+                ContextItem(
+                    key="results.recent_items",
+                    title="Recent request result items",
+                    value=_recent_result_context(
+                        generic_items,
+                        source=source,
+                        budget=budget,
+                    ),
+                    sensitivity="local",
+                    source=self.name,
+                    summary=(
+                        f"{len(generic_items)} recent request result item"
+                        f"{'s' if len(generic_items) != 1 else ''} can be referenced "
+                        "by number, ID, or title."
+                    ),
+                )
+            )
         if selected:
             items.append(
                 ContextItem(
@@ -87,7 +165,6 @@ class SessionContextProvider:
                     summary="Current selected file from recent file results.",
                 )
             )
-        candidates = list(self.file_candidates())
         if candidates:
             items.append(
                 ContextItem(
@@ -100,6 +177,71 @@ class SessionContextProvider:
                 )
             )
         return items
+
+
+def _selected_result_context(
+    item: RequestResultItem,
+    *,
+    position: int,
+    source: str | None,
+    budget: ContextBudget,
+) -> dict[str, object]:
+    value = {"source": source, **result_item_context(item, position=position)}
+    metadata = value.get("metadata")
+    if isinstance(metadata, dict):
+        value["metadata"] = {
+            key: metadata_value
+            for key, metadata_value in metadata.items()
+            if metadata_value != value.get("value")
+        }
+    description = value.get("description")
+    if isinstance(description, str):
+        value["description"] = description[:300]
+    if budget.value_size(value) <= budget.max_item_value_chars:
+        return value
+    value.pop("description", None)
+    if budget.value_size(value) <= budget.max_item_value_chars:
+        return value
+    value.pop("metadata", None)
+    return value
+
+
+def _recent_result_context(
+    items: list[RequestResultItem],
+    *,
+    source: str | None,
+    budget: ContextBudget,
+) -> dict[str, object]:
+    title_limit = 140
+
+    def compact(limit: int) -> dict[str, object]:
+        return {
+            "source": source,
+            "items": [
+                {
+                    "position": index,
+                    "reference": f"item {index}",
+                    "item_id": item.item_id[:80],
+                    "kind": item.kind[:50],
+                    "title": (
+                        "[sensitive item]" if item.sensitive else item.title[:limit]
+                    ),
+                }
+                for index, item in enumerate(items[:20], 1)
+            ],
+        }
+
+    value = compact(title_limit)
+    while budget.value_size(value) > budget.max_item_value_chars and title_limit > 30:
+        title_limit -= 10
+        value = compact(title_limit)
+    if budget.value_size(value) <= budget.max_item_value_chars:
+        return value
+    for entry in value["items"]:
+        entry.pop("kind", None)
+        entry.pop("reference", None)
+        entry["item_id"] = str(entry["item_id"])[:40]
+    return value
 
 
 class SkillContextProvider:
@@ -280,6 +422,20 @@ class PreferenceContextProvider:
 
 class DesktopContextProvider:
     name = "desktop"
+    RELEVANT_SKILLS = frozenset(
+        {
+            "windows.application_window",
+            "windows.browser_navigate",
+            "windows.context_navigation",
+            "windows.input_automation",
+            "windows.launcher",
+        }
+    )
+    CONTEXT_WORDS = re.compile(
+        r"\b(?:active|app|application|browser|desktop|focus|foreground|monitor|"
+        r"screen|tab|window|this|that)\b",
+        flags=re.IGNORECASE,
+    )
 
     def __init__(
         self,
@@ -291,6 +447,16 @@ class DesktopContextProvider:
         self.adapter = adapter
         self.include_open_applications = include_open_applications
         self.include_window_titles = include_window_titles
+
+    def is_relevant(
+        self,
+        request_text: str,
+        candidate_skill_ids: tuple[str, ...],
+    ) -> bool:
+        return bool(
+            self.CONTEXT_WORDS.search(request_text)
+            or self.RELEVANT_SKILLS.intersection(candidate_skill_ids)
+        )
 
     async def collect(
         self,
@@ -349,6 +515,19 @@ class DesktopContextProvider:
 
 class ProcessContextProvider:
     name = "processes"
+    RELEVANT_SKILLS = frozenset(
+        {
+            "windows.application_window",
+            "windows.context_navigation",
+            "windows.launcher",
+            "windows.process",
+        }
+    )
+    CONTEXT_WORDS = re.compile(
+        r"\b(?:app|application|close|focus|launch|minimize|maximize|process|"
+        r"program|running|start|window)\b",
+        flags=re.IGNORECASE,
+    )
 
     BACKGROUND_NAMES = {
         "conhost.exe",
@@ -371,9 +550,38 @@ class ProcessContextProvider:
         adapter,
         *,
         include_open_applications: bool = True,
+        cache_ttl_seconds: float = 2.0,
     ) -> None:
         self.adapter = adapter
         self.include_open_applications = include_open_applications
+        self.cache_ttl_seconds = cache_ttl_seconds
+        self._cache_lock = threading.Lock()
+        self._cache_timestamp = 0.0
+        self._cache_items: tuple[ContextItem, ...] = ()
+
+    def is_relevant(
+        self,
+        request_text: str,
+        candidate_skill_ids: tuple[str, ...],
+    ) -> bool:
+        return bool(
+            self.CONTEXT_WORDS.search(request_text)
+            or self.RELEVANT_SKILLS.intersection(candidate_skill_ids)
+        )
+
+    def _cached(self) -> list[ContextItem] | None:
+        with self._cache_lock:
+            if (
+                self._cache_items
+                and time.monotonic() - self._cache_timestamp <= self.cache_ttl_seconds
+            ):
+                return list(self._cache_items)
+        return None
+
+    def _remember(self, items: list[ContextItem]) -> None:
+        with self._cache_lock:
+            self._cache_items = tuple(items)
+            self._cache_timestamp = time.monotonic()
 
     async def collect(
         self,
@@ -384,6 +592,8 @@ class ProcessContextProvider:
     ) -> list[ContextItem]:
         if not self.include_open_applications:
             return []
+        if cached := self._cached():
+            return cached
         processes = await self.adapter.list()
         filtered = [
             process
@@ -416,20 +626,62 @@ class ProcessContextProvider:
                     summary="Highest-memory user processes.",
                 )
             )
+        self._remember(items)
         return items
 
 
 class DeviceContextProvider:
     name = "devices"
+    RELEVANT_SKILLS = frozenset(
+        {
+            "windows.device_control",
+            "windows.setting",
+        }
+    )
+    CONTEXT_WORDS = re.compile(
+        r"\b(?:battery|bluetooth|brightness|cpu|device|disk|display|drive|"
+        r"headset|memory|microphone|performance|power|speaker|storage|volume|"
+        r"wifi|wi-fi)\b",
+        flags=re.IGNORECASE,
+    )
 
     def __init__(
         self,
         adapter,
         *,
         include_connected_devices: bool = True,
+        cache_ttl_seconds: float = 2.0,
     ) -> None:
         self.adapter = adapter
         self.include_connected_devices = include_connected_devices
+        self.cache_ttl_seconds = cache_ttl_seconds
+        self._cache_lock = threading.Lock()
+        self._cache_timestamp = 0.0
+        self._cache_items: tuple[ContextItem, ...] = ()
+
+    def is_relevant(
+        self,
+        request_text: str,
+        candidate_skill_ids: tuple[str, ...],
+    ) -> bool:
+        return bool(
+            self.CONTEXT_WORDS.search(request_text)
+            or self.RELEVANT_SKILLS.intersection(candidate_skill_ids)
+        )
+
+    def _cached(self) -> list[ContextItem] | None:
+        with self._cache_lock:
+            if (
+                self._cache_items
+                and time.monotonic() - self._cache_timestamp <= self.cache_ttl_seconds
+            ):
+                return list(self._cache_items)
+        return None
+
+    def _remember(self, items: list[ContextItem]) -> None:
+        with self._cache_lock:
+            self._cache_items = tuple(items)
+            self._cache_timestamp = time.monotonic()
 
     async def collect(
         self,
@@ -440,8 +692,15 @@ class DeviceContextProvider:
     ) -> list[ContextItem]:
         if not self.include_connected_devices:
             return []
+        if cached := self._cached():
+            return cached
         items: list[ContextItem] = []
-        battery = await _safe_adapter_call(self.adapter.battery_status)
+        battery, performance, connected, storage = await asyncio.gather(
+            _safe_adapter_call(self.adapter.battery_status),
+            _safe_adapter_call(self.adapter.performance_status),
+            _safe_adapter_call(self.adapter.connected_devices, limit=20),
+            _safe_adapter_call(self.adapter.storage_status),
+        )
         if battery:
             items.append(
                 ContextItem(
@@ -453,7 +712,6 @@ class DeviceContextProvider:
                     summary="Battery status is available.",
                 )
             )
-        performance = await _safe_adapter_call(self.adapter.performance_status)
         if performance:
             items.append(
                 ContextItem(
@@ -465,10 +723,6 @@ class DeviceContextProvider:
                     summary="CPU and memory status are available.",
                 )
             )
-        connected = await _safe_adapter_call(
-            self.adapter.connected_devices,
-            limit=20,
-        )
         if connected:
             items.append(
                 ContextItem(
@@ -480,7 +734,6 @@ class DeviceContextProvider:
                     summary=f"{len(connected)} connected devices summarized.",
                 )
             )
-        storage = await _safe_adapter_call(self.adapter.storage_status)
         if storage:
             items.append(
                 ContextItem(
@@ -492,6 +745,7 @@ class DeviceContextProvider:
                     summary="Storage status is available.",
                 )
             )
+        self._remember(items)
         return items
 
 
@@ -516,6 +770,20 @@ class FileContextProvider:
         self.file_policy_store = file_policy_store
         self.allow_file_contents = allow_file_contents
         self.known_folders = dict(known_folders)
+
+    def is_relevant(
+        self,
+        request_text: str,
+        candidate_skill_ids: tuple[str, ...],
+    ) -> bool:
+        return bool(
+            self.FILE_WORDS.search(request_text)
+            or {
+                "media.present",
+                "windows.file_operation",
+                "windows.file_search",
+            }.intersection(candidate_skill_ids)
+        )
 
     async def collect(
         self,
@@ -573,38 +841,54 @@ async def collect_context_snapshot(
     session_id: str,
     providers: tuple[ContextProvider, ...] = (),
     budget: ContextBudget | None = None,
+    candidate_skill_ids: tuple[str, ...] | None = None,
 ) -> ContextSnapshot:
     budget = budget or ContextBudget()
     items: list[ContextItem] = []
     total_value_chars = 0
-    for provider in providers:
+
+    async def collect_provider(provider: ContextProvider):
+        if candidate_skill_ids is not None:
+            relevance = getattr(provider, "is_relevant", None)
+            if callable(relevance) and not relevance(request_text, candidate_skill_ids):
+                return []
         try:
-            provided = await provider.collect(
+            return await provider.collect(
                 request_text,
                 session_id=session_id,
                 budget=budget,
             )
         except Exception as exc:
-            if budget.include_provider_errors:
-                items.append(
-                    ContextItem(
-                        key=f"context.provider_error.{provider.name}",
-                        title=f"{provider.name} context unavailable",
-                        value={
-                            "provider": provider.name,
-                            "error": exc.__class__.__name__,
-                        },
-                        sensitivity="public",
-                        source="context",
-                        summary="A context provider failed while collecting context.",
-                    )
+            return exc
+
+    results = await asyncio.gather(*(collect_provider(provider) for provider in providers))
+    for provider, result in zip(providers, results, strict=True):
+        if isinstance(result, Exception):
+            if not budget.include_provider_errors:
+                continue
+            provided = [
+                ContextItem(
+                    key=f"context.provider_error.{provider.name}",
+                    title=f"{provider.name} context unavailable",
+                    value={
+                        "provider": provider.name,
+                        "error": result.__class__.__name__,
+                    },
+                    sensitivity="public",
+                    source="context",
+                    summary="A context provider failed while collecting context.",
                 )
-            continue
+            ]
+        else:
+            provided = result
         for item in provided:
             if item.sensitivity == "sensitive" and not budget.include_sensitive:
                 continue
             value_size = budget.value_size(item.value)
-            if value_size > budget.max_item_value_chars:
+            if (
+                value_size > budget.max_item_value_chars
+                and item.key != "results.selected"
+            ):
                 item = item.model_copy(
                     update={
                         "value": str(item.value)[: budget.max_item_value_chars],

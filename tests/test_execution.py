@@ -18,7 +18,11 @@ from assistant.contracts import (
     SkillResult,
 )
 from assistant.events import EventBus
-from assistant.execution.engine import ExecutionEngine, _execution_timeout_seconds
+from assistant.execution.engine import (
+    ExecutionEngine,
+    _activity_action_detail,
+    _execution_timeout_seconds,
+)
 from assistant.policy.confirmations import ConfirmationManager
 from assistant.policy.permissions import GrantType, PermissionManager
 from assistant.skills.base import Skill
@@ -220,6 +224,58 @@ async def test_permission_confirmation_and_idempotency(tmp_path):
     assert duplicate == result
     assert skill.count == 1
     assert audit.query(event_type="skill_execution")
+
+
+@pytest.mark.asyncio
+async def test_execution_trace_names_tool_action_status_and_duration(tmp_path):
+    skill = CountingSkill(risk=RiskLevel.LOW)
+    engine, permissions, _ = engine_for(tmp_path, skill)
+    call = make_call("test.count", {"target": "item"})
+    permissions.grant(
+        user_id="local-user",
+        skill_id="test.count",
+        capability="test.run",
+        grant_type=GrantType.ALWAYS,
+    )
+
+    result = await engine.execute(call)
+
+    traces = [event.trace for event in engine.events.history(call.correlation_id) if event.trace]
+    action, completed = traces
+    assert result.status == ResultStatus.COMPLETED
+    assert action.label == "Tool call"
+    assert action.tool_name == "Counting"
+    assert action.skill_id == "test.count"
+    assert action.action == "Run Counting with 1 input field; values hidden."
+    assert completed.label == "Tool result"
+    assert completed.tool_name == "Counting"
+    assert completed.status == ResultStatus.COMPLETED
+    assert completed.duration_ms is not None
+    assert completed.duration_ms >= 0
+
+
+@pytest.mark.asyncio
+async def test_calculator_trace_shows_safe_action_inputs(tmp_path):
+    engine, _, _ = engine_for(tmp_path, CalculatorSkill())
+    call = make_call("core.calculator", {"expression": "17 * 19"}, key="visible-action")
+
+    await engine.execute(call)
+
+    action = next(
+        event.trace
+        for event in engine.events.history(call.correlation_id)
+        if event.trace and event.trace.phase.value == "action"
+    )
+    assert action.tool_name == "Calculator"
+    assert action.action == 'Evaluate "17 * 19" locally.'
+
+
+def test_web_search_action_trace_names_query_and_result_limit():
+    call = make_call("web.search", {"query": "current Python release", "count": 7})
+
+    detail = _activity_action_detail(call, "Web Search")
+
+    assert detail == 'Search the web for "current Python release" (up to 7 results).'
 
 
 @pytest.mark.asyncio

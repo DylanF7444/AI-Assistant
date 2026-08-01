@@ -2,7 +2,8 @@ import json
 
 import pytest
 
-from assistant.language.ollama import OllamaProvider
+from assistant.bootstrap import _record_ollama_usage, build_container
+from assistant.language.ollama import OllamaProvider, OllamaUsage
 
 
 class FakeHttpResponse:
@@ -28,6 +29,8 @@ async def test_completion_bounds_prompt_without_discarding_rules_or_request(monk
         nonlocal submitted_prompt
         payload = json.loads(request.data)
         submitted_prompt = payload["prompt"]
+        assert payload["keep_alive"] == "30m"
+        assert payload["think"] is False
         assert len(submitted_prompt) == 120
         assert submitted_prompt.startswith("BEGIN-RULES")
         assert submitted_prompt.endswith("END-REQUEST")
@@ -119,3 +122,99 @@ async def test_completion_retries_truncated_json_with_concise_output_instruction
     assert payloads[1]["options"]["num_predict"] == 512
     assert "previous response was truncated or malformed" in payloads[1]["prompt"]
     assert "Do not include commentary, emoji, or hashtags" in payloads[1]["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_completion_reports_native_usage_with_metric_context(monkeypatch):
+    submitted = {}
+    usages = []
+
+    def fake_urlopen(request, timeout):
+        submitted.update(json.loads(request.data))
+        assert timeout == 4
+        return FakeHttpResponse(
+            {
+                "response": '{"answer":"Paris"}',
+                "total_duration": 2_000_000,
+                "load_duration": 300_000,
+                "prompt_eval_count": 40,
+                "prompt_eval_duration": 500_000,
+                "eval_count": 8,
+                "eval_duration": 900_000,
+            }
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = OllamaProvider(
+        "test-model",
+        keep_alive="45m",
+        usage_callback=usages.append,
+    )
+
+    with (
+        provider.metric_scope("request-1"),
+        provider.operation_scope("grounded_decision"),
+        provider.token_budget_scope(192),
+    ):
+        result = await provider.structured_completion(
+            "Answer.",
+            {"type": "object"},
+            timeout_seconds=4,
+        )
+
+    assert result == {"answer": "Paris"}
+    assert submitted["keep_alive"] == "45m"
+    assert submitted["options"]["num_predict"] == 192
+    assert len(usages) == 1
+    usage = usages[0]
+    assert usage.correlation_id == "request-1"
+    assert usage.operation == "grounded_decision"
+    assert usage.total_duration_ms == 2
+    assert usage.load_duration_ms == 0.3
+    assert usage.prompt_eval_duration_ms == 0.5
+    assert usage.generation_duration_ms == 0.9
+    assert usage.prompt_tokens == 40
+    assert usage.output_tokens == 8
+
+
+@pytest.mark.asyncio
+async def test_preload_keeps_model_resident_without_generating(monkeypatch):
+    submitted = {}
+
+    def fake_urlopen(request, timeout):
+        submitted.update(json.loads(request.data))
+        assert timeout == 5
+        return FakeHttpResponse({"response": "", "total_duration": 1_000_000})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = OllamaProvider("test-model", keep_alive="2h")
+
+    await provider.preload(timeout_seconds=5)
+
+    assert submitted == {
+        "model": "test-model",
+        "stream": False,
+        "keep_alive": "2h",
+    }
+
+
+def test_preload_metrics_do_not_pollute_completion_latency(settings):
+    container = build_container(settings)
+    _record_ollama_usage(
+        container.metrics,
+        OllamaUsage(
+            correlation_id=None,
+            operation="preload",
+            wall_duration_ms=12,
+            total_duration_ms=10,
+            load_duration_ms=8,
+            prompt_eval_duration_ms=0,
+            generation_duration_ms=0,
+            prompt_tokens=None,
+            output_tokens=None,
+        ),
+    )
+
+    stages = [row["stage"] for row in container.metrics.query(limit=10)]
+    assert "model.preload" in stages
+    assert "model.total" not in stages

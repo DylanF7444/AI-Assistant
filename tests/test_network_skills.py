@@ -12,7 +12,12 @@ from assistant.integrations.headless_browser import PlaywrightHeadlessBrowser, R
 from assistant.integrations.web import CloudModelClient, CodexExecClient, WebClient
 from assistant.policy.network import OfflineNetworkError
 from assistant.router.deterministic import DeterministicRouter
-from assistant.skills.network import CloudAskSkill, HeadlessReadSkill, WebSearchSkill
+from assistant.skills.network import (
+    CloudAskSkill,
+    HeadlessReadSkill,
+    NewsSearchSkill,
+    WebSearchSkill,
+)
 from assistant.storage.secrets import SecretVault
 
 
@@ -281,6 +286,120 @@ async def test_duckduckgo_search_is_default_and_parses_nested_topics(monkeypatch
     assert request.full_url.startswith("https://api.duckduckgo.com/?")
     assert "format=json" in request.full_url
     assert "X-subscription-token" not in request.headers
+
+
+@pytest.mark.asyncio
+async def test_duckduckgo_search_falls_back_to_html_results(monkeypatch):
+    monkeypatch.setattr("assistant.integrations.web._validate_public_https", lambda _url: None)
+    page = b"""
+    <html><body>
+      <a class="result__a"
+         href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fstory">
+        Current technology story
+      </a>
+      <a class="result__snippet"
+         href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fstory">
+        A <b>current</b> result from the public web.
+      </a>
+    </body></html>
+    """
+
+    class FakeHTMLResponse(io.BytesIO):
+        def __init__(self):
+            super().__init__(page)
+            self.headers = FakeHeaders("text/html")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.close()
+
+    class FallbackOpener:
+        def __init__(self):
+            self.requests = []
+
+        def open(self, request, timeout):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                return FakeResponse(
+                    {
+                        "Heading": "",
+                        "AbstractText": "",
+                        "AbstractURL": "",
+                        "Results": [],
+                        "RelatedTopics": [],
+                    }
+                )
+            return FakeHTMLResponse()
+
+    opener = FallbackOpener()
+    results = await WebClient(opener).search("current technology", count=5)
+
+    assert results == [
+        {
+            "title": "Current technology story",
+            "url": "https://example.com/story",
+            "description": "A current result from the public web.",
+        }
+    ]
+    assert opener.requests[1].full_url.startswith("https://html.duckduckgo.com/html/?")
+
+
+@pytest.mark.asyncio
+async def test_news_search_returns_current_headlines_with_sources(monkeypatch):
+    monkeypatch.setattr("assistant.integrations.web._validate_public_https", lambda _url: None)
+    xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0"><channel>
+      <item>
+        <title>AI investment changes the labor market - Example News</title>
+        <link>https://news.google.com/rss/articles/example</link>
+        <pubDate>Tue, 28 Jul 2026 18:00:00 GMT</pubDate>
+        <source>Example News</source>
+      </item>
+    </channel></rss>"""
+
+    class FakeNewsResponse(io.BytesIO):
+        def __init__(self):
+            super().__init__(xml)
+            self.headers = FakeHeaders("application/xml")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.close()
+
+    class FakeNewsOpener:
+        def __init__(self):
+            self.requests = []
+
+        def open(self, request, timeout):
+            self.requests.append(request)
+            return FakeNewsResponse()
+
+    opener = FakeNewsOpener()
+    skill = NewsSearchSkill(WebClient(opener))
+
+    result = await skill.execute(
+        call("web.news_search", {"query": "latest AI economy news", "count": 5}),
+        asyncio.Event(),
+    )
+
+    assert result.data["results"] == [
+        {
+            "title": "AI investment changes the labor market - Example News",
+            "url": "https://news.google.com/rss/articles/example",
+            "description": "Example News — Tue, 28 Jul 2026 18:00:00 GMT",
+        }
+    ]
+    assert result.items is not None
+    assert len(result.items) == 1
+    assert result.items[0].item_id == "news-1"
+    assert result.items[0].kind == "news_article"
+    assert result.items[0].value == "https://news.google.com/rss/articles/example"
+    assert opener.requests[0].full_url.startswith("https://news.google.com/rss/search?")
+    assert skill.manifest.permissions[0].capability == "network"
 
 
 @pytest.mark.asyncio

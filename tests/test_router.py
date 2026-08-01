@@ -42,6 +42,14 @@ def test_deterministic_routes(text, name):
     assert not result.needs_llm
 
 
+def test_result_selection_is_generic_assistant_control():
+    result = DeterministicRouter().route("select item task-42")
+
+    assert result.intent.name == "control.result_select"
+    assert result.intent.arguments == {"selector": "task-42"}
+    assert not result.needs_llm
+
+
 def test_timer_normalizes_spoken_number():
     result = DeterministicRouter().route("set a timer for twenty five minutes")
     assert result.intent.arguments["seconds"] == 1500

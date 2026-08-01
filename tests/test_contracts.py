@@ -1,7 +1,15 @@
 import pytest
 from pydantic import ValidationError
 
-from assistant.contracts import AudioSession, Intent, Transcript, WordTimestamp
+from assistant.contracts import (
+    AudioSession,
+    Intent,
+    RequestResultItem,
+    ResultStatus,
+    SkillResult,
+    Transcript,
+    WordTimestamp,
+)
 
 
 def test_contracts_are_strict_and_versioned():
@@ -49,3 +57,14 @@ def test_contracts_are_immutable():
     session = AudioSession(source="microphone")
     with pytest.raises(ValidationError):
         session.source = "file"
+
+
+def test_skill_result_rejects_duplicate_request_result_item_ids():
+    item = RequestResultItem(item_id="result-1", title="One", value={"id": 1})
+
+    with pytest.raises(ValidationError, match="item IDs must be unique"):
+        SkillResult(
+            status=ResultStatus.COMPLETED,
+            summary="Duplicate results.",
+            items=(item, item),
+        )

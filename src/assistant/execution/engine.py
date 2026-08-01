@@ -40,6 +40,115 @@ from assistant.storage.database import AuditStore, MetricsStore
 logger = logging.getLogger("assistant.execution")
 
 
+def _activity_value(value: Any, *, limit: int = 180) -> str:
+    text = " ".join(str(value).split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _quoted_activity_value(value: Any) -> str:
+    return f'"{_activity_value(value)}"'
+
+
+def _activity_action_detail(call: SkillCall, display_name: str) -> str:
+    """Describe a tool call without leaking free-form or credential-like inputs."""
+
+    arguments = call.arguments
+    skill_id = call.skill_id
+    operation = arguments.get("operation") or arguments.get("action")
+
+    if skill_id == "web.search":
+        return (
+            f"Search the web for {_quoted_activity_value(arguments.get('query', ''))} "
+            f"(up to {arguments.get('count', 5)} results)."
+        )
+    if skill_id == "web.news_search":
+        return (
+            f"Search current news for {_quoted_activity_value(arguments.get('query', ''))} "
+            f"(up to {arguments.get('count', 5)} results)."
+        )
+    if skill_id in {"web.fetch", "web.headless_read"}:
+        mode = "Render and read" if skill_id == "web.headless_read" else "Read"
+        detail = f"{mode} {_activity_value(arguments.get('url', 'the requested page'))}."
+        if arguments.get("extract"):
+            detail = detail[:-1] + f" and extract {_quoted_activity_value(arguments['extract'])}."
+        return detail
+    if skill_id == "cloud.ask":
+        provider = _activity_value(arguments.get("provider", "configured cloud provider"))
+        model = arguments.get("model")
+        suffix = f" using {_activity_value(model)}" if model else ""
+        return f"Ask {provider}{suffix}; prompt content hidden for privacy."
+    if skill_id == "windows.file_search":
+        return (
+            f"Search {_activity_value(arguments.get('root', 'the approved folder'))} for "
+            f"{_quoted_activity_value(arguments.get('query', ''))} "
+            f"(up to {arguments.get('limit', 20)} matches)."
+        )
+    if skill_id == "windows.file_operation":
+        verb = _activity_value(operation or "run").replace("_", " ").capitalize()
+        source = _activity_value(arguments.get("source", "the approved path"))
+        destination = arguments.get("destination")
+        target = f" to {_activity_value(destination)}" if destination else ""
+        dry_run = " (preview only)" if arguments.get("dry_run") else ""
+        return f"{verb} {source}{target}{dry_run}; file contents hidden."
+    if skill_id == "windows.launcher":
+        application = _activity_value(arguments.get("application", "registered application"))
+        url = arguments.get("url")
+        target = f" and open {_activity_value(url)}" if url else ""
+        mode = " in private mode" if arguments.get("private") else ""
+        return f"Launch {application}{target}{mode}."
+    if skill_id == "windows.browser_navigate":
+        return f"Navigate the current browser to {_activity_value(arguments.get('url', ''))}."
+    if skill_id == "windows.input_automation":
+        application = _activity_value(arguments.get("application", "the approved application"))
+        if operation == "type_text":
+            length = len(str(arguments.get("text", "")))
+            return f"Type {length} characters into {application}; text hidden for privacy."
+        return f"Click ({arguments.get('x', '?')}, {arguments.get('y', '?')}) in {application}."
+    if skill_id == "windows.notification":
+        return "Show a local notification; notification content hidden for privacy."
+    if skill_id == "windows.clipboard":
+        return f"{str(operation or 'access').replace('_', ' ').capitalize()} the local clipboard."
+    if skill_id == "windows.process":
+        if operation == "terminate":
+            return f"Terminate process PID {arguments.get('pid', '?')}."
+        name_filter = arguments.get("name_filter")
+        target = _quoted_activity_value(name_filter) if name_filter else "all processes"
+        return f"List processes matching {target}."
+    if skill_id == "core.calculator":
+        return f"Evaluate {_quoted_activity_value(arguments.get('expression', ''))} locally."
+    if skill_id == "core.timer":
+        return (
+            f"Run {_quoted_activity_value(arguments.get('label', 'Timer'))} for "
+            f"{arguments.get('seconds', '?')} seconds."
+        )
+    if skill_id == "core.datetime":
+        return f"Read the local {arguments.get('query', 'date and time')}."
+    if skill_id == "core.unit_conversion":
+        return (
+            f"Convert {arguments.get('value', '?')} "
+            f"{_activity_value(arguments.get('from_unit', ''))} to "
+            f"{_activity_value(arguments.get('to_unit', ''))} locally."
+        )
+    if skill_id == "media.present":
+        source = arguments.get("source")
+        if source:
+            return f"Present {_activity_value(source)} in the assistant."
+        return (
+            f"Find {_quoted_activity_value(arguments.get('query', 'media'))} in "
+            f"{_activity_value(arguments.get('root', 'the approved folder'))} and present it."
+        )
+    if skill_id == "media.viewer_control":
+        return f"{str(operation or 'control').replace('_', ' ').capitalize()} in-app media."
+    if operation:
+        operation_name = _activity_value(operation).replace("_", " ").capitalize()
+        return f"{operation_name} with {display_name}; free-form input values hidden."
+    count = len(arguments)
+    field_word = "field" if count == 1 else "fields"
+    return f"Run {display_name} with {count} input {field_word}; values hidden."
+
+
 def _execution_timeout_seconds(call: SkillCall) -> float:
     if call.skill_id == "core.timer":
         return max(30.0, float(call.arguments.get("seconds", 0)) + 1.0)
@@ -141,6 +250,7 @@ class ExecutionEngine:
             skill_name = self.registry.get(call.skill_id).manifest.display_name
         except KeyError:
             skill_name = call.skill_id
+        tool_name = _activity_value(skill_name, limit=120) or call.skill_id
         await self.events.publish(
             PipelineEvent(
                 correlation_id=call.correlation_id,
@@ -152,6 +262,7 @@ class ExecutionEngine:
                     detail=f"Checking permissions and confirmation requirements for {skill_name}.",
                     invocation=call.permission_context.invocation,
                     skill_id=call.skill_id,
+                    tool_name=tool_name,
                 ),
                 updates_foreground_status=(call.permission_context.invocation == "interactive"),
             )
@@ -481,6 +592,9 @@ class ExecutionEngine:
         assert evaluation.skill is not None
         assert evaluation.risk is not None
         skill = evaluation.skill
+        tool_name = (
+            _activity_value(skill.manifest.display_name, limit=120) or skill.manifest.skill_id
+        )
         required_permissions = evaluation.required_permissions
         if self._requires_confirmation(call, evaluation.risk) and (
             confirmation_id is None
@@ -501,14 +615,12 @@ class ExecutionEngine:
                 message=f"Executing {skill.manifest.display_name}",
                 trace=ActivityTrace(
                     phase=TracePhase.ACTION,
-                    label=(
-                        "Background action"
-                        if call.permission_context.invocation == "background"
-                        else "Action"
-                    ),
-                    detail=f"Running {skill.manifest.display_name}.",
+                    label="Tool call",
+                    detail="",
                     invocation=call.permission_context.invocation,
                     skill_id=call.skill_id,
+                    tool_name=tool_name,
+                    action=_activity_action_detail(call, tool_name),
                 ),
                 updates_foreground_status=(call.permission_context.invocation == "interactive"),
             )
@@ -604,14 +716,13 @@ class ExecutionEngine:
                 message=result.summary,
                 trace=ActivityTrace(
                     phase=TracePhase.RESULT,
-                    label=(
-                        "Background result"
-                        if call.permission_context.invocation == "background"
-                        else "Result"
-                    ),
-                    detail=f"{skill.manifest.display_name}: {result.summary}",
+                    label="Tool result",
+                    detail=result.summary,
                     invocation=call.permission_context.invocation,
                     skill_id=call.skill_id,
+                    tool_name=tool_name,
+                    status=result.status,
+                    duration_ms=duration_ms,
                 ),
                 updates_foreground_status=False,
             )

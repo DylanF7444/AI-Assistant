@@ -16,6 +16,7 @@ from assistant.contracts import (
     PermissionScope,
     PipelineEvent,
     PipelineState,
+    RequestResultItem,
     ResultStatus,
     RiskLevel,
     SkillCall,
@@ -256,6 +257,16 @@ class MediaPresentSkill(Skill):
                 summary=message,
                 display_text=display,
                 data=MediaPresentOutput(paths=paths).model_dump(mode="json"),
+                items=tuple(
+                    RequestResultItem(
+                        item_id=f"file-{index}",
+                        title=path,
+                        value=path,
+                        kind="file",
+                        metadata={"path": path},
+                    )
+                    for index, path in enumerate(paths, 1)
+                ),
                 error=SkillError(
                     code="clarification_required",
                     message=message,

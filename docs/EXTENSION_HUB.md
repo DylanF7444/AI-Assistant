@@ -80,3 +80,16 @@ The platform does not receive permission grants, execution history, local
 files, or credentials from the hub. Installed skill execution continues through
 the normal local schema, permission, confirmation, audit, timeout, and offline
 controls described in `docs/SKILLS.md` and `docs/PERMISSIONS.md`.
+
+## First-party managed extensions
+
+The Hub can also list optional first-party integrations shipped with the
+application. These entries remain installable when no external catalog is
+configured. Installing one persists its reviewed manifest and makes the shipped
+host implementation available disabled; it does not execute downloaded package
+code. Community packages continue to use the isolated worker boundary.
+
+First-party account connections are configured from the extension's Hub detail
+page. OAuth tokens remain in the host Windows-encrypted secret vault and are
+never passed to either first-party extension arguments or community package
+workers. Google Calendar is the first managed extension using this path.

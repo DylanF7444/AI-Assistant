@@ -13,7 +13,8 @@ from assistant.skills.builtin import (
     TimerSkill,
     manifest,
 )
-from assistant.skills.network import HeadlessReadSkill
+from assistant.skills.diagnostic import DiagnosticSkill
+from assistant.skills.network import HeadlessReadSkill, NewsSearchSkill
 from assistant.skills.scheduling import ScheduleSkill
 from assistant.skills.windows import (
     ApplicationWindowSkill,
@@ -29,10 +30,12 @@ class FakeProvider:
         self.output = output
         self.calls = 0
         self.last_prompt = ""
+        self.last_schema = None
         self.last_timeout_seconds = None
 
     async def structured_completion(self, prompt, schema, timeout_seconds):
         self.last_prompt = prompt
+        self.last_schema = schema
         self.last_timeout_seconds = timeout_seconds
         output = self.output[self.calls] if isinstance(self.output, list) else self.output
         self.calls += 1
@@ -65,6 +68,141 @@ class FakeApplications:
 class FakeFileSystem:
     async def search(self, root, query, limit):
         return []
+
+
+@pytest.mark.asyncio
+async def test_grounded_planner_interprets_and_answers_in_one_completion():
+    provider = FakeProvider(
+        {
+            "interpretation": {
+                "user_goal": "Identify the capital of France",
+                "request_type": "question",
+                "confidence": 0.98,
+            },
+            "disposition": "answer",
+            "skill_id": "",
+            "arguments": {},
+            "answer": "The capital of France is Paris.",
+            "confidence": 0.99,
+            "clarification": None,
+        }
+    )
+    planner = LocalPlanner(provider, SkillRetriever(()), response_detail="detailed")
+    context = ContextSnapshot(request_text="What is the capital of France?", session_id="s1")
+
+    decision = await planner.plan_grounded(
+        "What is the capital of France?",
+        context=context,
+        retrieved=(),
+    )
+
+    assert provider.calls == 1
+    assert decision.intent is not None
+    assert decision.intent.name == "conversation.answer"
+    assert decision.intent.arguments["text"] == "The capital of France is Paris."
+    assert decision.interpretation is not None
+    assert decision.interpretation.user_goal == "Identify the capital of France"
+    assert decision.context is context
+    assert decision.allow_replanning is True
+    assert provider.last_schema["properties"]["answer"]["maxLength"] == 260
+    assert (
+        "explicit_requests"
+        not in provider.last_schema["properties"]["interpretation"]["properties"]
+    )
+    assert "one direct sentence" in provider.last_prompt
+
+
+def test_only_strong_semantic_candidates_trigger_operating_system_context():
+    application_window = ApplicationWindowSkill(FakeApplications()).manifest
+    planner = LocalPlanner(
+        FakeProvider({}),
+        SkillRetriever((application_window,)),
+    )
+    weak = RetrievedContextItem(
+        namespace="skill_example",
+        source_id="windows.application_window:weak",
+        text="Weak semantic match",
+        metadata={"skill_id": application_window.skill_id},
+        score=0.18,
+    )
+    strong = weak.model_copy(update={"score": 0.82})
+
+    assert planner.candidate_skills("unrelated question", (weak,)) == ()
+    assert planner.candidate_skills("unrelated question", (strong,)) == (
+        application_window,
+    )
+    assert planner.context_candidate_skill_ids((weak,), (application_window,)) == ()
+    assert planner.context_candidate_skill_ids(
+        (strong,),
+        (application_window,),
+    ) == ("windows.application_window",)
+
+
+def test_semantic_news_candidate_precedes_weak_lexical_report_match():
+    news = NewsSearchSkill(None).manifest
+    diagnostic = DiagnosticSkill(None, {}).manifest
+    planner = LocalPlanner(
+        FakeProvider({}),
+        SkillRetriever((diagnostic, news)),
+    )
+    retrieved = (
+        RetrievedContextItem(
+            namespace="skill_example",
+            source_id="web.news_search:0",
+            text="Give me a briefing on the latest news",
+            metadata={"skill_id": "web.news_search"},
+            score=0.8,
+        ),
+    )
+
+    selected = planner.candidate_skills(
+        "Give me a report on the latest tech news",
+        retrieved,
+    )
+
+    assert [manifest.skill_id for manifest in selected[:2]] == [
+        "web.news_search",
+        "core.diagnostic",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_grounded_planner_recovers_news_call_mislabeled_as_answer():
+    provider = FakeProvider(
+        {
+            "interpretation": {
+                "user_goal": "Report the latest technology news",
+                "request_type": "question",
+                "confidence": 0.9,
+            },
+            "disposition": "answer",
+            "skill_id": "",
+            "arguments": {
+                "query": "latest technology news",
+                "count": 5,
+            },
+            "answer": "Here is an overview: [link to search results].",
+            "confidence": 0.9,
+            "clarification": None,
+        }
+    )
+    news = NewsSearchSkill(None).manifest
+    planner = LocalPlanner(provider, SkillRetriever((news,)))
+    text = "Give me a report on the latest tech news"
+
+    decision = await planner.plan_grounded(
+        text,
+        context=ContextSnapshot(request_text=text, session_id="s1"),
+        retrieved=(),
+        candidate_skills=(news,),
+    )
+
+    assert decision.intent is not None
+    assert decision.intent.name == "web.news_search"
+    assert decision.intent.arguments == {
+        "query": "latest technology news",
+        "count": 5,
+    }
 
 
 @pytest.mark.asyncio
@@ -468,6 +606,51 @@ def test_application_context_is_omitted_from_unrelated_question_prompt():
     )
 
     assert "Application knowledge:" not in prompt
+
+
+def test_numbered_result_follow_up_prioritizes_exact_selected_result_context():
+    planner = LocalPlanner(
+        FakeProvider({}),
+        SkillRetriever((NewsSearchSkill(None).manifest,)),
+    )
+    article_url = "https://news.example/articles/first-story?source=current"
+    context = ContextSnapshot(
+        request_text="Tell me more about the first one",
+        session_id="s1",
+        items=[
+            ContextItem(
+                key="session.recent_interactions",
+                title="Recent interactions",
+                value=[{"response": "A long rendered list of news headlines " * 20}],
+                source="session",
+                summary="One recent interaction.",
+            ),
+            ContextItem(
+                key="results.selected",
+                title="Selected request result",
+                value={
+                    "source": "web.news_search",
+                    "position": 1,
+                    "item_id": "news-1",
+                    "kind": "news_article",
+                    "title": "First current technology headline",
+                    "value": article_url,
+                    "metadata": {"url": article_url},
+                },
+                source="session",
+                summary="Selected news article result 1 is available for a follow-up.",
+            ),
+        ],
+    )
+
+    prompt_items = planner._context_items_for_prompt(
+        "Tell me more about the first one",
+        context,
+    )
+
+    assert prompt_items[0]["key"] == "results.selected"
+    assert prompt_items[0]["value"]["value"] == article_url
+    assert "metadata" not in prompt_items[0]["value"]
 
 
 @pytest.mark.asyncio
@@ -1503,6 +1686,134 @@ async def test_plan_revision_rejects_unavailable_next_step_skill():
 
     assert revision.disposition == "clarify"
     assert "registered skill" in revision.clarification
+
+
+@pytest.mark.asyncio
+async def test_plan_revision_synthesizes_completed_results_instead_of_repeating_skill():
+    provider = FakeProvider(
+        [
+            {
+                "disposition": "next_step",
+                "rationale": "Search for the headlines.",
+                "skill_id": "web.news_search",
+                "arguments": {"query": "latest tech news", "count": 5},
+                "clarification": None,
+                "response": None,
+                "confidence": 0.9,
+            },
+            {
+                "response": (
+                    "AI investment is reshaping the labor market, according to "
+                    "Example News (July 28)."
+                ),
+                "confidence": 0.92,
+            },
+        ]
+    )
+    news = NewsSearchSkill(None).manifest
+    planner = LocalPlanner(provider, SkillRetriever((news,)))
+    observations = (
+        {
+            "iteration": 1,
+            "skill_id": "web.news_search",
+            "arguments": {"query": "latest tech news", "count": 5},
+            "outcome": "completed",
+            "result_status": "completed",
+            "summary": "Found 1 current news headline.",
+            "result_data": {
+                "results": [
+                    {
+                        "title": "AI investment reshapes labor - Example News",
+                        "url": "https://news.example/story",
+                        "description": "Example News — Tue, 28 Jul 2026 18:00:00 GMT",
+                    }
+                ]
+            },
+        },
+    )
+
+    revision = await planner.revise_plan(
+        "Give me a report on the latest tech news",
+        interpretation=UserIntentInterpretation(
+            user_goal="Report the latest technology news",
+            request_type="question",
+            confidence=0.9,
+        ),
+        context=ContextSnapshot(
+            request_text="Give me a report on the latest tech news",
+            session_id="s1",
+        ),
+        retrieved=(),
+        observations=observations,
+    )
+
+    assert revision.disposition == "stop"
+    assert "AI investment" in revision.response
+    assert provider.calls == 2
+    assert "AI investment reshapes labor" in provider.last_prompt
+    assert "https://news.example/story" not in provider.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_plan_revision_infers_omitted_skill_id_before_repeat_detection():
+    provider = FakeProvider(
+        [
+            {
+                "disposition": "next_step",
+                "rationale": "Search for the headlines.",
+                "arguments": {"query": "latest tech news", "count": 5},
+                "clarification": None,
+                "response": None,
+                "confidence": 0.9,
+            },
+            {
+                "response": "One current technology headline was returned by Example News.",
+                "confidence": 0.9,
+            },
+        ]
+    )
+    planner = LocalPlanner(
+        provider,
+        SkillRetriever((NewsSearchSkill(None).manifest,)),
+    )
+
+    revision = await planner.revise_plan(
+        "Show me the latest tech news",
+        interpretation=UserIntentInterpretation(
+            user_goal="Show the latest technology news",
+            request_type="question",
+            confidence=0.9,
+        ),
+        context=ContextSnapshot(
+            request_text="Show me the latest tech news",
+            session_id="s1",
+        ),
+        retrieved=(),
+        observations=(
+            {
+                "iteration": 1,
+                "skill_id": "web.news_search",
+                "arguments": {"query": "latest tech news", "count": 5},
+                "outcome": "completed",
+                "result_status": "completed",
+                "summary": "Found one current news headline.",
+                "result_data": {
+                    "results": [
+                        {
+                            "title": "Example technology headline",
+                            "url": "https://news.example/story",
+                            "description": "Example News",
+                        }
+                    ]
+                },
+            },
+        ),
+    )
+
+    assert revision.disposition == "stop"
+    assert revision.skill_id == ""
+    assert revision.response.startswith("One current technology headline")
+    assert provider.calls == 2
 
 
 @pytest.mark.asyncio

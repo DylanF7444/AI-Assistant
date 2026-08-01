@@ -34,6 +34,8 @@ def default_dashboard_layout() -> DashboardLayout:
     metrics = (
         ("assistant.status", MetricPresentation.STATUS),
         ("assistant.request_outcomes", MetricPresentation.NUMBER),
+        ("assistant.request_latency", MetricPresentation.DURATION),
+        ("assistant.model_latency", MetricPresentation.DURATION),
         ("assistant.execution_latency", MetricPresentation.DURATION),
         ("automations.summary", MetricPresentation.NUMBER),
         ("assistant.recent_activity", MetricPresentation.STATUS),
@@ -85,6 +87,30 @@ class AssistantMetricsProvider:
                 value_kind=MetricValueKind.NUMBER,
                 supported_presentations=(MetricPresentation.NUMBER,),
                 default_presentation=MetricPresentation.NUMBER,
+                supports_history=True,
+            ),
+            MetricDefinition(
+                metric_id="assistant.request_latency",
+                provider_id=self.provider_id,
+                display_name="Request latency",
+                description="End-to-end request duration from the last 24 hours.",
+                source_label="Local Assistant",
+                value_kind=MetricValueKind.DURATION,
+                unit="ms",
+                supported_presentations=(MetricPresentation.DURATION,),
+                default_presentation=MetricPresentation.DURATION,
+                supports_history=True,
+            ),
+            MetricDefinition(
+                metric_id="assistant.model_latency",
+                provider_id=self.provider_id,
+                display_name="Model latency",
+                description="Total Ollama completion duration from the last 24 hours.",
+                source_label="Local Assistant",
+                value_kind=MetricValueKind.DURATION,
+                unit="ms",
+                supported_presentations=(MetricPresentation.DURATION,),
+                default_presentation=MetricPresentation.DURATION,
                 supports_history=True,
             ),
             MetricDefinition(
@@ -146,6 +172,18 @@ class AssistantMetricsProvider:
             return self._status(request)
         if request.metric_id == "assistant.request_outcomes":
             return self._request_outcomes(request)
+        if request.metric_id == "assistant.request_latency":
+            return self._latency(
+                request,
+                stage="request.total",
+                empty_summary="No request samples in the last 24 hours.",
+            )
+        if request.metric_id == "assistant.model_latency":
+            return self._latency(
+                request,
+                stage="model.total",
+                empty_summary="No local model samples in the last 24 hours.",
+            )
         if request.metric_id == "assistant.execution_latency":
             return self._execution_latency(request)
         if request.metric_id == "assistant.recent_activity":
@@ -171,7 +209,7 @@ class AssistantMetricsProvider:
         )
 
     def _request_outcomes(self, request: MetricRequest) -> MetricSnapshot:
-        counts = self.metrics.outcome_counts(since=request.since, stage="execution")
+        counts = self.metrics.outcome_counts(since=request.since, stage="request.total")
         total = sum(counts.values())
         if not total:
             return MetricSnapshot(
@@ -179,15 +217,15 @@ class AssistantMetricsProvider:
                 collected_at=datetime.now(UTC),
                 state=MetricState.EMPTY,
                 value=0,
-                summary="No execution samples in the last 24 hours.",
+                summary="No request samples in the last 24 hours.",
             )
-        completed = counts.get("completed", 0)
+        errors = counts.get("error", 0) + counts.get("cancelled", 0)
         return MetricSnapshot(
             metric_id=request.metric_id,
             collected_at=datetime.now(UTC),
             state=MetricState.READY,
             value=total,
-            summary=f"{completed} completed  •  {total - completed} other",
+            summary=f"{total - errors} handled  •  {errors} errors/cancelled",
             details=tuple(
                 MetricDetail(
                     label=outcome.replace("_", " ").title(),
@@ -198,7 +236,20 @@ class AssistantMetricsProvider:
         )
 
     def _execution_latency(self, request: MetricRequest) -> MetricSnapshot:
-        summary = self.metrics.duration_summary(since=request.since, stage="execution")
+        return self._latency(
+            request,
+            stage="execution",
+            empty_summary="No execution samples in the last 24 hours.",
+        )
+
+    def _latency(
+        self,
+        request: MetricRequest,
+        *,
+        stage: str,
+        empty_summary: str,
+    ) -> MetricSnapshot:
+        summary = self.metrics.duration_summary(since=request.since, stage=stage)
         if not summary["count"]:
             return MetricSnapshot(
                 metric_id=request.metric_id,
@@ -206,7 +257,7 @@ class AssistantMetricsProvider:
                 state=MetricState.EMPTY,
                 value=None,
                 unit="ms",
-                summary="No execution samples in the last 24 hours.",
+                summary=empty_summary,
             )
         return MetricSnapshot(
             metric_id=request.metric_id,

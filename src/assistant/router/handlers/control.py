@@ -45,7 +45,7 @@ class ControlHandler:
         ):
             return RouteResult(
                 Intent(
-                    name="control.file_select",
+                    name="control.result_select",
                     arguments={"selector": match.group(1).strip()},
                     confidence=0.95,
                     source="rule",
@@ -75,7 +75,12 @@ class MemoryConversationHandler:
                     source="rule",
                 )
             )
-        if re.fullmatch(r"remember that .+", routed):
+        if re.fullmatch(
+            r"(?:please )?remember (?:that .+|"
+            r"(?:my|i(?:'m| am| have| like| love| prefer| use)|"
+            r"call me|refer to me as) .+)",
+            routed,
+        ):
             value = memory_value_from_original(text)
             return RouteResult(
                 Intent(
@@ -90,7 +95,11 @@ class MemoryConversationHandler:
                     source="rule",
                 )
             )
-        if re.fullmatch(r"what do you remember(?: about me)?", routed):
+        if re.fullmatch(
+            r"(?:what do you remember(?: about me)?|"
+            r"(?:show|list) (?:what you remember|(?:my )?memories))",
+            routed,
+        ):
             return RouteResult(
                 Intent(
                     name="core.memory",
@@ -99,11 +108,15 @@ class MemoryConversationHandler:
                     source="rule",
                 )
             )
-        if match := re.fullmatch(r"forget memory (\d+)", routed):
+        if match := re.fullmatch(
+            r"(?:forget|delete) (?:memory|memory number) (\d+)",
+            routed,
+        ):
+            operation = "delete" if routed.startswith("delete ") else "forget"
             return RouteResult(
                 Intent(
                     name="core.memory",
-                    arguments={"operation": "forget", "memory_id": int(match.group(1))},
+                    arguments={"operation": operation, "memory_id": int(match.group(1))},
                     confidence=0.98,
                     source="rule",
                 )

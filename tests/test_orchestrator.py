@@ -10,6 +10,7 @@ from assistant.contracts import (
     Intent,
     PipelineEvent,
     PipelineState,
+    RequestResultItem,
     ResponseType,
     ResultStatus,
     Transcript,
@@ -17,9 +18,11 @@ from assistant.contracts import (
 )
 from assistant.language.planner import (
     InvalidPlannerResponse,
+    LocalPlanner,
     PlannedIntentStep,
     PlannerDecision,
     PlanRevision,
+    SkillRetriever,
 )
 from assistant.language.retrieval import RetrievedContextItem
 from assistant.language.understanding import UserIntentInterpretation
@@ -100,6 +103,33 @@ class PartialThenFinalSTT:
 class BrokenPlanner:
     async def plan(self, text, recent_context=()):
         raise ConnectionError("connection refused")
+
+    async def cancel(self):
+        pass
+
+
+class GroundedAnswerProvider:
+    def __init__(self):
+        self.calls = 0
+
+    async def structured_completion(self, prompt, schema, timeout_seconds):
+        self.calls += 1
+        return {
+            "interpretation": {
+                "user_goal": "Identify the capital of France",
+                "request_type": "question",
+                "confidence": 0.99,
+            },
+            "disposition": "answer",
+            "skill_id": "",
+            "arguments": {},
+            "answer": "The capital of France is Paris.",
+            "confidence": 0.99,
+            "clarification": None,
+        }
+
+    async def health(self):
+        return {"healthy": True}
 
     async def cancel(self):
         pass
@@ -1436,6 +1466,34 @@ async def test_conversational_answer_does_not_execute_a_skill(settings):
 
 
 @pytest.mark.asyncio
+async def test_open_ended_question_uses_one_grounded_completion_and_records_latency(settings):
+    container = build_container(settings)
+    provider = GroundedAnswerProvider()
+    container.orchestrator.planner = LocalPlanner(
+        provider,
+        SkillRetriever(()),
+        response_detail="normal",
+    )
+
+    response, outcome = await container.orchestrator.handle_text(
+        "What's the capital of France?"
+    )
+
+    assert response.display_text == "The capital of France is Paris."
+    assert response.response_type == ResponseType.ANSWER
+    assert outcome.result is None
+    assert provider.calls == 1
+    stages = {row["stage"] for row in container.metrics.query(limit=100)}
+    assert {
+        "planner.retrieval",
+        "planner.context",
+        "planner.grounded",
+        "planner.total",
+        "request.total",
+    }.issubset(stages)
+
+
+@pytest.mark.asyncio
 async def test_explicit_memory_command_is_stored_and_listed(settings):
     container = build_container(settings)
 
@@ -1668,6 +1726,47 @@ async def test_broad_goal_interpretation_receives_memory_context_and_retrieval(s
 
 
 @pytest.mark.asyncio
+async def test_result_reference_is_selected_before_follow_up_planning(settings):
+    container = build_container(settings)
+    planner = InterpretingThenAnswerPlanner()
+    container.orchestrator.planner = planner
+    items = (
+        RequestResultItem(
+            item_id="news-1",
+            title="First technology headline",
+            value="https://news.example/first",
+            kind="news_article",
+            metadata={"url": "https://news.example/first"},
+        ),
+        RequestResultItem(
+            item_id="news-2",
+            title="Second technology headline",
+            value="https://news.example/second",
+            kind="news_article",
+            metadata={"url": "https://news.example/second"},
+        ),
+    )
+    container.orchestrator.remember_result_items(
+        items,
+        source="web.news_search",
+        summary="Two current headlines.",
+    )
+
+    await container.orchestrator.handle_text("Tell me more about the first one")
+
+    context = planner.interpret_calls[0][1]
+    selected = context.items_by_key()["results.selected"].value
+    recent = context.items_by_key()["results.recent_items"].value
+    assert selected["item_id"] == "news-1"
+    assert selected["value"] == "https://news.example/first"
+    assert isinstance(recent, dict)
+    assert [item["title"] for item in recent["items"]] == [
+        "First technology headline",
+        "Second technology headline",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_broad_goal_replanning_can_continue_after_observation(settings):
     container = build_container(settings)
     planner = ReplanningPlanner(
@@ -1698,6 +1797,7 @@ async def test_broad_goal_replanning_can_continue_after_observation(settings):
     assert outcome.result is not None
     assert len(planner.revision_calls) == 2
     assert planner.revision_calls[0][1][0]["skill_id"] == "core.calculator"
+    assert planner.revision_calls[0][1][0]["result_data"] == {"value": 4.0}
     assert planner.revision_calls[1][1][1]["skill_id"] == "core.datetime"
 
 
@@ -1724,6 +1824,32 @@ async def test_broad_goal_replanning_can_stop_for_clarification(settings):
     assert response.display_text == "Which result should I use?"
     assert outcome.result is not None
     assert len(planner.revision_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_broad_goal_replanning_never_executes_a_blank_skill_id(settings):
+    container = build_container(settings)
+    planner = ReplanningPlanner(
+        [
+            PlanRevision(
+                disposition="next_step",
+                rationale="The model omitted the registered skill ID.",
+                arguments={"query": "latest tech news"},
+                confidence=0.8,
+            )
+        ]
+    )
+    container.orchestrator.planner = planner
+
+    response, outcome = await container.orchestrator.handle_text(
+        "Help me calculate and choose the next thing."
+    )
+
+    assert response.response_type == ResponseType.CLARIFICATION
+    assert "registered skill" in response.display_text
+    assert "Skill is unavailable or disabled" not in response.display_text
+    assert outcome.result is not None
+    assert outcome.result.status == ResultStatus.COMPLETED
 
 
 @pytest.mark.asyncio

@@ -45,11 +45,12 @@ The last selected primary screen is remembered when the window is hidden and
 restored. Use `Ctrl+1` for Dashboard and `Ctrl+2` for Assistant.
 
 The default Dashboard contains local Assistant status, request outcomes,
-execution latency, automation summary, and recent activity cards. Select
+end-to-end request latency, model latency, skill-execution latency, automation
+summary, and recent activity cards. Select
 **Customize** to add, remove, hide, reorder, resize, rename, or change the
 presentation and refresh interval of a card. Changes are staged until **Save**;
 **Cancel** leaves the saved layout untouched, and **Reset to defaults** restores
-the five local cards. The catalog also offers CPU, memory, storage, and battery
+the seven local cards. The catalog also offers CPU, memory, storage, and battery
 cards. These remain unavailable until the exact read-only `device.read` grant
 is approved from the card.
 
@@ -136,9 +137,19 @@ review rather than silently expanding its authority.
 - STT: install a faster-whisper model locally or configure a whisper.cpp
   executable and model. CUDA falls back to CPU when unavailable.
 - Planner: install Ollama locally and select an installed quantized model.
-  Core deterministic commands continue to work without it.
+  Core deterministic commands continue to work without it. **Local LLM
+  keep-alive** controls how long Ollama keeps the selected model loaded after a
+  request (`30m` by default), and **Preload local LLM at startup** warms it in
+  the background so the first conversational request avoids model-load delay.
 - Speech: choose local Piper or cloud ElevenLabs in Settings. Text remains
   available whenever speech is disabled or unavailable.
+
+Unmatched conversational requests use one grounded model completion to
+interpret the goal and answer or select skills. Context providers are selected
+from the request and candidate skills and collected concurrently; simple
+factual questions use a short answer budget, while explanation and settings
+requests retain larger budgets. The request, planner, model, and execution
+timings are local metrics and do not store prompt or response text.
 
 The Models tab can install signed packages from removable media. HTTPS download
 is an explicit optional action. Model packages are verified before activation.
@@ -164,6 +175,50 @@ account usage charges. It cannot make a request while the global offline lock is
 enabled. Short generated responses use the local TTS cache; clear that cache
 from Privacy when desired.
 
+### Google Calendar setup
+
+Google Calendar is a first-party Extension Hub component rather than an
+unconditionally registered built-in skill. It is shown in the Hub even when no
+external catalog URL is configured. Open **Extension Hub**, select **Google
+Calendar**, choose **Install Extension**, then review and enable it in
+**Skills**.
+
+The extension uses Local Assistant's Google Desktop OAuth client and the full
+Calendar scope so the same connection can perform explicitly approved reads and
+changes. Disable the global offline lock, return to the Google Calendar entry in
+**Extension Hub**, choose **Connect Account**, and select **Sign in with Google**.
+No client ID or client secret is required. Developers can use a different
+Desktop OAuth client from the advanced connection settings.
+
+A successful account connection enables the installed Calendar skill. It is
+enabled again automatically after restart while that encrypted account
+connection remains present, and disconnecting the account disables it. Common
+requests such as “check my calendar,” “what meetings do I have tomorrow,”
+“find the planning meeting on my calendar,” and “add dentist tomorrow at 3 to
+my calendar” route directly without requiring the local language model.
+
+The assistant opens Google's authorization page in the system browser and
+receives the response on a temporary `127.0.0.1` callback protected by OAuth
+state and PKCE. Access and refresh tokens are encrypted for the current Windows
+user and are not given to extension package code, settings exports, transcripts,
+skill arguments, or the language model. The same dialog can test, reconnect, or
+disconnect the account.
+
+After enabling and connecting, natural-language requests can list or
+search calendars and events, inspect recurring instances, check free/busy,
+create or import events, quick-add, edit, move or delete events, answer
+invitations, manage secondary calendars and calendar-list preferences, inspect
+colors and settings, manage sharing rules, and perform the Google Workspace
+administrator-only secondary-calendar ownership transfer. Read permissions and
+change permissions are separate. Calendar clearing/deletion, ownership
+transfer, and sharing-rule changes are critical actions requiring the displayed
+typed confirmation token.
+
+The integration does not create Calendar API push notification channels. Those
+require an authenticated public HTTPS webhook receiver, which this local-only
+desktop application does not provide. The global offline lock blocks Calendar
+API calls and OAuth refreshes.
+
 ## Commands, permissions, and confirmation
 
 Skills receive no sensitive permission by default. When a command needs one,
@@ -178,9 +233,14 @@ arguments.
 Use the cancel hotkey or tray Emergency Stop command to stop capture, transcription,
 planning, speech, plans, and active jobs. File deletion uses the Recycle Bin
 where Windows supports it. Dry-run previews are available for file operations.
-File search results are numbered; after searching, use commands such as
-`select 1`, `open it`, `copy it to Desktop`, or `delete it` to act on the
-selected result with exact-path permissions and confirmation.
+Requests can return numbered items that remain available for follow-up work.
+This applies to file and media searches, tasks, notes, web/news searches, and
+matching page items. Use `select 1`, `select the second one`, an item ID such as
+`select task-42`, or an unambiguous title. Later requests such as `complete it`,
+`open it`, or `tell me more about it` receive the selected item's typed value
+in assistant context rather than relying on the text previously displayed.
+File items continue to support commands such as `copy it to Desktop` or
+`delete it`, with exact-path permissions and confirmation.
 Named subfolders can be searched relative to a known folder, for example
 `find my resume in the Assistant folder on my Desktop`. Folder organization
 can use explicit extensions or the built-in image and text-file categories.
@@ -248,9 +308,10 @@ Wyoming, and HTTPS model download are optional network features and must be
 configured explicitly.
 
 Web and cloud-model skills are optional. Disable the global offline lock to use
-DuckDuckGo Instant Answer for keyless web searches. DuckDuckGo is the default;
-Brave Search remains selectable in Settings and requires a Brave Search API
-key. Configure an OpenAI or Anthropic API key to ask ChatGPT/OpenAI models or
+DuckDuckGo for keyless web searches and current headline feeds for news
+briefings. DuckDuckGo is the default; Brave Search remains selectable in
+Settings and requires a Brave Search API key. Configure an OpenAI or Anthropic
+API key to ask ChatGPT/OpenAI models or
 Claude. Codex requests use the locally installed `codex exec` CLI. API keys are
 encrypted with Windows DPAPI and are not included in settings exports. Cloud
 API invocations require the `network` permission; Codex invocations require

@@ -51,6 +51,12 @@ async def test_task_list_display_includes_titles_and_status(tmp_path):
 
     assert 'Added task: "Review acceptance findings".' in added.display_text
     assert "- [ ] 1: Review acceptance findings" in listed.display_text
+    assert listed.items[0].item_id == "task-1"
+    assert listed.items[0].value == {
+        "id": 1,
+        "title": "Review acceptance findings",
+        "completed": False,
+    }
 
 
 @pytest.mark.asyncio
@@ -73,6 +79,8 @@ async def test_note_search_display_includes_matching_note(tmp_path):
 
     assert "Matching notes:" in result.display_text
     assert "Filter — Model X200" in result.display_text
+    assert result.items[0].item_id == "note-1"
+    assert result.items[0].sensitive is True
 
 
 @pytest.mark.asyncio

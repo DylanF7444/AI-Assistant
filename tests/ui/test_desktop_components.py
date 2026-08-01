@@ -214,7 +214,7 @@ def test_compact_companion_switches_views_renders_and_hides_to_tray(
     assert window.maximumWidth() == window.UNBOUNDED_WIDGET_SIZE
     assert window.maximumHeight() == window.UNBOUNDED_WIDGET_SIZE
     assert window.audit_table.objectName() == "auditTable"
-    assert window.activity_hint.text() == "Safe decision and action trace"
+    assert window.activity_hint.text() == "Tool names, safe inputs, live actions, and outcomes"
     foreground_state = window._active_state
     correlation_id = __import__("uuid").uuid4()
     window._handle_pipeline_event(
@@ -224,15 +224,22 @@ def test_compact_companion_switches_views_renders_and_hides_to_tray(
             message="Background work",
             trace=ActivityTrace(
                 phase=TracePhase.ACTION,
-                label="Background action",
-                detail="Running a safe task.",
+                label="Tool call",
+                detail="",
                 invocation="background",
+                skill_id="web.search",
+                tool_name="Web Search",
+                action='Search the web for "release notes" (up to 5 results).',
             ),
             updates_foreground_status=False,
         )
     )
     assert window._active_state == foreground_state
     assert "1 ACTIVE" in window.background_activity.text()
+    action_text = window.activity_log.item(window.activity_log.count() - 1).text()
+    assert "Tool call · Web Search" in action_text
+    assert "TOOL    web.search" in action_text
+    assert 'ACTION  Search the web for "release notes"' in action_text
     window._handle_pipeline_event(
         PipelineEvent(
             correlation_id=correlation_id,
@@ -240,14 +247,21 @@ def test_compact_companion_switches_views_renders_and_hides_to_tray(
             message="Done",
             trace=ActivityTrace(
                 phase=TracePhase.RESULT,
-                label="Background result",
-                detail="Safe task completed.",
+                label="Tool result",
+                detail="Found 5 web results.",
                 invocation="background",
+                skill_id="web.search",
+                tool_name="Web Search",
+                status="completed",
+                duration_ms=1250,
             ),
             updates_foreground_status=False,
         )
     )
     assert window.background_activity.text().endswith("IDLE")
+    result_text = window.activity_log.item(window.activity_log.count() - 1).text()
+    assert "Tool result · Web Search" in result_text
+    assert "STATUS  COMPLETED  ·  1.25s" in result_text
     assert all(
         window.audit_table.horizontalHeader().sectionResizeMode(column)
         == QHeaderView.ResizeMode.ResizeToContents

@@ -48,37 +48,48 @@ class ApplicationHandler:
                 )
             )
         if match := re.fullmatch(
-            r"(focus|minimize|maximize|close) (?:application )?([^ ]+\.exe)",
+            r"(focus|minimize|maximize|close) "
+            r"(?P<article>(?:the|my) )?(?:application |app )?"
+            r"(?P<application>.+)",
             routed,
         ):
-            return RouteResult(
-                Intent(
-                    name="windows.application_window",
-                    arguments={
-                        "operation": match.group(1),
-                        "process_name": executable_from_command_name(match.group(2)),
-                    },
-                    confidence=0.96,
-                    source="rule",
-                )
+            application = re.sub(
+                r"\s+window$",
+                "",
+                match.group("application").strip(),
             )
-        if match := re.fullmatch(
-            r"(focus|minimize|maximize|close) (?:application )?([a-z0-9][a-z0-9_-]*)",
-            routed,
-        ):
-            return RouteResult(
-                Intent(
-                    name="windows.application_window",
-                    arguments={
-                        "operation": match.group(1),
-                        "process_name": executable_from_command_name(match.group(2)),
-                    },
-                    confidence=0.94,
-                    source="rule",
-                )
+            existing_single_word_form = (
+                match.group("article") is None
+                and " " not in application
+                and not match.group("application").endswith(" window")
             )
+            if router._is_known_application_reference(
+                application
+            ) or existing_single_word_form:
+                return RouteResult(
+                    Intent(
+                        name="windows.application_window",
+                        arguments={
+                            "operation": match.group(1),
+                            "process_name": executable_from_command_name(application),
+                        },
+                        confidence=0.96,
+                        source="rule",
+                    )
+                )
         if browser_intent := router._route_browser_tab_launch(routed):
             return RouteResult(browser_intent)
+        if match := re.fullmatch(r"run (?:application |app )?(.+)", routed):
+            application = match.group(1).strip()
+            if router._is_known_application_reference(application):
+                return RouteResult(
+                    Intent(
+                        name="windows.launcher",
+                        arguments={"application": application},
+                        confidence=0.95,
+                        source="rule",
+                    )
+                )
         if match := re.fullmatch(r"(?:open|launch|start) application (.+)", routed):
             raw_target = match.group(1)
             application, follow_up = router._split_launch_target(raw_target)
@@ -122,7 +133,7 @@ class ApplicationHandler:
             if placement_intent := router._route_launch_placement(application, raw_target):
                 return RouteResult(intent, intents=(intent, placement_intent))
             return RouteResult(intent)
-        if match := re.fullmatch(r"(?:terminate|end) process (\d+)", routed):
+        if match := re.fullmatch(r"(?:terminate|end|kill|stop) process (\d+)", routed):
             return RouteResult(
                 Intent(
                     name="windows.process",
@@ -131,7 +142,11 @@ class ApplicationHandler:
                     source="rule",
                 )
             )
-        if match := re.fullmatch(r"(?:list|show) processes(?: matching (.+))?", routed):
+        if match := re.fullmatch(
+            r"(?:list|show)(?: (?:the|all))? (?:running )?processes"
+            r"(?: (?:matching|named|for) (.+))?",
+            routed,
+        ):
             return RouteResult(
                 Intent(
                     name="windows.process",
@@ -149,6 +164,19 @@ class ApplicationHandler:
                     source="rule",
                 )
             )
+        if match := re.fullmatch(
+            r"(?:notify me|(?:show|create)(?: me)? (?:a )?notification)"
+            r"(?: (?:saying|with message))?\s*:\s*(.+)",
+            routed,
+        ):
+            return RouteResult(
+                Intent(
+                    name="windows.notification",
+                    arguments={"title": "Assistant", "message": match.group(1)},
+                    confidence=0.94,
+                    source="rule",
+                )
+            )
         if routed in {"is dark mode on", "check dark mode"}:
             return RouteResult(
                 Intent(
@@ -158,14 +186,21 @@ class ApplicationHandler:
                     source="rule",
                 )
             )
-        if match := re.fullmatch(r"turn dark mode (on|off)", routed):
+        if match := re.fullmatch(
+            r"(?:turn dark mode (on|off)|turn (on|off) dark mode|"
+            r"(enable|disable) dark mode)",
+            routed,
+        ):
+            state = match.group(1) or match.group(2)
+            if match.group(3):
+                state = "on" if match.group(3) == "enable" else "off"
             return RouteResult(
                 Intent(
                     name="windows.setting",
                     arguments={
                         "operation": "set",
                         "setting": "dark_mode",
-                        "enabled": match.group(1) == "on",
+                        "enabled": state == "on",
                     },
                     confidence=0.99,
                     source="rule",
@@ -180,14 +215,21 @@ class ApplicationHandler:
                     source="rule",
                 )
             )
-        if match := re.fullmatch(r"turn light mode (on|off)", routed):
+        if match := re.fullmatch(
+            r"(?:turn light mode (on|off)|turn (on|off) light mode|"
+            r"(enable|disable|use) light mode)",
+            routed,
+        ):
+            state = match.group(1) or match.group(2)
+            if match.group(3):
+                state = "off" if match.group(3) == "disable" else "on"
             return RouteResult(
                 Intent(
                     name="windows.setting",
                     arguments={
                         "operation": "set",
                         "setting": "dark_mode",
-                        "enabled": match.group(1) == "off",
+                        "enabled": state == "off",
                     },
                     confidence=0.99,
                     source="rule",

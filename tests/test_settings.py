@@ -30,6 +30,8 @@ def test_persisted_settings_load_on_restart(settings):
             "retain_transcripts_days": 7,
             "show_reasoning_steps": True,
             "terminal_debug": False,
+            "llm_keep_alive": "2h",
+            "llm_preload": False,
             "context_include_open_applications": False,
             "context_include_connected_devices": False,
             "context_allow_clipboard": True,
@@ -47,6 +49,8 @@ def test_persisted_settings_load_on_restart(settings):
     assert second.settings.retain_transcripts_days == 7
     assert second.settings.show_reasoning_steps is True
     assert second.settings.terminal_debug is False
+    assert second.settings.llm_keep_alive == "2h"
+    assert second.settings.llm_preload is False
     assert second.settings.context_include_open_applications is False
     assert second.settings.context_include_connected_devices is False
     assert second.settings.context_allow_clipboard is True
@@ -56,6 +60,22 @@ def test_persisted_settings_load_on_restart(settings):
     assert second.settings.voice_activation_mode == "keyword_clap"
     assert second.settings.voice_activation_keyword == "computer"
     assert second.settings.voice_activation_clap_enabled is True
+
+
+def test_ollama_keep_alive_validates_supported_duration_syntax(tmp_path):
+    configured = Settings(
+        profile="testing",
+        data_dir=tmp_path,
+        llm_keep_alive=" 2H ",
+    )
+
+    assert configured.llm_keep_alive == "2h"
+    with pytest.raises(ValueError, match="keep-alive"):
+        Settings(
+            profile="testing",
+            data_dir=tmp_path,
+            llm_keep_alive="forever",
+        )
 
 
 def test_duckduckgo_is_the_default_search_provider(settings):

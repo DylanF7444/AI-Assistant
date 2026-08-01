@@ -41,6 +41,30 @@ _CLOCK_VALUE = (
     r"(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
     r"(?::\d{2})?\s*(?:a\.?\s*m\.?|p\.?\s*m\.?)"
 )
+_REMINDER_CADENCE = (
+    r"day|everyday|daily|weekday|weekdays|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday"
+)
+
+
+def _duration_seconds(amount_text: str, unit: str) -> float | None:
+    try:
+        amount = spoken_number(amount_text)
+    except ValueError:
+        return None
+    if amount <= 0:
+        return None
+    multiplier = {
+        "second": 1,
+        "seconds": 1,
+        "minute": 60,
+        "minutes": 60,
+        "hour": 3600,
+        "hours": 3600,
+        "day": 86400,
+        "days": 86400,
+    }[unit]
+    return amount * multiplier
 
 
 def _daily_notification(message: str, clock_value: str) -> RouteResult:
@@ -129,7 +153,10 @@ def _route_daily_web_action(
 ) -> RouteResult | None:
     if re.search(rf"\b{_DAILY_CADENCE}\b", routed) is None:
         return None
-    if re.search(r"\b(?:show|give|get|find|send|display)\b", routed) is None:
+    if re.search(
+        r"\b(?:show|give|get|find|send|display|check|monitor|watch|alert)\b",
+        routed,
+    ) is None:
         return None
     time_match = re.search(rf"\bat\s+(?P<time>{_CLOCK_VALUE})\b", routed)
     if time_match is None:
@@ -159,7 +186,8 @@ def _route_daily_web_action(
         )
 
     extract = re.sub(
-        r"\b(?:show|give|get|find|send|display)\s+(?:me\s+)?",
+        r"\b(?:show|give|get|find|send|display|check|monitor|watch|alert)"
+        r"\s+(?:me\s+)?",
         " ",
         routed,
         count=1,
@@ -207,19 +235,34 @@ class ProductivityHandler:
                 return _daily_notification(match.group("message"), match.group("time"))
         if daily_web_action := _route_daily_web_action(routed, router):
             return daily_web_action
-        if match := re.fullmatch(
-            r"remind me (?:every\s+|each\s+)?(day|everyday|daily|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday) at (.+?) to (.+)",
-            routed,
-        ):
-            local_time = _clock_time(match.group(2))
+        recurring_patterns = (
+            rf"remind me (?:every\s+|each\s+)?(?P<cadence>{_REMINDER_CADENCE}) "
+            r"at (?P<time>.+?) to (?P<message>.+)",
+            rf"(?:every|each) (?P<cadence>{_REMINDER_CADENCE}) "
+            r"at (?P<time>.+?) remind me to (?P<message>.+)",
+            rf"remind me to (?P<message>.+?) (?:every|each) "
+            rf"(?P<cadence>{_REMINDER_CADENCE}) at (?P<time>.+)",
+        )
+        recurring_match = next(
+            (
+                match
+                for pattern in recurring_patterns
+                if (match := re.fullmatch(pattern, routed))
+            ),
+            None,
+        )
+        if recurring_match:
+            local_time = _clock_time(recurring_match.group("time"))
             if local_time is None:
                 return RouteResult(
                     None,
                     clarification="What time should the recurring reminder run, including AM or PM?",
                 )
-            cadence = match.group(1)
+            cadence = recurring_match.group("cadence")
             if cadence in {"everyday", "daily"}:
                 cadence = "day"
+            elif cadence == "weekdays":
+                cadence = "weekday"
             weekdays = {
                 "monday": (0,),
                 "tuesday": (1,),
@@ -242,8 +285,8 @@ class ProductivityHandler:
                     name="core.schedule",
                     arguments={
                         "operation": "create",
-                        "name": match.group(3),
-                        "message": match.group(3),
+                        "name": recurring_match.group("message"),
+                        "message": recurring_match.group("message"),
                         "recurrence": recurrence,
                     },
                     confidence=0.99,
@@ -278,30 +321,37 @@ class ProductivityHandler:
                     source="rule",
                 )
             )
-        if match := re.fullmatch(
-            r"remind me in (.+?) (second|seconds|minute|minutes|hour|hours|day|days) to (.+)",
-            routed,
-        ):
-            try:
-                amount = spoken_number(match.group(1))
-            except ValueError:
+        relative_patterns = (
+            r"remind me in (?P<amount>.+?) (?P<unit>seconds?|minutes?|hours?|days?) "
+            r"to (?P<title>.+)",
+            r"remind me to (?P<title>.+?) in (?P<amount>.+?) "
+            r"(?P<unit>seconds?|minutes?|hours?|days?)",
+            r"in (?P<amount>.+?) (?P<unit>seconds?|minutes?|hours?|days?) "
+            r"remind me to (?P<title>.+)",
+            r"remind me after (?P<amount>.+?) (?P<unit>seconds?|minutes?|hours?|days?) "
+            r"to (?P<title>.+)",
+        )
+        relative_match = next(
+            (
+                match
+                for pattern in relative_patterns
+                if (match := re.fullmatch(pattern, routed))
+            ),
+            None,
+        )
+        if relative_match:
+            delay_seconds = _duration_seconds(
+                relative_match.group("amount"),
+                relative_match.group("unit"),
+            )
+            if delay_seconds is None:
                 return RouteResult(None, clarification="How long from now should I remind you?")
-            multiplier = {
-                "second": 1,
-                "seconds": 1,
-                "minute": 60,
-                "minutes": 60,
-                "hour": 3600,
-                "hours": 3600,
-                "day": 86400,
-                "days": 86400,
-            }[match.group(2)]
             return RouteResult(
                 Intent(
                     name="core.reminder",
                     arguments={
-                        "title": match.group(3),
-                        "delay_seconds": amount * multiplier,
+                        "title": relative_match.group("title"),
+                        "delay_seconds": delay_seconds,
                     },
                     confidence=0.99,
                     source="rule",
@@ -361,31 +411,41 @@ class ProductivityHandler:
                     source="rule",
                 )
             )
-        if match := re.fullmatch(
-            r"(?:set|start) (?:a )?timer for (.+?) (second|seconds|minute|minutes|hour|hours)",
-            routed,
-        ):
-            try:
-                amount = spoken_number(match.group(1))
-            except ValueError:
+        timer_patterns = (
+            r"(?:set|start) (?:a )?timer (?:for|to) "
+            r"(?P<amount>.+?) (?P<unit>seconds?|minutes?|hours?)",
+            r"(?:set|start) (?:a )?(?P<amount>.+?) "
+            r"(?P<unit>seconds?|minutes?|hours?) timer",
+            r"(?:a )?timer for (?P<amount>.+?) (?P<unit>seconds?|minutes?|hours?)",
+        )
+        timer_match = next(
+            (
+                match
+                for pattern in timer_patterns
+                if (match := re.fullmatch(pattern, routed))
+            ),
+            None,
+        )
+        if timer_match:
+            seconds = _duration_seconds(
+                timer_match.group("amount"),
+                timer_match.group("unit"),
+            )
+            if seconds is None or seconds > 86400:
                 return RouteResult(None, clarification="How long should I set the timer for?")
-            multiplier = {
-                "second": 1,
-                "seconds": 1,
-                "minute": 60,
-                "minutes": 60,
-                "hour": 3600,
-                "hours": 3600,
-            }[match.group(2)]
             return RouteResult(
                 Intent(
                     name="core.timer",
-                    arguments={"seconds": amount * multiplier, "label": "Timer"},
+                    arguments={"seconds": seconds, "label": "Timer"},
                     confidence=0.99,
                     source="rule",
                 )
             )
-        if re.fullmatch(r"(?:what(?:'s| is)? )?(?:the )?time", routed):
+        if re.fullmatch(
+            r"(?:what(?:'s| is)? (?:the )?time|what time is it|"
+            r"tell me (?:the )?(?:current )?time|current time|time now)",
+            routed,
+        ):
             return RouteResult(
                 Intent(
                     name="core.datetime",
@@ -394,7 +454,11 @@ class ProductivityHandler:
                     source="rule",
                 )
             )
-        if re.fullmatch(r"(?:what(?:'s| is)? )?(?:the )?date", routed):
+        if re.fullmatch(
+            r"(?:what(?:'s| is)? (?:the |today'?s )?date|what day is it|"
+            r"tell me (?:the |today'?s )?date|today'?s date|current date)",
+            routed,
+        ):
             return RouteResult(
                 Intent(
                     name="core.datetime",
@@ -403,7 +467,10 @@ class ProductivityHandler:
                     source="rule",
                 )
             )
-        if match := re.fullmatch(r"(calculate|what is) (.+)", routed):
+        if match := re.fullmatch(
+            r"(calculate|compute|evaluate|solve|what is|what's) (.+)",
+            routed,
+        ):
             expression = (
                 match.group(2)
                 .replace(" plus ", " + ")
@@ -412,7 +479,12 @@ class ProductivityHandler:
                 .replace(" multiplied by ", " * ")
                 .replace(" divided by ", " / ")
             )
-            explicit_calculation = match.group(1) == "calculate"
+            explicit_calculation = match.group(1) in {
+                "calculate",
+                "compute",
+                "evaluate",
+                "solve",
+            }
             numeric_expression = bool(
                 re.fullmatch(r"[\d\s.+\-*/()%]+", expression) and re.search(r"\d", expression)
             )
@@ -430,12 +502,26 @@ class ProductivityHandler:
             "",
             routed,
         )
-        if match := re.fullmatch(
-            r"convert (.+?) (kilometers?|miles?|meters?|feet|kilograms?|pounds?|liters?|gallons?|celsius|fahrenheit) to (kilometers?|miles?|meters?|feet|kilograms?|pounds?|liters?|gallons?|celsius|fahrenheit)",
-            conversion_text,
-        ):
+        units = (
+            r"kilometers?|miles?|meters?|feet|kilograms?|pounds?|"
+            r"liters?|gallons?|celsius|fahrenheit"
+        )
+        conversion_patterns = (
+            rf"convert (?P<value>.+?) (?P<from>{units}) (?:to|into|in) (?P<to>{units})",
+            rf"how many (?P<to>{units}) (?:are(?: there)? )?in "
+            rf"(?P<value>.+?) (?P<from>{units})",
+        )
+        conversion_match = next(
+            (
+                match
+                for pattern in conversion_patterns
+                if (match := re.fullmatch(pattern, conversion_text))
+            ),
+            None,
+        )
+        if conversion_match:
             try:
-                value = spoken_number(match.group(1))
+                value = spoken_number(conversion_match.group("value"))
             except ValueError:
                 return RouteResult(None, clarification="What value should I convert?")
             return RouteResult(
@@ -443,14 +529,18 @@ class ProductivityHandler:
                     name="core.unit_conversion",
                     arguments={
                         "value": value,
-                        "from_unit": match.group(2),
-                        "to_unit": match.group(3),
+                        "from_unit": conversion_match.group("from"),
+                        "to_unit": conversion_match.group("to"),
                     },
                     confidence=0.98,
                     source="rule",
                 )
             )
-        if match := re.fullmatch(r"(?:add|create) (?:a )?task (.+)", routed):
+        if match := re.fullmatch(
+            r"(?:add|create|make|new) (?:a )?(?:new )?(?:task|to-?do) "
+            r"(?:(?:called|named|to) )?(.+)",
+            routed,
+        ):
             return RouteResult(
                 Intent(
                     name="core.tasks",
@@ -459,7 +549,42 @@ class ProductivityHandler:
                     source="rule",
                 )
             )
-        if routed in {"list tasks", "show tasks", "what are my tasks"}:
+        if match := re.fullmatch(
+            r"add (.+?) to (?:my |the )?(?:tasks|task list|to-?do list)",
+            routed,
+        ):
+            return RouteResult(
+                Intent(
+                    name="core.tasks",
+                    arguments={"operation": "add", "title": match.group(1)},
+                    confidence=0.95,
+                    source="rule",
+                )
+            )
+        if match := re.fullmatch(
+            r"(?:(?:complete|finish|delete|remove) (?:task|to-?do) (\d+)|"
+            r"mark (?:task|to-?do) (\d+) (?:as )?(?:complete|completed|done))",
+            routed,
+        ):
+            operation = (
+                "delete"
+                if routed.startswith(("delete ", "remove "))
+                else "complete"
+            )
+            item_id = int(match.group(1) or match.group(2))
+            return RouteResult(
+                Intent(
+                    name="core.tasks",
+                    arguments={"operation": operation, "item_id": item_id},
+                    confidence=0.98,
+                    source="rule",
+                )
+            )
+        if re.fullmatch(
+            r"(?:list|show) (?:my |the )?(?:tasks|task list|to-?dos?|to-?do list)|"
+            r"what are (?:my |the )?(?:tasks|to-?dos?)",
+            routed,
+        ):
             return RouteResult(
                 Intent(
                     name="core.tasks",
@@ -468,7 +593,7 @@ class ProductivityHandler:
                     source="rule",
                 )
             )
-        if match := re.fullmatch(r"(?:remember|save a note) (.+)", routed):
+        if match := re.fullmatch(r"(?:save a note|make a note|note down) (.+)", routed):
             return RouteResult(
                 Intent(
                     name="core.notes",
@@ -481,12 +606,25 @@ class ProductivityHandler:
                     source="rule",
                 )
             )
-        if match := re.fullmatch(r"(?:search|find) (?:my )?notes for (.+)", routed):
+        if match := re.fullmatch(
+            r"(?:(?:search|find) (?:my )?notes (?:for|about)|"
+            r"look (?:in|through) (?:my )?notes for) (.+)",
+            routed,
+        ):
             return RouteResult(
                 Intent(
                     name="core.notes",
                     arguments={"operation": "search", "query": match.group(1)},
                     confidence=0.95,
+                    source="rule",
+                )
+            )
+        if match := re.fullmatch(r"(?:delete|remove) (?:my )?note (\d+)", routed):
+            return RouteResult(
+                Intent(
+                    name="core.notes",
+                    arguments={"operation": "delete", "item_id": int(match.group(1))},
+                    confidence=0.98,
                     source="rule",
                 )
             )

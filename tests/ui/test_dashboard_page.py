@@ -41,11 +41,11 @@ def test_dashboard_is_a_persisted_primary_screen(qtbot, settings, monkeypatch):
     assert window._window_mode == "full"
     assert window.tabs.currentWidget() is window.dashboard_page
     qtbot.waitUntil(lambda: not window.dashboard_page.refreshing, timeout=5000)
-    assert len(window.dashboard_page._cards) == 5
+    assert len(window.dashboard_page._cards) == 7
     assert window.dashboard_page.last_refresh.text().startswith("Updated")
     window._refresh_diagnostics()
     assert "Dashboard" in window.diagnostic_text.toPlainText()
-    assert "Refresh attempts: 5" in window.diagnostic_text.toPlainText()
+    assert "Refresh attempts: 7" in window.diagnostic_text.toPlainText()
 
     persisted = DesktopWindowState.model_validate(store.get("desktop_window_state", {}))
     assert persisted.primary_screen == "dashboard"
