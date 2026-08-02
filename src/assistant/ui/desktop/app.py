@@ -2631,6 +2631,7 @@ def run_desktop(container: Container) -> int:
                 offline=self._startup_offline_lock,
             )
             self.extension_hub_page.installed.connect(self._extension_installed)
+            self.extension_hub_page.uninstalled.connect(self._extension_uninstalled)
             return self.extension_hub_page
 
         def _extension_installed(self, skill_id: str) -> None:
@@ -2639,6 +2640,10 @@ def run_desktop(container: Container) -> int:
                 f"Installed {skill_id} disabled. Review it in Skills before enabling.",
                 8000,
             )
+
+        def _extension_uninstalled(self, skill_id: str) -> None:
+            self._reload_skills()
+            self.statusBar().showMessage(f"Uninstalled {skill_id}.", 8000)
 
         def _skills_tab(self) -> QWidget:
             page = QWidget()

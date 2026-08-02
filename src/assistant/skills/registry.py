@@ -82,14 +82,19 @@ class SkillRegistry:
         self._enabled.discard(skill_id)
 
     def uninstall(self, skill_id: str) -> None:
-        self._enabled.discard(skill_id)
-        self._skills.pop(skill_id, None)
         if self.install_dir:
-            target = (self.install_dir / skill_id).resolve()
+            package_path = self.install_dir / skill_id
+            target = package_path.resolve()
             root = self.install_dir.resolve()
             if root not in target.parents:
                 raise ValueError("Invalid skill path")
-            shutil.rmtree(target, ignore_errors=True)
+            if package_path.exists() or package_path.is_symlink():
+                if package_path.is_symlink():
+                    package_path.unlink()
+                else:
+                    shutil.rmtree(package_path)
+        self._enabled.discard(skill_id)
+        self._skills.pop(skill_id, None)
 
     def load_entry_point(self, entry_point: str) -> Skill:
         module_name, object_name = entry_point.split(":", 1)

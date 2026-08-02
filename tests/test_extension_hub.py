@@ -149,6 +149,32 @@ async def test_extension_hub_browses_and_installs_a_verified_skill_disabled(tmp_
 
 
 @pytest.mark.asyncio
+async def test_extension_hub_uninstalls_a_skill_and_records_the_removal(tmp_path: Path):
+    archive, manifest, public = _signed_skill_archive(tmp_path)
+    entry = _catalog_entry(archive, manifest)
+    service, registry, audit = _service(tmp_path, entry, archive, public)
+    await service.refresh()
+    await service.install(entry.extension_id)
+    registry.enable(entry.extension_id)
+
+    await service.uninstall(entry.extension_id)
+
+    assert service.installation_status(entry.extension_id) == "available"
+    assert not service.is_installed(entry.extension_id)
+    assert registry.is_enabled(entry.extension_id) is False
+    assert entry.extension_id not in {item.skill_id for item in registry.list()}
+    with pytest.raises(KeyError):
+        registry.get(entry.extension_id)
+    with pytest.raises(KeyError):
+        registry.inspect(entry.extension_id)
+    assert not (registry.install_dir / entry.extension_id).exists()
+    event = audit.query(event_type="extension_uninstallation")[0]
+    assert event["decision"] == "uninstalled"
+    assert event["skill_id"] == entry.extension_id
+    assert event["permissions"] == ["network"]
+
+
+@pytest.mark.asyncio
 async def test_extension_hub_rejects_a_download_with_the_wrong_digest(tmp_path: Path):
     archive, manifest, public = _signed_skill_archive(tmp_path)
     entry = _catalog_entry(archive, manifest, package_sha256="0" * 64)

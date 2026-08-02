@@ -33,6 +33,8 @@ CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar"
 DEFAULT_GOOGLE_CALENDAR_CLIENT_ID = (
     "613366814131-9cu8s8b18m4b72p18f1j37jihu8sdls2.apps.googleusercontent.com"
 )
+OAUTH_CLIENT_ID_NAME = "google_calendar_oauth_client_id"
+OAUTH_CLIENT_SECRET_NAME = "google_calendar_oauth_client_secret"
 TOKEN_SECRET_NAMES = (
     "google_calendar_refresh_token",
     "google_calendar_access_token",
@@ -75,6 +77,20 @@ class GoogleCalendarConnectionService:
         self.browser_open = browser_open
         self.default_client_id = default_client_id.strip()
 
+    def configured_client_id(self) -> str:
+        """Return the durable OAuth client ID used for future connections."""
+
+        return (
+            self.vault.get(OAUTH_CLIENT_ID_NAME)
+            or self.vault.get("google_calendar_client_id")
+            or self.default_client_id
+        )
+
+    def has_client_secret(self) -> bool:
+        """Report whether a client secret is already stored without exposing it."""
+
+        return bool(self._client_secret_for(self.configured_client_id()))
+
     def status(self) -> GoogleCalendarConnectionStatus:
         connected = bool(
             self.vault.get("google_calendar_client_id")
@@ -93,19 +109,32 @@ class GoogleCalendarConnectionService:
         client_secret: str | None = None,
         timeout_seconds: int = 180,
     ) -> GoogleCalendarConnectionStatus:
-        resolved_client_id = (client_id or self.default_client_id).strip()
+        resolved_client_id = (client_id or self.configured_client_id()).strip()
         resolved_client_secret = client_secret.strip() if client_secret else None
-        if (
-            resolved_client_secret is None
-            and self.vault.get("google_calendar_client_id") == resolved_client_id
-        ):
-            resolved_client_secret = self.vault.get("google_calendar_client_secret")
+        if resolved_client_secret is None:
+            resolved_client_secret = self._client_secret_for(resolved_client_id)
+        if resolved_client_secret:
+            # Persist client configuration before starting the browser flow. This
+            # makes a failed first exchange recoverable without asking for the
+            # secret again, while keeping account tokens separate from setup.
+            self.vault.set(OAUTH_CLIENT_ID_NAME, resolved_client_id)
+            self.vault.set(OAUTH_CLIENT_SECRET_NAME, resolved_client_secret)
         return await asyncio.to_thread(
             self._connect,
             resolved_client_id,
             resolved_client_secret,
             timeout_seconds,
         )
+
+    def _client_secret_for(self, client_id: str) -> str | None:
+        configured_id = self.vault.get(OAUTH_CLIENT_ID_NAME)
+        if configured_id == client_id:
+            configured_secret = self.vault.get(OAUTH_CLIENT_SECRET_NAME)
+            if configured_secret:
+                return configured_secret
+        if self.vault.get("google_calendar_client_id") == client_id:
+            return self.vault.get("google_calendar_client_secret")
+        return None
 
     async def test(self) -> GoogleCalendarConnectionStatus:
         status = self.status()
@@ -290,8 +319,12 @@ class GoogleCalendarConnectionService:
             str(time.time() + int(payload.get("expires_in", 3600))),
         )
         if client_secret:
+            self.vault.set(OAUTH_CLIENT_ID_NAME, client_id)
+            self.vault.set(OAUTH_CLIENT_SECRET_NAME, client_secret)
             self.vault.set("google_calendar_client_secret", client_secret)
         else:
+            self.vault.set(OAUTH_CLIENT_ID_NAME, client_id)
+            self.vault.delete(OAUTH_CLIENT_SECRET_NAME)
             self.vault.delete("google_calendar_client_secret")
         self.vault.set("google_calendar_refresh_token", refresh_token)
         if account:
@@ -399,6 +432,8 @@ class GoogleCalendarTokenManager:
             "grant_type": "refresh_token",
         }
         client_secret = self.vault.get("google_calendar_client_secret")
+        if not client_secret and self.vault.get(OAUTH_CLIENT_ID_NAME) == client_id:
+            client_secret = self.vault.get(OAUTH_CLIENT_SECRET_NAME)
         if client_secret:
             values["client_secret"] = client_secret
         request = urllib.request.Request(
@@ -541,6 +576,12 @@ def _http_error(error: urllib.error.HTTPError) -> GoogleCalendarError:
 
 def _connection_error_message(error: Exception) -> str:
     if isinstance(error, GoogleCalendarError):
+        if "client_secret is missing" in error.reason.casefold():
+            return (
+                "Google requires this OAuth client's secret. Enter it once in the "
+                "OAuth client settings and retry; Local Assistant stores it encrypted "
+                "for future connections."
+            )
         return error.reason
     if isinstance(error, PermissionError):
         return str(error)[:200]

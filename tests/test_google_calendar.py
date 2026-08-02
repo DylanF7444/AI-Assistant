@@ -64,6 +64,7 @@ def call(arguments):
         ("check my calendar", "list_events"),
         ("Could you please check my calendar?", "list_events"),
         ("what is on my calendar today", "list_events"),
+        ("Whats on my Google Calendar?", "list_events"),
         ("What's coming up on my calendar?", "list_events"),
         ("show my appointments tomorrow", "list_events"),
         ("what meetings do I have tomorrow", "list_events"),
@@ -470,6 +471,8 @@ async def test_connection_service_completes_pkce_loopback_and_encrypts_account_t
     assert authorization["client_id"] == [DEFAULT_GOOGLE_CALENDAR_CLIENT_ID]
     assert vault.get("google_calendar_client_id") == DEFAULT_GOOGLE_CALENDAR_CLIENT_ID
     assert vault.get("google_calendar_client_secret") == "desktop-secret"
+    assert vault.get("google_calendar_oauth_client_id") == DEFAULT_GOOGLE_CALENDAR_CLIENT_ID
+    assert vault.get("google_calendar_oauth_client_secret") == "desktop-secret"
     assert vault.get("google_calendar_refresh_token") == "refresh"
     assert vault.get("google_calendar_access_token") == "access"
     assert "Google Calendar connected" in callback_page["body"]
@@ -482,6 +485,8 @@ async def test_connection_service_completes_pkce_loopback_and_encrypts_account_t
     assert vault.values == {
         "google_calendar_client_id": DEFAULT_GOOGLE_CALENDAR_CLIENT_ID,
         "google_calendar_client_secret": "desktop-secret",
+        "google_calendar_oauth_client_id": DEFAULT_GOOGLE_CALENDAR_CLIENT_ID,
+        "google_calendar_oauth_client_secret": "desktop-secret",
     }
 
     requests.clear()
@@ -489,6 +494,54 @@ async def test_connection_service_completes_pkce_loopback_and_encrypts_account_t
     assert reconnected.connected is True
     token_request = next(request for request in requests if request.full_url.endswith("/token"))
     assert b"client_secret=desktop-secret" in token_request.data
+
+
+@pytest.mark.asyncio
+async def test_connection_service_remembers_client_secret_when_first_exchange_fails():
+    vault = MemoryVault()
+    callback_page = {}
+
+    def opener(request, timeout):
+        payload = json.dumps(
+            {"error": {"message": "client_secret is missing"}}
+        ).encode()
+        raise urllib.error.HTTPError(
+            request.full_url,
+            401,
+            "Unauthorized",
+            {},
+            io.BytesIO(payload),
+        )
+
+    def browser_open(url):
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        callback = (
+            query["redirect_uri"][0]
+            + "?"
+            + urllib.parse.urlencode(
+                {"state": query["state"][0], "code": "authorization-code"}
+            )
+        )
+        try:
+            urllib.request.urlopen(callback, timeout=5)
+        except urllib.error.HTTPError as error:
+            callback_page["body"] = error.read().decode("utf-8")
+        return True
+
+    service = GoogleCalendarConnectionService(
+        vault,
+        opener=opener,
+        browser_open=browser_open,
+    )
+
+    with pytest.raises(GoogleCalendarError, match="client_secret is missing"):
+        await service.connect(client_secret="desktop-secret")
+
+    assert vault.values == {
+        "google_calendar_oauth_client_id": DEFAULT_GOOGLE_CALENDAR_CLIENT_ID,
+        "google_calendar_oauth_client_secret": "desktop-secret",
+    }
+    assert "Enter it once" in callback_page["body"]
 
 
 @pytest.mark.asyncio
@@ -579,6 +632,7 @@ async def test_google_calendar_is_installed_from_hub_not_registered_by_default(t
     ("text", "operation"),
     [
         ("check my calendar", "list_events"),
+        ("Whats on my Google Calendar?", "list_events"),
         ("add dentist tomorrow at 3 to my calendar", "quick_add"),
     ],
 )

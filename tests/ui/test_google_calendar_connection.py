@@ -128,3 +128,15 @@ def test_google_calendar_connection_dialog_keeps_tests_disabled_after_oauth_fail
     assert service.connected is False
     assert not dialog.test_button.isEnabled()
     assert dialog.connect_button.isEnabled()
+
+
+@pytest.mark.ui
+def test_google_calendar_connection_dialog_exposes_client_secret_recovery(qtbot):
+    service = FakeConnectionService()
+    dialog = GoogleCalendarConnectionDialog(service)
+    qtbot.addWidget(dialog)
+
+    dialog._operation_failed("Google requires client_secret")
+
+    assert dialog.advanced_toggle.isChecked()
+    assert "Enter it below once" in dialog.status_label.text()

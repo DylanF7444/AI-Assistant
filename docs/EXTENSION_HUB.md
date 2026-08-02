@@ -7,7 +7,10 @@ disable the global offline lock, restart the application, and open the hub.
 Discovery does not grant authority. The catalog can describe a package, but it
 cannot add a trusted signing key, enable a skill, or grant permissions. A newly
 installed skill is disabled and receives no permission grants. Review and
-enable it separately in **Skills**.
+enable it separately in **Skills**. An installed catalog entry can be removed
+from its Hub detail page with **Uninstall Extension**; removal disables the
+skill, clears its runtime registration, deletes its local package, and leaves
+the entry available for a future reinstall.
 
 ## Catalog API
 

@@ -39,7 +39,9 @@ class GoogleCalendarConnectionDialog(QDialog):
         description = QLabel(
             "Sign in with Google to connect Calendar. Google opens in your system browser "
             "and asks you to approve access. Tokens are encrypted for this Windows account "
-            "and are never given to the extension package or language model."
+            "and are never given to the extension package or language model. If this "
+            "Google project requires an OAuth client secret, Local Assistant stores it "
+            "encrypted after you enter it once."
         )
         description.setWordWrap(True)
         description.setObjectName("pageSubtitle")
@@ -50,9 +52,18 @@ class GoogleCalendarConnectionDialog(QDialog):
         self.status_label.setObjectName("activityHint")
         layout.addWidget(self.status_label)
 
-        self.advanced_toggle = QCheckBox("Use a different OAuth client")
+        self.advanced_toggle = QCheckBox("Configure OAuth client credentials")
         self.advanced_toggle.setObjectName("googleCalendarAdvancedToggle")
         layout.addWidget(self.advanced_toggle)
+
+        oauth_hint = QLabel(
+            "If Google reports that client_secret is missing, expand this section and "
+            "enter the secret from Google Cloud Console. It is reused automatically on "
+            "future sign-ins and token refreshes."
+        )
+        oauth_hint.setWordWrap(True)
+        oauth_hint.setObjectName("activityHint")
+        layout.addWidget(oauth_hint)
 
         self.advanced_widget = QWidget()
         self.advanced_widget.setObjectName("googleCalendarAdvancedSettings")
@@ -60,11 +71,18 @@ class GoogleCalendarConnectionDialog(QDialog):
         self.client_id_input = QLineEdit()
         self.client_id_input.setObjectName("googleCalendarClientId")
         self.client_id_input.setPlaceholderText("Desktop OAuth client ID from Google Cloud Console")
-        self.client_id_input.setText(getattr(service, "default_client_id", ""))
+        configured_client_id = getattr(service, "configured_client_id", None)
+        if callable(configured_client_id):
+            configured_client_id = configured_client_id()
+        self.client_id_input.setText(
+            str(configured_client_id or getattr(service, "default_client_id", ""))
+        )
         self.client_secret_input = QLineEdit()
         self.client_secret_input.setObjectName("googleCalendarClientSecret")
         self.client_secret_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.client_secret_input.setPlaceholderText("Optional desktop client secret")
+        self.client_secret_input.setPlaceholderText(
+            "Enter once; saved encrypted for future sign-ins"
+        )
         form.addRow("OAuth client ID", self.client_id_input)
         form.addRow("OAuth client secret", self.client_secret_input)
         self.advanced_widget.setVisible(False)
@@ -167,7 +185,15 @@ class GoogleCalendarConnectionDialog(QDialog):
     def _operation_failed(self, error: str) -> None:
         self._busy = False
         self._render_status()
-        self.status_label.setText(f"Connection operation failed: {error}")
+        lowered = error.casefold()
+        if "client_secret" in lowered or ("client" in lowered and "secret" in lowered):
+            self.advanced_toggle.setChecked(True)
+            self.status_label.setText(
+                "Google requires this OAuth client secret. Enter it below once and "
+                "retry; Local Assistant stores it encrypted for future connections."
+            )
+        else:
+            self.status_label.setText(f"Connection operation failed: {error}")
 
     def _worker_finished(self, worker: AsyncWorker) -> None:
         if worker in self._workers:

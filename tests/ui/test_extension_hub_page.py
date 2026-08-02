@@ -37,6 +37,10 @@ class _FakeHub:
             display_name=self.extension.display_name,
         )
 
+    async def uninstall(self, extension_id: str):
+        assert extension_id == self.extension.extension_id
+        self.installed = False
+
     def connection_service(self, _extension_id: str):
         return None
 
@@ -86,7 +90,20 @@ def test_extension_hub_page_browses_reviews_and_installs(qtbot, monkeypatch):
     assert installed.args == ["community.weather"]
     qtbot.waitUntil(lambda: service.installed, timeout=2000)
     assert not page.install_button.isEnabled()
+    assert page.install_button.text() == "Installed"
     assert "Skills tab" in page.install_status.text()
+
+    qtbot.waitUntil(lambda: page.uninstall_button.isEnabled(), timeout=2000)
+    with qtbot.waitSignal(page.uninstalled, timeout=2000) as uninstalled:
+        qtbot.mouseClick(page.uninstall_button, Qt.MouseButton.LeftButton)
+
+    assert uninstalled.args == ["community.weather"]
+    qtbot.waitUntil(lambda: not service.installed, timeout=2000)
+    qtbot.waitUntil(lambda: page.install_button.isEnabled(), timeout=2000)
+    assert page.install_button.isEnabled()
+    assert page.install_button.text() == "Install Extension"
+    assert not page.uninstall_button.isVisible()
+    assert "uninstalled" in page.install_status.text().casefold()
 
 
 @pytest.mark.ui

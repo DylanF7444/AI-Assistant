@@ -199,10 +199,10 @@ class CalendarHandler:
         read_patterns = (
             rf"(?:check|show|view|read|open)\s+(?:me\s+)?{self._CALENDAR}"
             r"(?:\s+(?:for|on|today|tomorrow|tonight|this|next|coming).*)?",
-            rf"what(?:'s|\s+is)\s+(?:on|in)\s+{self._CALENDAR}.*",
-            rf"what(?:'s|\s+is)\s+(?:coming\s+up|scheduled)\s+"
+            rf"what(?:'s|s|\s+is)\s+(?:on|in)\s+{self._CALENDAR}.*",
+            rf"what(?:'s|s|\s+is)\s+(?:coming\s+up|scheduled)\s+"
             rf"(?:on|in)\s+{self._CALENDAR}.*",
-            rf"show\s+me\s+what(?:'s|\s+is)\s+(?:coming\s+up|scheduled)\s+"
+            rf"show\s+me\s+what(?:'s|s|\s+is)\s+(?:coming\s+up|scheduled)\s+"
             rf"(?:on|in)\s+{self._CALENDAR}.*",
             rf"what\s+do\s+i\s+have\s+(?:on|in)\s+{self._CALENDAR}.*",
             rf"do\s+i\s+have\s+(?:anything|any\s+(?:events?|meetings?|appointments?))"

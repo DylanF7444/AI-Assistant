@@ -257,7 +257,11 @@ class SkillContextProvider:
         session_id: str,
         budget: ContextBudget,
     ) -> list[ContextItem]:
-        manifests = self.registry.list()
+        manifests = tuple(
+            manifest
+            for manifest in self.registry.list()
+            if self.registry.is_enabled(manifest.skill_id)
+        )
         return [
             ContextItem(
                 key="skills.available",
@@ -274,7 +278,7 @@ class SkillContextProvider:
                 ],
                 sensitivity="local",
                 source=self.name,
-                summary=f"{len(manifests)} registered skills.",
+                summary=f"{len(manifests)} enabled skills.",
             ),
             ContextItem(
                 key="skills.risk_summary",
@@ -282,7 +286,7 @@ class SkillContextProvider:
                 value=_risk_summary(manifests),
                 sensitivity="local",
                 source=self.name,
-                summary="Registered skills grouped by risk level.",
+                summary="Enabled skills grouped by risk level.",
             ),
             ContextItem(
                 key="skills.permission_summary",
@@ -290,7 +294,7 @@ class SkillContextProvider:
                 value=_permission_summary(manifests),
                 sensitivity="local",
                 source=self.name,
-                summary="Skill IDs grouped by declared permission capability.",
+                summary="Enabled skill IDs grouped by declared permission capability.",
             ),
         ]
 

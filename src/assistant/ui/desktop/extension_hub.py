@@ -26,9 +26,10 @@ from assistant.ui.desktop.workers import AsyncWorker
 
 
 class ExtensionHubPage(QWidget):
-    """Browse a configured extension platform and install reviewed packages."""
+    """Browse a configured extension platform and manage reviewed packages."""
 
     installed = Signal(str)
+    uninstalled = Signal(str)
 
     def __init__(
         self,
@@ -43,6 +44,7 @@ class ExtensionHubPage(QWidget):
         self._entries: tuple[CatalogExtension, ...] = ()
         self._workers: list[AsyncWorker] = []
         self._busy = False
+        self._completion_message: str | None = None
         self.setObjectName("assistantPage")
         self._build_ui()
         self.set_configuration(service.catalog_url, offline=offline)
@@ -176,6 +178,11 @@ class ExtensionHubPage(QWidget):
         self.install_button.setObjectName("primaryButton")
         self.install_button.setEnabled(False)
         self.install_button.clicked.connect(self.install_selected)
+        self.uninstall_button = QPushButton("Uninstall Extension")
+        self.uninstall_button.setObjectName("dangerButton")
+        self.uninstall_button.setVisible(False)
+        self.uninstall_button.setEnabled(False)
+        self.uninstall_button.clicked.connect(self.uninstall_selected)
         self.connection_button = QPushButton("Configure Account")
         self.connection_button.setObjectName("secondaryButton")
         self.connection_button.setVisible(False)
@@ -184,6 +191,7 @@ class ExtensionHubPage(QWidget):
         install_layout.addWidget(self.install_status)
         install_layout.addWidget(self.connection_button, 0, Qt.AlignmentFlag.AlignRight)
         install_layout.addWidget(self.install_button, 0, Qt.AlignmentFlag.AlignRight)
+        install_layout.addWidget(self.uninstall_button, 0, Qt.AlignmentFlag.AlignRight)
         detail_layout.addWidget(install_card)
         detail_layout.addStretch()
         detail_scroll.setWidget(detail)
@@ -290,7 +298,10 @@ class ExtensionHubPage(QWidget):
             self.publisher_label.clear()
             self.description_label.clear()
             self.permission_table.setRowCount(0)
+            self.install_button.setText("Install Extension")
             self.install_button.setEnabled(False)
+            self.uninstall_button.setVisible(False)
+            self.uninstall_button.setEnabled(False)
             self.connection_button.setVisible(False)
             return
 
@@ -330,6 +341,8 @@ class ExtensionHubPage(QWidget):
         connection_service = self._connection_service(extension.extension_id)
         self.connection_button.setVisible(connection_service is not None and status == "installed")
         self.connection_button.setEnabled(not self._busy and not self.offline)
+        self.uninstall_button.setVisible(status == "installed")
+        self.uninstall_button.setEnabled(status == "installed" and not self._busy)
         self.connection_button.setToolTip(
             "Disable the global offline lock before connecting an account." if self.offline else ""
         )
@@ -338,6 +351,12 @@ class ExtensionHubPage(QWidget):
             self.connection_button.setText(
                 "Manage Connected Account" if connected else "Connect Account"
             )
+        if not extension.compatible or status in {"id_in_use", "installed"}:
+            self.install_button.setText(
+                "Installed" if status == "installed" else "Unavailable"
+            )
+        else:
+            self.install_button.setText("Install Extension")
         enabled = extension.compatible and status == "available" and not self._busy
         self.install_button.setEnabled(enabled)
         if not extension.compatible:
@@ -379,6 +398,7 @@ class ExtensionHubPage(QWidget):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        self._completion_message = None
         action = (
             f"Installing {extension.display_name} from this application build…"
             if extension.source == "first_party"
@@ -387,6 +407,37 @@ class ExtensionHubPage(QWidget):
         self._set_busy(True, action)
         worker = AsyncWorker(self.service.install(extension.extension_id))
         worker.complete.connect(self._extension_installed)
+        worker.failed.connect(self._operation_failed)
+        worker.finished.connect(lambda: self._worker_finished(worker))
+        self._workers.append(worker)
+        worker.start()
+
+    def uninstall_selected(self) -> None:
+        extension = self._selected()
+        if extension is None or self._busy:
+            return
+        if self.service.installation_status(extension.extension_id) != "installed":
+            return
+        uninstall = getattr(self.service, "uninstall", None)
+        if not callable(uninstall):
+            self._operation_failed("This extension hub does not support uninstalling extensions.")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Uninstall Extension",
+            f"Uninstall {extension.display_name}?\n\n"
+            "This removes the local extension package and disables it. "
+            "You can install it again from the hub later.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._completion_message = None
+        self._set_busy(True, f"Uninstalling {extension.display_name}…")
+        extension_id = extension.extension_id
+        worker = AsyncWorker(uninstall(extension_id))
+        worker.complete.connect(lambda _result: self._extension_uninstalled(extension_id))
         worker.failed.connect(self._operation_failed)
         worker.finished.connect(lambda: self._worker_finished(worker))
         self._workers.append(worker)
@@ -428,6 +479,17 @@ class ExtensionHubPage(QWidget):
         self.installed.emit(manifest.skill_id)
         self._render_entries()
 
+    def _extension_uninstalled(self, extension_id: str) -> None:
+        extension = next(
+            (item for item in self._entries if item.extension_id == extension_id),
+            None,
+        )
+        name = extension.display_name if extension is not None else extension_id
+        self._completion_message = f"{name} was uninstalled from this computer."
+        self.uninstalled.emit(extension_id)
+        self._render_entries()
+        self.install_status.setText(self._completion_message)
+
     def _operation_failed(self, error: str) -> None:
         self.install_status.setText(f"Extension operation failed: {error}")
 
@@ -437,6 +499,7 @@ class ExtensionHubPage(QWidget):
             bool(self.service.catalog_url) and not self.offline and not busy
         )
         self.install_button.setEnabled(False)
+        self.uninstall_button.setEnabled(False)
         if message:
             self.install_status.setText(message)
 
@@ -445,3 +508,6 @@ class ExtensionHubPage(QWidget):
             self._workers.remove(worker)
         self._set_busy(False)
         self._show_selected()
+        if self._completion_message:
+            self.install_status.setText(self._completion_message)
+            self._completion_message = None

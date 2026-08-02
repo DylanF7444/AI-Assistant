@@ -270,7 +270,7 @@ async def test_recent_result_context_stays_structured_when_item_values_are_long(
 
 
 @pytest.mark.asyncio
-async def test_skill_context_provider_summarizes_available_skills():
+async def test_skill_context_provider_excludes_disabled_skills():
     registry = SkillRegistry(require_signatures=False)
     registry.register(CalculatorSkill())
     registry.register(FileSearchSkill(object()))
@@ -289,9 +289,16 @@ async def test_skill_context_provider_summarizes_available_skills():
         "skills.permission_summary",
     ]
     available = items[0].value
-    assert available[0]["id"] == "core.calculator"
-    assert available[0]["enabled"] is False
-    assert available[1]["id"] == "windows.file_search"
+    assert available == [
+        {
+            "id": "windows.file_search",
+            "name": "File Search",
+            "description": "Search filenames within an approved folder.",
+            "risk": "low",
+            "enabled": True,
+        }
+    ]
+    assert items[1].value == {"low": ["windows.file_search"]}
     assert items[2].value["filesystem.read"] == ["windows.file_search"]
 
 

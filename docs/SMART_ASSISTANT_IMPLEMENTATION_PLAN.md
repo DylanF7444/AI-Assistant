@@ -450,7 +450,7 @@ Output examples:
 
 Sources:
 
-- `SkillRegistry.list()`
+- Enabled `SkillRegistry` registrations (`list()` filtered by `is_enabled()`)
 
 Output examples:
 

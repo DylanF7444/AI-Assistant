@@ -325,6 +325,55 @@ class ExtensionHubService:
         )
         return manifest
 
+    async def uninstall(self, extension_id: str) -> None:
+        """Remove an extension installed through the hub.
+
+        The catalog entry is used for audit context, but an installed extension
+        remains removable if a later catalog refresh no longer lists it.
+        Built-in skills are protected by the same ID-in-use check used during
+        installation.
+        """
+
+        extension = next(
+            (item for item in self._catalog.extensions if item.extension_id == extension_id),
+            None,
+        )
+        permissions = [scope.capability for scope in extension.permissions] if extension else []
+        details: dict[str, Any] = {}
+        if extension is not None:
+            details.update(version=extension.version, publisher=extension.publisher)
+
+        try:
+            status = self.installation_status(extension_id)
+            if status == "id_in_use":
+                raise ValueError("This extension ID is used by a built-in skill")
+            if status != "installed":
+                raise FileNotFoundError(f"{extension_id} is not installed")
+            await asyncio.to_thread(self.registry.uninstall, extension_id)
+            install_dir = self.registry.install_dir
+            if install_dir is not None and (
+                (install_dir / extension_id).exists()
+                or (install_dir / extension_id).is_symlink()
+            ):
+                raise OSError(f"Could not fully remove the installed extension: {extension_id}")
+        except Exception as error:
+            self._record(
+                event_type="extension_uninstallation",
+                skill_id=extension_id,
+                decision="failed",
+                permissions=permissions,
+                details={**details, "error": str(error)},
+            )
+            raise
+
+        self._record(
+            event_type="extension_uninstallation",
+            skill_id=extension_id,
+            decision="uninstalled",
+            permissions=permissions,
+            details=details,
+        )
+
     def _install_managed(self, extension: CatalogExtension) -> SkillManifest:
         _catalog_entry, manifest = self._managed_extensions[extension.extension_id]
         _verify_catalog_metadata(extension, manifest)

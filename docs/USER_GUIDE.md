@@ -187,8 +187,12 @@ The extension uses Local Assistant's Google Desktop OAuth client and the full
 Calendar scope so the same connection can perform explicitly approved reads and
 changes. Disable the global offline lock, return to the Google Calendar entry in
 **Extension Hub**, choose **Connect Account**, and select **Sign in with Google**.
-No client ID or client secret is required. Developers can use a different
-Desktop OAuth client from the advanced connection settings.
+The bundled client ID is used by default. If Google requires a client secret for
+your Cloud project, expand **Configure OAuth client credentials**, enter the
+secret once, and retry. Local Assistant stores the client configuration in the
+Windows-encrypted secret vault and reuses it for future sign-ins and token
+refreshes; it is never included in settings exports or source code. Developers
+can use a different Desktop OAuth client from the same settings.
 
 A successful account connection enables the installed Calendar skill. It is
 enabled again automatically after restart while that encrypted account
@@ -361,8 +365,10 @@ catalog digest, safe archive structure, trusted publisher signature, and exact
 manifest metadata before copying anything into the local skill directory. An
 installed extension remains disabled and has no permission grants. Open
 **Skills** to review and enable it; protected actions still request scoped
-permission and confirmation normally. See `docs/EXTENSION_HUB.md` for the
-platform JSON contract and package requirements.
+permission and confirmation normally. To remove it, select the installed entry
+in **Extension Hub** and choose **Uninstall Extension**; the package is removed
+locally and all runtime skill registrations for it are cleared. See
+`docs/EXTENSION_HUB.md` for the platform JSON contract and package requirements.
 
 The Diagnostics tab reports model, microphone, GPU, audio, database, and skill
 health with recovery guidance. Exported diagnostic bundles redact secrets and
