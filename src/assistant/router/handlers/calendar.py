@@ -40,9 +40,7 @@ def _strip_polite_prefix(value: str) -> str:
 
 
 def _event_text(match: re.Match[str]) -> str:
-    return _clean_event_text(
-        " ".join(value for value in match.groups() if isinstance(value, str))
-    )
+    return _clean_event_text(" ".join(value for value in match.groups() if isinstance(value, str)))
 
 
 def _day_start(value: datetime) -> datetime:
@@ -85,7 +83,12 @@ def _list_event_arguments(text: str, router: DeterministicRouter) -> dict[str, o
 def _setup_route(status: str) -> RouteResult | None:
     if status == "enabled":
         return None
-    if status == "disconnected":
+    if status == "reauthorization_required":
+        message = (
+            "Google Calendar is connected but needs additional account access. Open "
+            "Extension Hub, select Google Calendar, and manage the connected account."
+        )
+    elif status == "disconnected":
         message = (
             "Google Calendar is installed but no account is connected. Open Extension Hub, "
             "select Google Calendar, choose Connect Account, then Sign in with Google."

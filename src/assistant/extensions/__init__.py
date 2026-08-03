@@ -5,6 +5,8 @@ from assistant.extensions.platform import (
     ExtensionCatalog,
     ExtensionHubService,
     ExtensionPlatformClient,
+    ManagedExtensionRegistry,
+    ManagedExtensionSpec,
 )
 
 __all__ = (
@@ -12,4 +14,6 @@ __all__ = (
     "ExtensionCatalog",
     "ExtensionHubService",
     "ExtensionPlatformClient",
+    "ManagedExtensionRegistry",
+    "ManagedExtensionSpec",
 )

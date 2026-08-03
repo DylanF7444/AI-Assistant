@@ -60,7 +60,9 @@ permission, confirmation, and audit pipeline.
 
 The desktop Extension Hub can browse a configured HTTPS catalog and install
 compatible signed skill packages. Platform discovery never enables an extension
-or grants it permissions; see `docs/EXTENSION_HUB.md` for the catalog contract.
+or grants it permissions; see `docs/EXTENSION_HUB.md` for the catalog contract
+and `docs/ADDING_EXTENSIONS.md` for the contributor guide to managed and
+packaged extensions.
 
 The full desktop has two primary screens: a customizable metrics Dashboard and
 the conversational Assistant. The Dashboard includes local assistant and

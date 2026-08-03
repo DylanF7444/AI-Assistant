@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import logging
 import re
 from dataclasses import dataclass
@@ -33,11 +32,20 @@ from assistant.dashboard.storage import (
 from assistant.events import EventBus
 from assistant.execution.engine import ExecutionEngine
 from assistant.extensions.platform import (
-    CatalogExtension,
     ExtensionHubService,
     ExtensionPlatformClient,
+    ManagedExtensionRegistry,
+    ManagedExtensionSpec,
+)
+from assistant.integrations.connections import ConnectionBinding
+from assistant.integrations.gmail import (
+    GMAIL_SCOPE,
+    GmailAdapter,
+    GmailConnectionService,
+    GmailTokenManager,
 )
 from assistant.integrations.google_calendar import (
+    CALENDAR_SCOPE,
     GoogleCalendarAdapter,
     GoogleCalendarConnectionService,
     GoogleCalendarTokenManager,
@@ -88,6 +96,7 @@ from assistant.skills.builtin import (
     TimerSkill,
 )
 from assistant.skills.diagnostic import DiagnosticSkill
+from assistant.skills.gmail import GmailSkill
 from assistant.skills.google_calendar import GoogleCalendarSkill
 from assistant.skills.macros import MacroSkill
 from assistant.skills.media import MediaPresentSkill, MediaViewerControlSkill
@@ -120,6 +129,7 @@ from assistant.skills.windows import (
     WindowsSettingSkill,
 )
 from assistant.storage.aliases import AliasStore
+from assistant.storage.connections import ConnectionProfileStore
 from assistant.storage.database import AuditStore, Database, MetricsStore, SettingsStore
 from assistant.storage.history import HistoryStore
 from assistant.storage.knowledge import KnowledgeBaseStore
@@ -180,6 +190,7 @@ class Container:
     background_runtime: BackgroundRuntime
     dashboard: DashboardService
     secret_vault: SecretVault
+    connection_profiles: ConnectionProfileStore
     media_sessions: MediaSessionRegistry
     media_cache: RemoteMediaCache
 
@@ -390,26 +401,49 @@ def _google_calendar_skill_factory(secret_vault: SecretVault):
     )
 
 
-def _google_calendar_extension(secret_vault: SecretVault):
-    skill = _google_calendar_skill_factory(secret_vault)()
-    manifest = skill.manifest
-    extension = CatalogExtension(
-        extension_id=manifest.skill_id,
-        extension_type="skill",
-        version=manifest.version,
-        api_version=manifest.api_version,
-        display_name=manifest.display_name,
-        description=manifest.description,
-        publisher="Local Assistant",
-        category=manifest.category,
-        package_url="https://extensions.localassistant.invalid/google-calendar",
-        package_sha256=hashlib.sha256(manifest.model_dump_json().encode("utf-8")).hexdigest(),
-        permissions=manifest.permissions,
-        risk=manifest.risk,
-        featured=True,
-        source="first_party",
+def _gmail_skill_factory(secret_vault: SecretVault):
+    return lambda: GmailSkill(
+        GmailAdapter(GmailTokenManager(secret_vault)),
+        account=lambda: secret_vault.get("gmail_account"),
     )
-    return extension, manifest
+
+
+def _managed_extension_registry(secret_vault: SecretVault) -> ManagedExtensionRegistry:
+    google_calendar_factory = _google_calendar_skill_factory(secret_vault)
+    gmail_factory = _gmail_skill_factory(secret_vault)
+    google_calendar_connection = GoogleCalendarConnectionService(secret_vault)
+    gmail_connection = GmailConnectionService(secret_vault)
+    return ManagedExtensionRegistry(
+        (
+            ManagedExtensionSpec.from_factory(
+                google_calendar_factory,
+                package_slug="google-calendar",
+                featured=True,
+                connection=ConnectionBinding(
+                    service=google_calendar_connection,
+                    provider_id=google_calendar_connection.provider_id,
+                    required_scopes=(CALENDAR_SCOPE,),
+                    dialog_entry_point=(
+                        "assistant.ui.desktop.google_calendar_connection:"
+                        "GoogleCalendarConnectionDialog"
+                    ),
+                ),
+            ),
+            ManagedExtensionSpec.from_factory(
+                gmail_factory,
+                package_slug="gmail",
+                featured=True,
+                connection=ConnectionBinding(
+                    service=gmail_connection,
+                    provider_id=gmail_connection.provider_id,
+                    required_scopes=(GMAIL_SCOPE,),
+                    dialog_entry_point=(
+                        "assistant.ui.desktop.gmail_connection:GmailConnectionDialog"
+                    ),
+                ),
+            ),
+        )
+    )
 
 
 @dataclass
@@ -424,6 +458,7 @@ class _StorageServices:
     memory_store: MemoryStore
     vector_index: VectorIndex
     secret_vault: SecretVault
+    connection_profiles: ConnectionProfileStore
     schedule_store: ScheduleStore
     notification_store: NotificationStore
 
@@ -450,7 +485,9 @@ class _AudioServices:
 def _build_storage_services(settings: Settings, database: Database) -> _StorageServices:
     audit = AuditStore(database)
     metrics = MetricsStore(database)
-    file_access_policy = FileAccessPolicyStore(SettingsStore(database))
+    settings_store = SettingsStore(database)
+    file_access_policy = FileAccessPolicyStore(settings_store)
+    secret_vault = SecretVault(settings.data_dir / "secrets")
     return _StorageServices(
         audit=audit,
         metrics=metrics,
@@ -461,7 +498,8 @@ def _build_storage_services(settings: Settings, database: Database) -> _StorageS
         playbook_store=PlaybookStore(settings.data_dir / "playbooks"),
         memory_store=MemoryStore(database),
         vector_index=VectorIndex(database),
-        secret_vault=SecretVault(settings.data_dir / "secrets"),
+        secret_vault=secret_vault,
+        connection_profiles=ConnectionProfileStore(settings_store, secret_vault),
         schedule_store=ScheduleStore(database, audit=audit),
         notification_store=NotificationStore(database),
     )
@@ -501,14 +539,12 @@ def _build_registry(
     database: Database,
     storage: _StorageServices,
     events: EventBus,
+    managed_extensions: ManagedExtensionRegistry,
 ) -> tuple[SkillRegistry, MacroStore, MediaSessionRegistry, RemoteMediaCache]:
-    google_calendar_factory = _google_calendar_skill_factory(storage.secret_vault)
     registry = SkillRegistry(
         settings.data_dir / "skills",
         trusted_signing_keys=_decode_trusted_keys(settings.trusted_skill_keys),
-        managed_skill_factories={
-            "integration.google_calendar": google_calendar_factory,
-        },
+        managed_skill_factories=managed_extensions.skill_factories,
     )
     _register_core_skills(registry, storage.file_access_policy)
     _register_windows_skills(registry, storage.aliases, storage.memory_store)
@@ -651,11 +687,13 @@ def build_container(settings: Settings | None = None) -> Container:
     storage = _build_storage_services(settings, database)
     retrieval = _build_retrieval_services(settings, storage)
     events = EventBus()
+    managed_extensions = _managed_extension_registry(storage.secret_vault)
     registry, macro_store, media_sessions, media_cache = _build_registry(
         settings,
         database,
         storage,
         events,
+        managed_extensions,
     )
     extension_hub = ExtensionHubService(
         registry,
@@ -665,10 +703,7 @@ def build_container(settings: Settings | None = None) -> Container:
             package_max_bytes=settings.extension_package_max_bytes,
         ),
         audit=storage.audit,
-        managed_extensions=(_google_calendar_extension(storage.secret_vault),),
-        connection_services={
-            "integration.google_calendar": GoogleCalendarConnectionService(storage.secret_vault),
-        },
+        managed_registry=managed_extensions,
     )
     context_providers = _build_context_providers(settings, storage)
     confirmations = ConfirmationManager()
@@ -836,6 +871,7 @@ def build_container(settings: Settings | None = None) -> Container:
         background_runtime=background_runtime,
         dashboard=dashboard,
         secret_vault=storage.secret_vault,
+        connection_profiles=storage.connection_profiles,
         media_sessions=media_sessions,
         media_cache=media_cache,
     )

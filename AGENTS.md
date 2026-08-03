@@ -28,3 +28,8 @@ Recent commit messages are informal, often just `update`, so prefer improving cl
 ## Security & Configuration Tips
 
 This assistant treats transcripts and model output as untrusted input. Preserve schema validation, scoped permissions, confirmations for sensitive actions, and local audit behavior. Do not commit secrets, local model files, generated installers, or machine-specific configuration.
+
+## Codex Agent Roles
+
+- Use `gpt-5.6-sol` with `xhigh` reasoning as the main planning agent for this project.
+- Use `gpt-5.6-luna` with `max` reasoning for delegated implementation work. When spawning an implementation sub-agent, set the explicit model and reasoning override because child agents otherwise inherit the parent model.

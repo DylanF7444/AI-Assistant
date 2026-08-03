@@ -7,6 +7,7 @@ from assistant.router.handlers.devices_control import DeviceControlHandler
 from assistant.router.handlers.fallback import FallbackHandler
 from assistant.router.handlers.files import FileMutationHandler, FileSearchHandler
 from assistant.router.handlers.files_operation import FileOperationHandler
+from assistant.router.handlers.gmail import GmailHandler
 from assistant.router.handlers.media import MediaHandler
 from assistant.router.handlers.network import NetworkHandler
 from assistant.router.handlers.productivity import ProductivityHandler
@@ -16,6 +17,7 @@ DEFAULT_ROUTE_HANDLERS: tuple[RouteHandler, ...] = (
     ControlHandler(),
     MemoryConversationHandler(),
     CalendarHandler(),
+    GmailHandler(),
     ProductivityHandler(),
     NetworkHandler(),
     DeviceStatusHandler(),

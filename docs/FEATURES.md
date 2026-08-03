@@ -1,6 +1,6 @@
 # Feature Catalog
 
-Updated July 25, 2026. This catalog lists the built-in features registered by
+Updated August 2, 2026. This catalog lists the built-in features registered by
 the application container. Optional integrations are implemented but require
 the relevant setting, credential, local service, or device to be configured.
 
@@ -33,6 +33,7 @@ the relevant setting, credential, local service, or device to be configured.
 | Network | `web.news_search` | Optional | Low | `network` | Retrieve current headlines with source and publication time for reports and briefings. |
 | Network | `web.search` | Optional | Low | `network` | Search the public web through DuckDuckGo or Brave Search. |
 | Connections | `integration.google_calendar` | Extension Hub/Optional | Dynamic | `integration.read`, `integration.write`, `network` | Install the first-party Hub extension, connect Google with in-app encrypted OAuth, and list or manage calendars, events, availability, invitations, settings, and sharing rules. |
+| Connections | `integration.gmail` | Extension Hub/Optional | Dynamic | `integration.read`, `integration.write`, `messaging`, `network` | Install the first-party Hub extension, connect Google with in-app encrypted OAuth, and search or read messages and threads, manage drafts and mailbox state, and send explicitly approved email. |
 | Media | `media.present` | Implemented/Optional remote | Low | `filesystem.read` or `network` | Present an exact approved local file or explicitly downloaded public HTTPS image, audio file, or video in the Assistant. |
 | Media | `media.viewer_control` | Implemented | Low | None | Control only the active in-app viewer: playback, seek, volume, rate, mute, fullscreen, stop, or close. |
 | Windows | `windows.application_window` | Implemented | High | `process.window` | Focus, minimize, maximize, close, move, or resize an approved application window. |
@@ -105,6 +106,10 @@ the relevant setting, credential, local service, or device to be configured.
   results, calendar and event CRUD, recurring instances, RSVP, free/busy,
   colors, settings, and confirmation-gated sharing and Workspace-admin
   ownership transfer.
+- Optional Gmail integration with desktop OAuth 2.0 PKCE, separately encrypted
+  Gmail tokens, scoped message/thread/draft permissions, bounded typed results,
+  Gmail-search queries, drafts, replies, sending, labels, read/unread, inbox,
+  star, and trash state. Permanent deletion and attachments are excluded.
 - Optional Playwright headless rendering in a fresh non-persistent context,
   with public-HTTPS-only navigation, bounded result-card extraction, read-only
   request methods, installed Edge/Chrome fallback, and no access to the user's

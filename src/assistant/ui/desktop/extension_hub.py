@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from typing import Any
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -319,8 +320,7 @@ class ExtensionHubPage(QWidget):
             f"Published by {extension.publisher}  ·  Managed first-party component"
             if extension.source == "first_party"
             else (
-                f"Published by {extension.publisher}  ·  "
-                f"{extension.extension_type.title()} package"
+                f"Published by {extension.publisher}  ·  {extension.extension_type.title()} package"
             )
         )
         self.description_label.setText(extension.description)
@@ -339,7 +339,12 @@ class ExtensionHubPage(QWidget):
 
         status = self.service.installation_status(extension.extension_id)
         connection_service = self._connection_service(extension.extension_id)
-        self.connection_button.setVisible(connection_service is not None and status == "installed")
+        dialog_entry_point = self._connection_dialog_entry_point(extension.extension_id)
+        self.connection_button.setVisible(
+            connection_service is not None
+            and dialog_entry_point is not None
+            and status == "installed"
+        )
         self.connection_button.setEnabled(not self._busy and not self.offline)
         self.uninstall_button.setVisible(status == "installed")
         self.uninstall_button.setEnabled(status == "installed" and not self._busy)
@@ -347,14 +352,19 @@ class ExtensionHubPage(QWidget):
             "Disable the global offline lock before connecting an account." if self.offline else ""
         )
         if connection_service is not None and status == "installed":
-            connected = connection_service.status().connected
+            connection_status = self._connection_status(extension.extension_id)
+            connected = bool(
+                getattr(
+                    connection_status,
+                    "authenticated",
+                    getattr(connection_status, "connected", False),
+                )
+            )
             self.connection_button.setText(
                 "Manage Connected Account" if connected else "Connect Account"
             )
         if not extension.compatible or status in {"id_in_use", "installed"}:
-            self.install_button.setText(
-                "Installed" if status == "installed" else "Unavailable"
-            )
+            self.install_button.setText("Installed" if status == "installed" else "Unavailable")
         else:
             self.install_button.setText("Install Extension")
         enabled = extension.compatible and status == "available" and not self._busy
@@ -363,6 +373,22 @@ class ExtensionHubPage(QWidget):
             message = (
                 f"This build supports API 1.0 skill packages, not "
                 f"{extension.extension_type} API {extension.api_version}."
+            )
+        elif (
+            status == "installed"
+            and self._connection_state(extension.extension_id) == "missing_scopes"
+        ):
+            message = (
+                "The account is connected but this extension needs additional access. "
+                "Manage the connected account to review the missing scopes."
+            )
+        elif status == "installed" and self._connection_state(extension.extension_id) in {
+            "reauthorization_required",
+            "error",
+        }:
+            message = (
+                "The connected account needs attention before this extension can run. "
+                "Manage the account to reconnect or review access."
             )
         elif status == "installed":
             message = "Installed locally. Review and enable it from the Skills tab."
@@ -450,11 +476,19 @@ class ExtensionHubPage(QWidget):
         service = self._connection_service(extension.extension_id)
         if service is None:
             return
-        from assistant.ui.desktop.google_calendar_connection import (
-            GoogleCalendarConnectionDialog,
-        )
-
-        dialog = GoogleCalendarConnectionDialog(service, self)
+        entry_point = self._connection_dialog_entry_point(extension.extension_id)
+        if entry_point is None:
+            return
+        module_name, _, object_name = entry_point.partition(":")
+        try:
+            dialog_factory = getattr(importlib.import_module(module_name), object_name)
+            dialog = dialog_factory(service, self)
+        except Exception as error:
+            self._operation_failed(f"The account configuration dialog could not be loaded: {error}")
+            return
+        if not hasattr(dialog, "connection_changed") or not hasattr(dialog, "exec"):
+            self._operation_failed("The account configuration dialog is invalid.")
+            return
         dialog.connection_changed.connect(
             lambda: self._sync_connection_state(extension.extension_id)
         )
@@ -470,6 +504,22 @@ class ExtensionHubPage(QWidget):
     def _connection_service(self, extension_id: str) -> Any | None:
         resolver = getattr(self.service, "connection_service", None)
         return resolver(extension_id) if resolver else None
+
+    def _connection_dialog_entry_point(self, extension_id: str) -> str | None:
+        resolver = getattr(self.service, "connection_dialog_entry_point", None)
+        return resolver(extension_id) if resolver else None
+
+    def _connection_status(self, extension_id: str) -> Any | None:
+        resolver = getattr(self.service, "connection_status", None)
+        if callable(resolver):
+            return resolver(extension_id)
+        connection = self._connection_service(extension_id)
+        return connection.status() if connection is not None else None
+
+    def _connection_state(self, extension_id: str) -> str | None:
+        status = self._connection_status(extension_id)
+        state = getattr(status, "state", None)
+        return getattr(state, "value", str(state)) if state is not None else None
 
     def _extension_installed(self, manifest: Any) -> None:
         self.install_status.setText(

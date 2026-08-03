@@ -9,6 +9,7 @@ import stat
 import tempfile
 import zipfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 from urllib.error import HTTPError, URLError
@@ -20,6 +21,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from assistant import API_VERSION
 from assistant.contracts import PermissionScope, RiskLevel, SkillManifest
+from assistant.integrations.connections import (
+    ConnectionBinding,
+    ConnectionState,
+    ConnectionStatus,
+)
+from assistant.skills.base import Skill
 from assistant.skills.registry import SkillRegistry
 from assistant.storage.database import AuditStore
 
@@ -77,6 +84,107 @@ class ExtensionCatalog(_StrictModel):
         if len(ids) != len(set(ids)):
             raise ValueError("Extension catalog contains duplicate extension IDs")
         return self
+
+
+@dataclass(frozen=True)
+class ManagedExtensionSpec:
+    """One reviewed implementation and all of its Hub composition metadata."""
+
+    extension: CatalogExtension
+    manifest: SkillManifest
+    factory: Callable[[], Skill]
+    connection: ConnectionBinding | None = None
+
+    def __post_init__(self) -> None:
+        if self.extension.source != "first_party":
+            raise ValueError("Managed extensions must use the first_party source")
+        implementation = self.factory()
+        if not isinstance(implementation, Skill):
+            raise TypeError("Managed extension factory must return a Skill")
+        if implementation.manifest != self.manifest:
+            raise ValueError("Managed extension manifest does not match its factory")
+        _verify_catalog_metadata(self.extension, self.manifest)
+
+    @property
+    def extension_id(self) -> str:
+        return self.extension.extension_id
+
+    @classmethod
+    def from_factory(
+        cls,
+        factory: Callable[[], Skill],
+        *,
+        publisher: str = "Local Assistant",
+        package_slug: str | None = None,
+        featured: bool = False,
+        connection: ConnectionBinding | None = None,
+    ) -> ManagedExtensionSpec:
+        implementation = factory()
+        if not isinstance(implementation, Skill):
+            raise TypeError("Managed extension factory must return a Skill")
+        manifest = SkillManifest.model_validate(implementation.manifest)
+        slug = package_slug or manifest.skill_id.replace(".", "-").replace("_", "-")
+        if not slug or any(
+            character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in slug
+        ):
+            raise ValueError("Managed extension package slug is invalid")
+        extension = CatalogExtension(
+            extension_id=manifest.skill_id,
+            extension_type="skill",
+            version=manifest.version,
+            api_version=manifest.api_version,
+            display_name=manifest.display_name,
+            description=manifest.description,
+            publisher=publisher,
+            category=manifest.category,
+            package_url=f"https://extensions.localassistant.invalid/{slug}",
+            package_sha256=hashlib.sha256(manifest.model_dump_json().encode("utf-8")).hexdigest(),
+            permissions=manifest.permissions,
+            risk=manifest.risk,
+            featured=featured,
+            source="first_party",
+        )
+        return cls(
+            extension=extension,
+            manifest=manifest,
+            factory=factory,
+            connection=connection,
+        )
+
+
+class ManagedExtensionRegistry:
+    """Provider-neutral source of managed factories, catalog entries and connections."""
+
+    def __init__(self, specs: tuple[ManagedExtensionSpec, ...] = ()) -> None:
+        ids = [spec.extension_id for spec in specs]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Managed extension registry contains duplicate extension IDs")
+        self._specs = {spec.extension_id: spec for spec in specs}
+
+    def __contains__(self, extension_id: str) -> bool:
+        return extension_id in self._specs
+
+    def get(self, extension_id: str) -> ManagedExtensionSpec:
+        try:
+            return self._specs[extension_id]
+        except KeyError as error:
+            raise KeyError(f"Unknown managed extension: {extension_id}") from error
+
+    @property
+    def specs(self) -> tuple[ManagedExtensionSpec, ...]:
+        return tuple(self._specs.values())
+
+    @property
+    def catalog_extensions(self) -> tuple[CatalogExtension, ...]:
+        return tuple(spec.extension for spec in self._specs.values())
+
+    @property
+    def skill_factories(self) -> dict[str, Callable[[], Skill]]:
+        return {extension_id: spec.factory for extension_id, spec in self._specs.items()}
+
+    def connection(self, extension_id: str) -> ConnectionBinding | None:
+        spec = self._specs.get(extension_id)
+        return spec.connection if spec else None
 
 
 Reader = Callable[[str, int, float], bytes]
@@ -176,22 +284,26 @@ class ExtensionHubService:
         client: ExtensionPlatformClient,
         *,
         audit: AuditStore | None = None,
+        managed_registry: ManagedExtensionRegistry | None = None,
         managed_extensions: tuple[tuple[CatalogExtension, SkillManifest], ...] = (),
         connection_services: dict[str, Any] | None = None,
+        connection_dialogs: dict[str, str] | None = None,
     ) -> None:
         self.registry = registry
         self.client = client
         self.audit = audit
-        self._managed_extensions = {
-            extension.extension_id: (extension, manifest)
-            for extension, manifest in managed_extensions
-        }
-        self._connection_services = connection_services or {}
-        self._catalog = ExtensionCatalog(
-            extensions=tuple(
-                extension for extension, _manifest in self._managed_extensions.values()
+        if managed_registry is not None and (
+            managed_extensions or connection_services or connection_dialogs
+        ):
+            raise ValueError(
+                "Use managed_registry or the legacy managed extension arguments, not both"
             )
+        self.managed_registry = managed_registry or self._legacy_managed_registry(
+            managed_extensions,
+            connection_services or {},
+            connection_dialogs or {},
         )
+        self._catalog = ExtensionCatalog(extensions=self.managed_registry.catalog_extensions)
 
     @property
     def catalog_url(self) -> str | None:
@@ -205,22 +317,18 @@ class ExtensionHubService:
         previous_url = self.client.catalog_url
         self.client.configure(catalog_url, timeout_seconds=timeout_seconds)
         if previous_url != self.client.catalog_url:
-            self._catalog = ExtensionCatalog(
-                extensions=tuple(
-                    extension for extension, _manifest in self._managed_extensions.values()
-                )
-            )
+            self._catalog = ExtensionCatalog(extensions=self.managed_registry.catalog_extensions)
 
     async def refresh(self) -> tuple[CatalogExtension, ...]:
         remote = await asyncio.to_thread(self.client.fetch_catalog)
-        managed = tuple(extension for extension, _manifest in self._managed_extensions.values())
+        managed = self.managed_registry.catalog_extensions
         catalog = ExtensionCatalog(
             extensions=(
                 *managed,
                 *(
                     extension
                     for extension in remote.extensions
-                    if extension.extension_id not in self._managed_extensions
+                    if extension.extension_id not in self.managed_registry
                 ),
             )
         )
@@ -248,41 +356,64 @@ class ExtensionHubService:
         return "id_in_use"
 
     def connection_service(self, extension_id: str) -> Any | None:
-        return self._connection_services.get(extension_id)
+        binding = self.managed_registry.connection(extension_id)
+        return binding.service if binding else None
+
+    def connection_binding(self, extension_id: str) -> ConnectionBinding | None:
+        return self.managed_registry.connection(extension_id)
+
+    def connection_dialog_entry_point(self, extension_id: str) -> str | None:
+        binding = self.connection_binding(extension_id)
+        return binding.dialog_entry_point if binding else None
+
+    def connection_status(self, extension_id: str) -> ConnectionStatus | None:
+        binding = self.connection_binding(extension_id)
+        return binding.status() if binding else None
 
     def skill_availability(
         self, extension_id: str
-    ) -> Literal["enabled", "disabled", "disconnected", "unavailable"]:
+    ) -> Literal[
+        "enabled",
+        "disabled",
+        "disconnected",
+        "reauthorization_required",
+        "unavailable",
+    ]:
         availability = self.registry.availability(extension_id)
-        service = self.connection_service(extension_id)
-        if availability != "unavailable" and service is not None:
-            status = service.status()
-            if not bool(getattr(status, "connected", False)):
+        status = self.connection_status(extension_id)
+        if availability != "unavailable" and status is not None:
+            if status.state in {
+                ConnectionState.MISSING_SCOPES,
+                ConnectionState.REAUTHORIZATION_REQUIRED,
+                ConnectionState.ERROR,
+            }:
+                return "reauthorization_required"
+            if not status.usable:
                 return "disconnected"
         return availability
 
     def sync_connection_state(self, extension_id: str) -> bool:
         """Enable an installed connection skill while its account remains connected."""
-        service = self.connection_service(extension_id)
-        if service is None:
+        binding = self.connection_binding(extension_id)
+        if binding is None:
             return False
         try:
             self.registry.inspect(extension_id)
         except KeyError:
             return False
-        status = service.status()
-        connected = bool(getattr(status, "connected", False))
-        if connected:
+        status = binding.status()
+        if status.usable:
             self.registry.enable(extension_id)
         else:
             self.registry.disable(extension_id)
-        return connected
+        return status.usable
 
     def sync_connected_extensions(self) -> tuple[str, ...]:
         return tuple(
-            extension_id
-            for extension_id in self._connection_services
-            if self.sync_connection_state(extension_id)
+            spec.extension_id
+            for spec in self.managed_registry.specs
+            if spec.connection is not None
+            if self.sync_connection_state(spec.extension_id)
         )
 
     async def install(self, extension_id: str) -> SkillManifest:
@@ -303,7 +434,7 @@ class ExtensionHubService:
         if status == "id_in_use":
             raise ValueError("This extension ID is already used by a built-in skill")
         try:
-            if extension_id in self._managed_extensions:
+            if extension_id in self.managed_registry:
                 manifest = await asyncio.to_thread(self._install_managed, extension)
             else:
                 manifest = await asyncio.to_thread(self._install_skill, extension)
@@ -352,8 +483,7 @@ class ExtensionHubService:
             await asyncio.to_thread(self.registry.uninstall, extension_id)
             install_dir = self.registry.install_dir
             if install_dir is not None and (
-                (install_dir / extension_id).exists()
-                or (install_dir / extension_id).is_symlink()
+                (install_dir / extension_id).exists() or (install_dir / extension_id).is_symlink()
             ):
                 raise OSError(f"Could not fully remove the installed extension: {extension_id}")
         except Exception as error:
@@ -375,15 +505,53 @@ class ExtensionHubService:
         )
 
     def _install_managed(self, extension: CatalogExtension) -> SkillManifest:
-        _catalog_entry, manifest = self._managed_extensions[extension.extension_id]
-        _verify_catalog_metadata(extension, manifest)
-        installed = self.registry.install_managed(manifest)
+        spec = self.managed_registry.get(extension.extension_id)
+        _verify_catalog_metadata(extension, spec.manifest)
+        installed = self.registry.install_managed(spec.manifest)
         try:
             self.registry.load_installed(installed.skill_id)
         except Exception:
             self.registry.uninstall(installed.skill_id)
             raise
         return installed
+
+    def _legacy_managed_registry(
+        self,
+        managed_extensions: tuple[tuple[CatalogExtension, SkillManifest], ...],
+        connection_services: dict[str, Any],
+        connection_dialogs: dict[str, str],
+    ) -> ManagedExtensionRegistry:
+        specs: list[ManagedExtensionSpec] = []
+        managed_ids = {extension.extension_id for extension, _manifest in managed_extensions}
+        unknown_services = set(connection_services).difference(managed_ids)
+        unknown_dialogs = set(connection_dialogs).difference(managed_ids)
+        if unknown_services or unknown_dialogs:
+            raise ValueError("Connection metadata references an unknown managed extension")
+        for extension, manifest in managed_extensions:
+            factory = self.registry.managed_skill_factories.get(extension.extension_id)
+            if factory is None:
+                raise ValueError(
+                    f"Managed extension factory is unavailable: {extension.extension_id}"
+                )
+            service = connection_services.get(extension.extension_id)
+            binding = (
+                ConnectionBinding(
+                    service=service,
+                    provider_id=getattr(service, "provider_id", extension.extension_id),
+                    dialog_entry_point=connection_dialogs.get(extension.extension_id),
+                )
+                if service is not None
+                else None
+            )
+            specs.append(
+                ManagedExtensionSpec(
+                    extension=extension,
+                    manifest=manifest,
+                    factory=factory,
+                    connection=binding,
+                )
+            )
+        return ManagedExtensionRegistry(tuple(specs))
 
     def _install_skill(self, extension: CatalogExtension) -> SkillManifest:
         payload = self.client.download(extension)

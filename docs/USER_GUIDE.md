@@ -223,6 +223,31 @@ require an authenticated public HTTPS webhook receiver, which this local-only
 desktop application does not provide. The global offline lock blocks Calendar
 API calls and OAuth refreshes.
 
+### Gmail setup
+
+Gmail is an optional first-party Extension Hub component. Open **Extension
+Hub**, select **Gmail**, choose **Install Extension**, then connect the account
+from the Gmail detail page. Review the declared `integration.read`,
+`integration.write`, `messaging`, and `network` capabilities before enabling
+the skill. Gmail authorization is separate from Google Calendar authorization;
+its refresh and access tokens are encrypted separately in the local secret
+vault.
+
+The connection requests Google's `gmail.modify` scope. It supports reading and
+searching messages and threads, listing labels and drafts, composing drafts,
+sending or replying to email, changing labels, marking read or unread,
+archiving, moving mail into the inbox, starring, and moving messages or threads
+to and from trash. It intentionally does not request the broader Gmail scope
+needed to bypass trash and permanently delete mail, and it does not send or
+download attachments.
+
+Common requests such as “check my Gmail,” “show my unread emails,” “find email
+from person@example.com,” and fully specified “send an email to … subject …
+saying …” commands route locally without a language model. Reading, mailbox
+changes, and sending use separate exact-target permission checks. Sending and
+replying are high-risk actions and remain subject to the normal confirmation
+flow. The global offline lock blocks Gmail API calls and OAuth refreshes.
+
 ## Commands, permissions, and confirmation
 
 Skills receive no sensitive permission by default. When a command needs one,

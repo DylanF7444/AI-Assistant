@@ -16,21 +16,19 @@ another mode is a security claim that must be reviewed together with every
 resolved permission; capability-gated execution still rejects the interactive
 and device-changing capabilities listed in `docs/BACKGROUND_EXECUTION.md`.
 
-Validate a packaged skill with:
-
-```powershell
-assistant-skill path\to\skill
-```
-
-Every package needs `manifest.json`. New and updated skills are disabled until
-reviewed. An update that adds permissions requires renewed approval. Skills
-must never invoke an unrestricted shell from model or transcript text.
+Every package needs `manifest.json`. Validate release packages with a
+`SkillRegistry` configured with the publisher's trusted public key; the exact
+signing and validation workflow is in `docs/ADDING_EXTENSIONS.md`. New and
+updated skills are disabled until reviewed. An update that adds permissions
+requires renewed approval. Skills must never invoke an unrestricted shell from
+model or transcript text.
 
 The desktop Extension Hub can discover compatible packages from a configured
 HTTPS catalog. Catalog presence is not trust: installation also requires a
 matching SHA-256 digest, a signature from a locally trusted publisher key, safe
 archive paths, API compatibility, and exact catalog/manifest agreement. See
-`docs/EXTENSION_HUB.md` for the platform contract.
+`docs/EXTENSION_HUB.md` for the platform contract and
+`docs/ADDING_EXTENSIONS.md` for the contributor setup checklist.
 
 Use the same feature format when documenting a new built-in or packaged skill:
 status, skill ID, risk, permissions, and user-facing capability.

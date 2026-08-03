@@ -130,3 +130,69 @@ def test_first_party_extension_is_visible_without_platform_catalog(qtbot):
     assert page.detail_title.text() == "Google Calendar"
     assert page.install_button.isEnabled()
     assert "first-party" in page.install_status.text().casefold()
+
+
+@pytest.mark.ui
+def test_connection_dialog_is_loaded_from_registered_entry_point(qtbot, monkeypatch):
+    extension = CatalogExtension(
+        extension_id="integration.example",
+        version="1.0.0",
+        api_version="1.0",
+        display_name="Example",
+        description="Exercise provider-neutral account configuration.",
+        publisher="Local Assistant",
+        category="Connections",
+        package_url="https://extensions.localassistant.invalid/example",
+        package_sha256="0" * 64,
+        source="first_party",
+    )
+    service = _FakeHub(extension)
+    service.installed = True
+    service.catalog = ExtensionCatalog(extensions=(extension,))
+    connection = SimpleNamespace(
+        status=lambda: SimpleNamespace(
+            connected=False,
+            authenticated=False,
+            state="disconnected",
+        )
+    )
+    service.connection_service = lambda _extension_id: connection
+    service.connection_dialog_entry_point = lambda _extension_id: (
+        "example.connection_ui:ExampleConnectionDialog"
+    )
+    service.connection_status = lambda _extension_id: connection.status()
+    synced = []
+    service.sync_connection_state = lambda extension_id: synced.append(extension_id)
+    loaded_modules = []
+    opened = []
+
+    class _Signal:
+        def connect(self, callback):
+            self.callback = callback
+
+    class _Dialog:
+        def __init__(self, received_service, parent):
+            assert received_service is connection
+            self.parent = parent
+            self.connection_changed = _Signal()
+
+        def exec(self):
+            opened.append(self)
+
+    def import_module(module_name):
+        loaded_modules.append(module_name)
+        return SimpleNamespace(ExampleConnectionDialog=_Dialog)
+
+    monkeypatch.setattr(
+        "assistant.ui.desktop.extension_hub.importlib.import_module",
+        import_module,
+    )
+    page = ExtensionHubPage(service, offline=False)
+    qtbot.addWidget(page)
+
+    page.configure_connection()
+
+    assert loaded_modules == ["example.connection_ui"]
+    assert len(opened) == 1
+    assert opened[0].parent is page
+    assert synced == [extension.extension_id]

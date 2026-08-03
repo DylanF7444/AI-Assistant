@@ -114,6 +114,7 @@ def test_calendar_read_routes_use_bounded_relative_time_windows():
     [
         ("disabled", "installed but disabled"),
         ("disconnected", "no account is connected"),
+        ("reauthorization_required", "needs additional account access"),
         ("unavailable", "not installed"),
     ],
 )
