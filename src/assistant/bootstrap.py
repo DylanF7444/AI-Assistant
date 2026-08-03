@@ -50,7 +50,25 @@ from assistant.integrations.google_calendar import (
     GoogleCalendarConnectionService,
     GoogleCalendarTokenManager,
 )
+from assistant.integrations.google_drive import (
+    DRIVE_READ_SCOPE,
+    GoogleDriveAdapter,
+    GoogleDriveConnectionService,
+    GoogleDriveTokenManager,
+)
 from assistant.integrations.headless_browser import PlaywrightHeadlessBrowser
+from assistant.integrations.api_token import ApiTokenProvider
+from assistant.integrations.github import GitHubAdapter, GitHubConnectionService
+from assistant.integrations.microsoft_graph import (
+    ONEDRIVE_READ_SCOPE,
+    OUTLOOK_CALENDAR_READ_SCOPE,
+    OUTLOOK_MAIL_READ_SCOPE,
+    MicrosoftGraphAdapter,
+    MicrosoftGraphConnectionService,
+    MicrosoftGraphTokenManager,
+)
+from assistant.integrations.notion import NotionAdapter, NotionConnectionService
+from assistant.integrations.slack import SlackAdapter, SlackConnectionService
 from assistant.integrations.web import CloudModelClient, WebClient
 from assistant.language.embeddings import (
     FallbackEmbeddingProvider,
@@ -98,9 +116,16 @@ from assistant.skills.builtin import (
 from assistant.skills.diagnostic import DiagnosticSkill
 from assistant.skills.gmail import GmailSkill
 from assistant.skills.google_calendar import GoogleCalendarSkill
+from assistant.skills.google_drive import GoogleDriveSkill
+from assistant.skills.github import GitHubSkill
 from assistant.skills.macros import MacroSkill
 from assistant.skills.media import MediaPresentSkill, MediaViewerControlSkill
 from assistant.skills.memory import MemorySkill
+from assistant.skills.notion import NotionSkill
+from assistant.skills.onedrive import OneDriveSkill
+from assistant.skills.outlook_calendar import OutlookCalendarSkill
+from assistant.skills.outlook_mail import OutlookMailSkill
+from assistant.skills.slack import SlackSkill
 from assistant.skills.network import (
     CloudAskSkill,
     HeadlessReadSkill,
@@ -408,11 +433,65 @@ def _gmail_skill_factory(secret_vault: SecretVault):
     )
 
 
+def _google_drive_skill_factory(secret_vault: SecretVault):
+    return lambda: GoogleDriveSkill(
+        GoogleDriveAdapter(GoogleDriveTokenManager(secret_vault))
+    )
+
+
+def _outlook_mail_skill_factory(secret_vault: SecretVault):
+    return lambda: OutlookMailSkill(
+        MicrosoftGraphAdapter(MicrosoftGraphTokenManager(secret_vault))
+    )
+
+
+def _outlook_calendar_skill_factory(secret_vault: SecretVault):
+    return lambda: OutlookCalendarSkill(
+        MicrosoftGraphAdapter(MicrosoftGraphTokenManager(secret_vault))
+    )
+
+
+def _onedrive_skill_factory(secret_vault: SecretVault):
+    return lambda: OneDriveSkill(
+        MicrosoftGraphAdapter(MicrosoftGraphTokenManager(secret_vault))
+    )
+
+
+def _slack_skill_factory(secret_vault: SecretVault):
+    return lambda: SlackSkill(
+        SlackAdapter(ApiTokenProvider(SlackConnectionService(secret_vault)))
+    )
+
+
+def _notion_skill_factory(secret_vault: SecretVault):
+    return lambda: NotionSkill(
+        NotionAdapter(ApiTokenProvider(NotionConnectionService(secret_vault)))
+    )
+
+
+def _github_skill_factory(secret_vault: SecretVault):
+    return lambda: GitHubSkill(
+        GitHubAdapter(ApiTokenProvider(GitHubConnectionService(secret_vault)))
+    )
+
+
 def _managed_extension_registry(secret_vault: SecretVault) -> ManagedExtensionRegistry:
     google_calendar_factory = _google_calendar_skill_factory(secret_vault)
     gmail_factory = _gmail_skill_factory(secret_vault)
+    google_drive_factory = _google_drive_skill_factory(secret_vault)
+    outlook_mail_factory = _outlook_mail_skill_factory(secret_vault)
+    outlook_calendar_factory = _outlook_calendar_skill_factory(secret_vault)
+    onedrive_factory = _onedrive_skill_factory(secret_vault)
+    slack_factory = _slack_skill_factory(secret_vault)
+    notion_factory = _notion_skill_factory(secret_vault)
+    github_factory = _github_skill_factory(secret_vault)
     google_calendar_connection = GoogleCalendarConnectionService(secret_vault)
     gmail_connection = GmailConnectionService(secret_vault)
+    google_drive_connection = GoogleDriveConnectionService(secret_vault)
+    microsoft_graph_connection = MicrosoftGraphConnectionService(secret_vault)
+    slack_connection = SlackConnectionService(secret_vault)
+    notion_connection = NotionConnectionService(secret_vault)
+    github_connection = GitHubConnectionService(secret_vault)
     return ManagedExtensionRegistry(
         (
             ManagedExtensionSpec.from_factory(
@@ -440,6 +519,92 @@ def _managed_extension_registry(secret_vault: SecretVault) -> ManagedExtensionRe
                     dialog_entry_point=(
                         "assistant.ui.desktop.gmail_connection:GmailConnectionDialog"
                     ),
+                ),
+            ),
+            ManagedExtensionSpec.from_factory(
+                google_drive_factory,
+                package_slug="google-drive",
+                featured=True,
+                connection=ConnectionBinding(
+                    service=google_drive_connection,
+                    provider_id=google_drive_connection.provider_id,
+                    required_scopes=(DRIVE_READ_SCOPE,),
+                    dialog_entry_point=(
+                        "assistant.ui.desktop.google_drive_connection:"
+                        "GoogleDriveConnectionDialog"
+                    ),
+                ),
+            ),
+            ManagedExtensionSpec.from_factory(
+                outlook_mail_factory,
+                package_slug="outlook-mail",
+                featured=True,
+                connection=ConnectionBinding(
+                    service=microsoft_graph_connection,
+                    provider_id=microsoft_graph_connection.provider_id,
+                    required_scopes=(OUTLOOK_MAIL_READ_SCOPE,),
+                    dialog_entry_point=(
+                        "assistant.ui.desktop.microsoft_graph_connection:"
+                        "MicrosoftGraphConnectionDialog"
+                    ),
+                ),
+            ),
+            ManagedExtensionSpec.from_factory(
+                outlook_calendar_factory,
+                package_slug="outlook-calendar",
+                featured=True,
+                connection=ConnectionBinding(
+                    service=microsoft_graph_connection,
+                    provider_id=microsoft_graph_connection.provider_id,
+                    required_scopes=(OUTLOOK_CALENDAR_READ_SCOPE,),
+                    dialog_entry_point=(
+                        "assistant.ui.desktop.microsoft_graph_connection:"
+                        "MicrosoftGraphConnectionDialog"
+                    ),
+                ),
+            ),
+            ManagedExtensionSpec.from_factory(
+                onedrive_factory,
+                package_slug="onedrive",
+                featured=True,
+                connection=ConnectionBinding(
+                    service=microsoft_graph_connection,
+                    provider_id=microsoft_graph_connection.provider_id,
+                    required_scopes=(ONEDRIVE_READ_SCOPE,),
+                    dialog_entry_point=(
+                        "assistant.ui.desktop.microsoft_graph_connection:"
+                        "MicrosoftGraphConnectionDialog"
+                    ),
+                ),
+            ),
+            ManagedExtensionSpec.from_factory(
+                slack_factory,
+                package_slug="slack",
+                featured=True,
+                connection=ConnectionBinding(
+                    service=slack_connection,
+                    provider_id=slack_connection.provider_id,
+                    dialog_entry_point="assistant.ui.desktop.slack_connection:SlackConnectionDialog",
+                ),
+            ),
+            ManagedExtensionSpec.from_factory(
+                notion_factory,
+                package_slug="notion",
+                featured=True,
+                connection=ConnectionBinding(
+                    service=notion_connection,
+                    provider_id=notion_connection.provider_id,
+                    dialog_entry_point="assistant.ui.desktop.notion_connection:NotionConnectionDialog",
+                ),
+            ),
+            ManagedExtensionSpec.from_factory(
+                github_factory,
+                package_slug="github",
+                featured=True,
+                connection=ConnectionBinding(
+                    service=github_connection,
+                    provider_id=github_connection.provider_id,
+                    dialog_entry_point="assistant.ui.desktop.github_connection:GitHubConnectionDialog",
                 ),
             ),
         )

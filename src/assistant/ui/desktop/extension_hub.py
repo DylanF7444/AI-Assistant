@@ -482,7 +482,13 @@ class ExtensionHubPage(QWidget):
         module_name, _, object_name = entry_point.partition(":")
         try:
             dialog_factory = getattr(importlib.import_module(module_name), object_name)
-            dialog = dialog_factory(service, self)
+            dialog_service_resolver = getattr(self.service, "connection_dialog_service", None)
+            dialog_service = (
+                dialog_service_resolver(extension.extension_id)
+                if callable(dialog_service_resolver)
+                else service
+            )
+            dialog = dialog_factory(dialog_service, self)
         except Exception as error:
             self._operation_failed(f"The account configuration dialog could not be loaded: {error}")
             return

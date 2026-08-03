@@ -248,6 +248,91 @@ changes, and sending use separate exact-target permission checks. Sending and
 replying are high-risk actions and remain subject to the normal confirmation
 flow. The global offline lock blocks Gmail API calls and OAuth refreshes.
 
+### Google Drive setup
+
+Google Drive is an optional first-party Extension Hub component. Open
+**Extension Hub**, select **Google Drive**, choose **Install Extension**, then
+connect the account from the Google Drive detail page. Review the declared
+`integration.read` and `network` capabilities before enabling the skill.
+Drive authorization is separate from Google Calendar and Gmail authorization;
+its tokens are encrypted separately in the local secret vault.
+
+The first Drive slice requests read-only Drive access and supports searches such
+as “find my Drive for quarterly planning,” listing the files in the Drive root,
+listing a selected folder, and inspecting metadata for a selected result.
+Results are bounded and remain sensitive selectable items. Content downloads,
+uploads, moves, sharing changes, and deletes are intentionally not supported
+yet. The global offline lock blocks Drive API calls and OAuth refreshes.
+
+### Microsoft Graph setup
+
+Outlook Mail, Outlook Calendar, and OneDrive are optional first-party Extension
+Hub components backed by one Microsoft Graph connection boundary. Install the
+desired entry from **Extension Hub**, review its `integration.read` and
+`network` capabilities, then connect the account from that extension's detail
+page. The selected extension requests only its own read scope, while the
+encrypted Microsoft authorization is shared by the three read-only extensions.
+
+Microsoft requires an application registration. Expand **Configure OAuth client
+credentials** in the connection dialog and enter a Microsoft Entra desktop/public
+client ID before signing in. A client secret is normally not required for a
+public desktop client; if the provider requires one, it is stored encrypted and
+reused for future token refreshes. Access and refresh tokens never enter
+extension package code, transcripts, or the language model.
+
+The first Graph slice supports requests such as “find my Outlook mail for
+quarterly planning,” “show my Outlook calendar,” “find planning in my Outlook
+calendar,” “find my OneDrive for budget,” and listing OneDrive root items.
+Message previews, calendar event details, and file metadata are bounded and
+remain sensitive selectable items. Sending or editing mail, changing calendar
+events, downloading or uploading file content, and Microsoft To Do are deferred
+to later scope reviews. The global offline lock blocks Graph API calls and OAuth
+refreshes.
+
+### Slack setup
+
+Slack is an optional first-party Extension Hub component. Install **Slack** from
+**Extension Hub**, review its read-only `integration.read` and `network`
+capabilities, then open **Connect Account** and enter a Slack user token with
+only the read scopes required by the operations you intend to use, such as
+`search:read` and the relevant conversation read scopes. The token is encrypted
+for the current Windows account and never enters extension package code,
+transcripts, or the language model.
+
+The first Slack slice can search messages, list accessible conversations, read a
+bounded channel history, and read a selected thread. Results are sensitive
+selectable items. Sending messages, automatic DMs, reactions, file uploads,
+webhooks, and broad background ingestion are not enabled. Public OAuth
+installation remains a follow-up after a reviewed HTTPS callback relay is
+available for the desktop app.
+
+### Notion setup
+
+Install **Notion** from **Extension Hub**, then connect a Notion internal
+integration token or personal access token configured with read-only
+capabilities. Share the specific pages or data sources with the integration in
+Notion; a token alone does not grant access to unshared pages. The encrypted
+token stays in the Windows secret vault.
+
+The first Notion slice searches shared pages and data sources, inspects an exact
+page or data-source ID, and reads bounded child blocks. Page creation, edits,
+database queries, public OAuth onboarding, and workspace-wide ingestion are
+deferred. The global offline lock blocks Notion API calls.
+
+### GitHub setup
+
+Install **GitHub** from **Extension Hub**, then connect a fine-grained personal
+access token with read-only Metadata and issue access for the repositories you
+intend to inspect. The token is encrypted for the current Windows account and
+is not included in settings exports or assistant context. A narrower GitHub App
+authorization flow is planned for a later release.
+
+The first GitHub slice searches repositories and issues, lists repositories for
+the authenticated account, inspects an exact repository or issue, finds pull
+requests, and checks a repository's latest release. Comments, code pushes,
+workflow changes, repository secrets, branch deletion, and other mutations are
+not supported. The global offline lock blocks GitHub API calls.
+
 ## Commands, permissions, and confirmation
 
 Skills receive no sensitive permission by default. When a command needs one,

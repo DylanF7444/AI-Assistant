@@ -359,6 +359,10 @@ class ExtensionHubService:
         binding = self.managed_registry.connection(extension_id)
         return binding.service if binding else None
 
+    def connection_dialog_service(self, extension_id: str) -> Any | None:
+        binding = self.managed_registry.connection(extension_id)
+        return binding.dialog_service() if binding else None
+
     def connection_binding(self, extension_id: str) -> ConnectionBinding | None:
         return self.managed_registry.connection(extension_id)
 

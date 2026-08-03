@@ -34,6 +34,13 @@ the relevant setting, credential, local service, or device to be configured.
 | Network | `web.search` | Optional | Low | `network` | Search the public web through DuckDuckGo or Brave Search. |
 | Connections | `integration.google_calendar` | Extension Hub/Optional | Dynamic | `integration.read`, `integration.write`, `network` | Install the first-party Hub extension, connect Google with in-app encrypted OAuth, and list or manage calendars, events, availability, invitations, settings, and sharing rules. |
 | Connections | `integration.gmail` | Extension Hub/Optional | Dynamic | `integration.read`, `integration.write`, `messaging`, `network` | Install the first-party Hub extension, connect Google with in-app encrypted OAuth, and search or read messages and threads, manage drafts and mailbox state, and send explicitly approved email. |
+| Connections | `integration.google_drive` | Extension Hub/Optional | Medium | `integration.read`, `network` | Install the first-party Hub extension, connect Google with in-app encrypted OAuth, search Drive files and folders, list folder contents, and inspect bounded metadata for selected items. Content downloads and Drive changes are deferred. |
+| Connections | `integration.outlook_mail` | Extension Hub/Optional | Medium | `integration.read`, `network` | Install the first-party Hub extension, connect a Microsoft account with encrypted OAuth, search and inspect bounded Outlook Mail message metadata and previews. Sending, drafting, moving, and deleting are deferred. |
+| Connections | `integration.outlook_calendar` | Extension Hub/Optional | Medium | `integration.read`, `network` | Install the first-party Hub extension, connect a Microsoft account with encrypted OAuth, search and inspect bounded Outlook Calendar event metadata. Event changes and responses are deferred. |
+| Connections | `integration.onedrive` | Extension Hub/Optional | Medium | `integration.read`, `network` | Install the first-party Hub extension, connect a Microsoft account with encrypted OAuth, search OneDrive items, list children, and inspect bounded metadata. Content transfer and changes are deferred. |
+| Connections | `integration.slack` | Extension Hub/Optional | Medium | `integration.read`, `network` | Install the first-party Hub extension, connect an encrypted read-only Slack user token, search messages, discover conversations, and read bounded channel history or threads. Sends and file actions are deferred. |
+| Connections | `integration.notion` | Extension Hub/Optional | Medium | `integration.read`, `network` | Install the first-party Hub extension, connect an encrypted Notion read token, search shared pages/data sources, inspect metadata, and read bounded child blocks. Writes and broad ingestion are deferred. |
+| Connections | `integration.github` | Extension Hub/Optional | Medium | `integration.read`, `network` | Install the first-party Hub extension, connect an encrypted read-only GitHub token, search repositories/issues, inspect exact repositories/issues, find pull requests, and inspect the latest release. Writes and secrets access are deferred. |
 | Media | `media.present` | Implemented/Optional remote | Low | `filesystem.read` or `network` | Present an exact approved local file or explicitly downloaded public HTTPS image, audio file, or video in the Assistant. |
 | Media | `media.viewer_control` | Implemented | Low | None | Control only the active in-app viewer: playback, seek, volume, rate, mute, fullscreen, stop, or close. |
 | Windows | `windows.application_window` | Implemented | High | `process.window` | Focus, minimize, maximize, close, move, or resize an approved application window. |
@@ -110,6 +117,28 @@ the relevant setting, credential, local service, or device to be configured.
   Gmail tokens, scoped message/thread/draft permissions, bounded typed results,
   Gmail-search queries, drafts, replies, sending, labels, read/unread, inbox,
   star, and trash state. Permanent deletion and attachments are excluded.
+- Optional Google Drive integration with separately encrypted desktop OAuth 2.0
+  PKCE tokens, bounded file/folder search, folder listing, metadata inspection,
+  selectable sensitive results, fixed-origin API access, and read-only
+  `integration.read` permissions. Content downloads, uploads, sharing, moves,
+  and deletes are deferred to a later scope review.
+- Optional Microsoft Graph integrations with a shared, scope-aware desktop OAuth
+  boundary and separately managed read-only Outlook Mail, Outlook Calendar, and
+  OneDrive extensions. Results are bounded typed sensitive items and use fixed
+  Graph and Microsoft identity origins. Message/event changes, file content
+  transfer, and To Do actions are deferred to later scope reviews.
+- Optional Slack integration with encrypted read-only token storage, bounded
+  message search, conversation discovery, channel history, and thread reads.
+  Public OAuth callback-relay support, sends, DMs, uploads, and broad ingestion
+  are deferred.
+- Optional Notion integration with encrypted read-token storage, current API
+  version headers, shared-page/data-source search, page metadata, and bounded
+  child-block reads. Public OAuth, page writes, database queries, and broad
+  workspace ingestion are deferred.
+- Optional GitHub integration with encrypted read-only token storage, fixed API
+  version headers, repository/issue search, exact repository and issue reads,
+  pull-request discovery, and latest-release inspection. GitHub App onboarding,
+  comments, code, workflow, secret, and repository mutations are deferred.
 - Optional Playwright headless rendering in a fresh non-persistent context,
   with public-HTTPS-only navigation, bounded result-card extraction, read-only
   request methods, installed Edge/Chrome fallback, and no access to the user's

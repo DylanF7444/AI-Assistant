@@ -7,6 +7,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 from pydantic import BaseModel
@@ -99,6 +100,22 @@ class _ScopedConnection:
         return ConnectionStatus(connected=False)
 
 
+class _ConnectableScopedConnection(_ScopedConnection):
+    def __init__(self, granted_scopes: tuple[str, ...] = ()) -> None:
+        super().__init__(granted_scopes)
+        self.connect_calls = []
+
+    async def connect(self, client_id=None, *, client_secret=None, profile_id=None, required_scopes=()):
+        self.connect_calls.append(
+            (client_id, client_secret, profile_id, tuple(required_scopes))
+        )
+        return ConnectionStatus(
+            connected=True,
+            account="person@example.com",
+            granted_scopes=required_scopes,
+        )
+
+
 @pytest.mark.asyncio
 async def test_shared_connection_enables_only_extensions_with_granted_scopes(tmp_path):
     connection = _ScopedConnection(("calendar.read",))
@@ -176,6 +193,28 @@ def test_connection_binding_rejects_provider_service_identity_mismatch():
             service=_ScopedConnection(()),
             provider_id="different",
         )
+
+
+@pytest.mark.asyncio
+async def test_connection_dialog_service_injects_profile_and_required_scopes():
+    connection = _ConnectableScopedConnection()
+    profile_id = UUID("11111111-1111-1111-1111-111111111111")
+    binding = ConnectionBinding(
+        service=connection,
+        provider_id="example",
+        profile_id=profile_id,
+        required_scopes=("mail.read",),
+    )
+
+    status = await binding.dialog_service().connect(
+        "client",
+        client_secret="secret",
+    )
+
+    assert connection.connect_calls == [
+        ("client", "secret", profile_id, ("mail.read",)),
+    ]
+    assert status.usable is True
 
 
 def test_legacy_managed_connections_preserve_declared_provider_identity(tmp_path):

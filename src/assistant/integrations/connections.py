@@ -181,6 +181,8 @@ class ConnectionProfile(StrictModel):
 class ConnectionService(Protocol):
     def status(self, **kwargs: Any) -> Any: ...
 
+    async def connect(self, *args: Any, **kwargs: Any) -> Any: ...
+
     async def test(self) -> Any: ...
 
     async def disconnect(self) -> Any: ...
@@ -212,18 +214,22 @@ class ConnectionBinding:
                 raise ValueError("Connection dialog entry point must use module:Object syntax")
 
     def status(self) -> ConnectionStatus:
-        status_method = self.service.status
-        signature = inspect.signature(status_method)
-        accepts_kwargs = any(
-            parameter.kind == inspect.Parameter.VAR_KEYWORD
-            for parameter in signature.parameters.values()
-        )
-        kwargs: dict[str, Any] = {}
-        if accepts_kwargs or "profile_id" in signature.parameters:
-            kwargs["profile_id"] = self.profile_id
-        if accepts_kwargs or "required_scopes" in signature.parameters:
-            kwargs["required_scopes"] = self.required_scopes
-        raw = status_method(**kwargs)
+        raw = self._invoke(self.service.status)
+        return self._coerce(raw)
+
+    def dialog_service(self) -> ConnectionDialogService:
+        """Return a dialog-safe service bound to this extension's requirements.
+
+        The Hub has one provider-neutral dialog contract, while providers may
+        expose either the original no-argument lifecycle methods or the newer
+        profile/scope-aware methods. The facade injects binding metadata only
+        when the underlying method accepts it, so several Hub entries can share
+        one provider authorization without silently requesting every scope.
+        """
+
+        return ConnectionDialogService(self)
+
+    def _coerce(self, raw: Any) -> ConnectionStatus:
         return ConnectionStatus.coerce(
             raw,
             provider_id=self.provider_id,
@@ -231,6 +237,60 @@ class ConnectionBinding:
             required_scopes=self.required_scopes,
         )
 
+    def _invoke(self, method: Any, *args: Any, **kwargs: Any) -> Any:
+        signature = inspect.signature(method)
+        accepts_kwargs = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+        bound_kwargs = dict(kwargs)
+        if accepts_kwargs or "profile_id" in signature.parameters:
+            bound_kwargs["profile_id"] = self.profile_id
+        if accepts_kwargs or "required_scopes" in signature.parameters:
+            bound_kwargs["required_scopes"] = self.required_scopes
+        return method(*args, **bound_kwargs)
+
     @property
     def connection_key(self) -> tuple[str, UUID | None]:
         return self.provider_id, self.profile_id
+
+
+class ConnectionDialogService:
+    """Adapter passed to provider-neutral account dialogs.
+
+    It delegates non-lifecycle attributes such as ``configured_client_id``
+    and ``default_client_id`` to the reviewed provider service. Lifecycle
+    calls are bound to the owning ``ConnectionBinding`` and therefore carry
+    the correct profile and incremental-consent scope set.
+    """
+
+    def __init__(self, binding: ConnectionBinding) -> None:
+        self.binding = binding
+        self.provider_id = binding.provider_id
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.binding.service, name)
+
+    def status(self) -> ConnectionStatus:
+        return self.binding.status()
+
+    async def connect(self, *args: Any, **kwargs: Any) -> ConnectionStatus:
+        method = getattr(self.binding.service, "connect", None)
+        if not callable(method):
+            raise AttributeError("Connection service does not support account connection")
+        result = self.binding._invoke(method, *args, **kwargs)
+        if inspect.isawaitable(result):
+            result = await result
+        return self.binding._coerce(result)
+
+    async def test(self) -> ConnectionStatus:
+        result = self.binding._invoke(self.binding.service.test)
+        if inspect.isawaitable(result):
+            result = await result
+        return self.binding._coerce(result)
+
+    async def disconnect(self) -> ConnectionStatus:
+        result = self.binding._invoke(self.binding.service.disconnect)
+        if inspect.isawaitable(result):
+            result = await result
+        return self.binding._coerce(result)
