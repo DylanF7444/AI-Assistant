@@ -362,7 +362,7 @@ def test_schema_six_migration_backfills_incomplete_reminders(tmp_path):
 
     assert inspect(database.engine).has_table("schedules")
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 10
+        assert session.get(SchemaVersionRow, 1).version == 11
         reminder = session.query(ItemRow).filter_by(kind="reminder").one()
         assert reminder.completed
     schedules = ScheduleStore(database).list()

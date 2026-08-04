@@ -106,16 +106,19 @@ code. Community packages continue to use the isolated worker boundary.
 First-party account connections are configured from the extension's Hub detail
 page. OAuth tokens remain in the host Windows-encrypted secret vault and are
 never passed to either first-party extension arguments or community package
-workers. Google Calendar and Gmail use this path with separate account tokens
-and API scopes, so either extension can be connected or disconnected
-independently.
+workers. Google Calendar, Gmail, and Google Drive use one shared encrypted
+Google account authorization. Each binding still declares its own required API
+scope, so installing or connecting one product does not grant another product's
+capability automatically. Disconnecting the shared Google account signs out all
+three Google extensions together.
 
 The current bootstrap bindings are:
 
 | Managed skill | Provider ID | Required scope | Dialog entry point |
 | --- | --- | --- | --- |
-| `integration.google_calendar` | `google_calendar` | `CALENDAR_SCOPE` (`https://www.googleapis.com/auth/calendar`) | `assistant.ui.desktop.google_calendar_connection:GoogleCalendarConnectionDialog` |
-| `integration.gmail` | `gmail` | `GMAIL_SCOPE` (`https://www.googleapis.com/auth/gmail.modify`) | `assistant.ui.desktop.gmail_connection:GmailConnectionDialog` |
+| `integration.google_calendar` | `google` | `CALENDAR_SCOPE` (`https://www.googleapis.com/auth/calendar`) | `assistant.ui.desktop.google_calendar_connection:GoogleCalendarConnectionDialog` |
+| `integration.gmail` | `google` | `GMAIL_SCOPE` (`https://www.googleapis.com/auth/gmail.modify`) | `assistant.ui.desktop.gmail_connection:GmailConnectionDialog` |
+| `integration.google_drive` | `google` | `DRIVE_READ_SCOPE` (`https://www.googleapis.com/auth/drive.readonly`) | `assistant.ui.desktop.google_drive_connection:GoogleDriveConnectionDialog` |
 
 ## Managed extension composition
 
@@ -142,8 +145,8 @@ lookups. `bootstrap.py` creates the registry once, passes its factories to
 the catalog entry, persisted installation, runtime factory, and dialog
 metadata on one stable extension ID. The binding separately requires its
 `provider_id` to match the connection service's provider namespace; that ID
-may intentionally differ from the extension ID. Google Calendar and Gmail are
-the current managed entries in this registry.
+may intentionally differ from the extension ID. Google Calendar, Gmail, and
+Google Drive are the current managed entries in this registry.
 
 Managed entries are merged into the remote catalog and take precedence over a
 remote entry with the same ID. Installing a managed entry persists its
@@ -217,9 +220,12 @@ profile for that provider when available; provider authorization revocation is
 still the connection service's responsibility. The active profile map wins
 when valid, otherwise the first enabled profile is used. `bootstrap.py` creates
 one store with the application settings store and secret vault and exposes it
-on the application container. Existing Gmail and Google Calendar connections
-retain their provider-specific secret names and current independent behavior;
-new profile-aware providers can adopt the shared store incrementally.
+on the application container. The Google Calendar, Gmail, and Google Drive Hub
+entries share one Google provider service and encrypted authorization while
+retaining product-specific required scopes. Older product-specific Google secret
+names are migrated only when the stored accounts are unambiguous; different
+legacy accounts remain isolated until the user explicitly connects one shared
+account.
 
 ## Provider-neutral connection dialogs
 
@@ -235,8 +241,8 @@ connection service and dialog entry point are present. The global offline lock
 disables it. A new provider therefore registers its service, required scopes,
 profile selection, and dialog entry point in its `ConnectionBinding`; it does
 not require a new provider branch in the Hub UI. The current bindings point to
-the Google Calendar and Gmail dialog entry points, preserving those dialogs as
-the reference implementations.
+the Google Calendar, Gmail, and Google Drive dialog entry points, preserving
+those dialogs as the reference implementations.
 
 ## Reusable OAuth and HTTP clients
 
@@ -301,9 +307,9 @@ Connection compatibility is also deliberate. `ConnectionStatus.coerce()` can
 adapt an older status object that only exposes `connected`, `account`,
 `healthy`, and `message`, deriving the new state and scope fields. A
 `ConnectionBinding` inspects the service's `status()` signature and passes
-profile and scope requirements only when supported. Existing Gmail and Google
-Calendar services therefore keep their established status methods, token
-names, OAuth dialogs, and independent account lifecycle while participating in
-the shared Hub lifecycle. New integrations should target the registry and
-binding APIs directly; compatibility support is for incremental migration, not
-a reason to duplicate provider-specific Hub wiring.
+profile and scope requirements only when supported. Existing direct Gmail,
+Google Calendar, and Google Drive service classes remain available for
+compatibility, while the application Hub uses the shared Google service and
+common token namespace. New integrations should target the registry and binding
+APIs directly; compatibility support is for incremental migration, not a reason
+to duplicate provider-specific Hub wiring.

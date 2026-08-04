@@ -268,6 +268,33 @@ class ScheduleRunRow(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class LogicChoiceHistoryRow(Base):
+    __tablename__ = "logic_choice_history"
+    history_key: Mapped[str] = mapped_column(String(200), primary_key=True)
+    recent_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class LogicWorkflowStateRow(Base):
+    __tablename__ = "logic_workflow_state"
+    schedule_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    schedule_revision: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    success_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    condition_true_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    recent_choice_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    stopped: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    stop_reason: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class LogicCheckpointRow(Base):
+    __tablename__ = "logic_checkpoints"
+    checkpoint_key: Mapped[str] = mapped_column(String(500), primary_key=True)
+    option_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class NotificationRow(Base):
     __tablename__ = "notifications"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -315,7 +342,7 @@ class BackgroundAuthorizationRow(Base):
 
 
 class Database:
-    CURRENT_SCHEMA_VERSION = 10
+    CURRENT_SCHEMA_VERSION = 11
 
     def __init__(self, url: str) -> None:
         self.url = url
@@ -390,6 +417,10 @@ class Database:
                 DashboardMetricSampleRow.__table__.create(self.engine, checkfirst=True)
             if version == 9:
                 NotificationRow.__table__.create(self.engine, checkfirst=True)
+            if version == 10:
+                LogicChoiceHistoryRow.__table__.create(self.engine, checkfirst=True)
+                LogicWorkflowStateRow.__table__.create(self.engine, checkfirst=True)
+                LogicCheckpointRow.__table__.create(self.engine, checkfirst=True)
             version += 1
         session.get(SchemaVersionRow, 1).version = version  # type: ignore[union-attr]
 

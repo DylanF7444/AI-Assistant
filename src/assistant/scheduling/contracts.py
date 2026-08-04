@@ -15,6 +15,7 @@ from assistant.contracts import (
     SkillCall,
     StrictModel,
 )
+from assistant.logic.contracts import LogicWorkflow
 
 
 def _require_aware(value: datetime, field_name: str) -> datetime:
@@ -147,8 +148,13 @@ class FrozenPlanAction(StrictModel):
     plan: ExecutionPlan
 
 
+class LogicWorkflowAction(StrictModel):
+    kind: Literal["logic_workflow"] = "logic_workflow"
+    workflow: LogicWorkflow
+
+
 ScheduledAction = Annotated[
-    NotificationAction | FixedSkillAction | FrozenPlanAction,
+    NotificationAction | FixedSkillAction | FrozenPlanAction | LogicWorkflowAction,
     Field(discriminator="kind"),
 ]
 ACTION_ADAPTER = TypeAdapter(ScheduledAction)
@@ -193,8 +199,17 @@ class RunPolicy(StrictModel):
     max_catch_up_runs: int = Field(default=1, ge=0, le=10)
     concurrency: Literal["skip", "queue_one"] = "queue_one"
     max_attempts: int = Field(default=1, ge=1, le=3)
+    retry_delay_seconds: int = Field(default=5, ge=1, le=3_600)
+    retry_backoff: Literal["fixed", "exponential"] = "exponential"
+    max_retry_delay_seconds: int = Field(default=300, ge=1, le=86_400)
     approval_window_seconds: int = Field(default=3_600, ge=30, le=604_800)
     max_consecutive_failures: int = Field(default=3, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def _retry_delays_are_consistent(self) -> RunPolicy:
+        if self.max_retry_delay_seconds < self.retry_delay_seconds:
+            raise ValueError("max_retry_delay_seconds cannot be shorter than retry_delay_seconds")
+        return self
 
 
 class SkillSnapshot(StrictModel):

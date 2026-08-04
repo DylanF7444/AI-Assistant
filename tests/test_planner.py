@@ -14,6 +14,7 @@ from assistant.skills.builtin import (
     manifest,
 )
 from assistant.skills.diagnostic import DiagnosticSkill
+from assistant.skills.logic import ChooseInput, ChooseOutput
 from assistant.skills.network import HeadlessReadSkill, NewsSearchSkill
 from assistant.skills.scheduling import ScheduleSkill
 from assistant.skills.windows import (
@@ -467,6 +468,88 @@ async def test_planner_rejects_a_false_claim_that_a_recurring_fetch_was_created(
     assert decision.intent.name == "core.schedule"
     assert decision.intent.arguments["operation"] == "create_action"
     assert "deferred an available skill call" in provider.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_planner_selects_typed_choose_for_an_immediate_random_choice():
+    choose_manifest = manifest(
+        skill_id="core.choose",
+        display_name="Choose",
+        description="Choose one item at random or in rotation.",
+        input_model=ChooseInput,
+        output_model=ChooseOutput,
+    )
+    provider = FakeProvider(
+        {
+            "disposition": "skill",
+            "skill_id": "core.choose",
+            "arguments": {
+                "items": ["tacos", "pasta", "curry"],
+                "strategy": "random",
+            },
+            "answer": None,
+            "confidence": 0.99,
+            "clarification": None,
+        }
+    )
+    planner = LocalPlanner(provider, SkillRetriever((choose_manifest,)))
+
+    decision = await planner.plan_decision("Choose a random dinner from tacos, pasta, curry")
+
+    assert decision.intent is not None
+    assert decision.intent.name == "core.choose"
+    assert decision.intent.arguments["items"] == ["tacos", "pasta", "curry"]
+    assert "Use core.choose" in provider.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_planner_can_author_a_bounded_conditional_logic_schedule():
+    output = {
+        "disposition": "skill",
+        "skill_id": "core.schedule",
+        "arguments": {
+            "operation": "create_logic",
+            "name": "Check the calculation",
+            "delay_seconds": 60,
+            "workflow": {
+                "check": {
+                    "skill_id": "core.calculator",
+                    "arguments": {"expression": "6 * 7"},
+                },
+                "when": {
+                    "reference": "check.data.value",
+                    "operator": "greater_than",
+                    "value": 40,
+                },
+                "action": {
+                    "kind": "notification",
+                    "title": "Calculation ready",
+                    "message": "{check.summary}",
+                },
+                "completion": {"stop_after_condition": True, "max_runs": 3},
+            },
+        },
+        "answer": None,
+        "confidence": 0.98,
+        "clarification": None,
+    }
+    provider = FakeProvider(output)
+    planner = LocalPlanner(
+        provider,
+        SkillRetriever((ScheduleSkill(object()).manifest, CalculatorSkill.manifest)),
+    )
+
+    decision = await planner.plan_decision(
+        "In one minute, check whether six times seven is above forty, notify me, then stop"
+    )
+
+    assert decision.intent is not None
+    assert decision.intent.name == "core.schedule"
+    assert decision.intent.arguments["operation"] == "create_logic"
+    assert decision.intent.arguments["workflow"]["completion"]["max_runs"] == 3
+    assert "create_logic" in provider.last_prompt
+    assert "does not require a separate condition" in provider.last_prompt
+    assert "does not require a separate registered notification skill" in provider.last_prompt
 
 
 @pytest.mark.asyncio

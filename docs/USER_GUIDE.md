@@ -86,6 +86,44 @@ NAME now`, `snooze schedule NAME for ten minutes`, or `delete schedule NAME` to
 manage them. Calendar schedules use the configured IANA time zone and preserve
 their local wall-clock time across daylight-saving changes.
 
+The assistant also understands bounded logic requests. Immediate requests such
+as `pick one at random from soup, tacos, and pasta` use the local choice skill.
+Unseeded choices use fresh operating-system entropy, while retrying the same
+execution keeps its checkpointed result. Stateful strategies automatically use
+a stable history for the same option set, so `choose from red, green, or blue
+using least-recent selection and avoid the last choice` continues rotating even
+when no explicit history name is supplied. An explicit phrase such as `remember
+the history as colors` gives that history a reusable name.
+
+Immediate probability requests use the chance skill. For example, `give me a 20
+percent chance of a Surprise notification and an 80 percent chance of doing
+nothing` requests notification permission once, rolls immediately, and treats
+the non-triggering branch as an intentional no-op. It does not require a second
+condition or event. A future or recurring probability can schedule that same
+chance skill.
+
+Scheduled requests can combine one check, a condition, a selection, and an
+action, for example `every morning choose an open task I have not picked
+recently and notify me; stop after five runs` or `every five minutes calculate
+6 * 7 and notify me if the result is above 40, then stop`. `in ten minutes`
+creates a durable one-time trigger; interval and calendar phrases use the same
+scheduler as reminders.
+
+Logic schedules always have a hard run bound (100 by default, up to 10,000) and
+may stop earlier after the condition becomes true, after a specified number of
+successful actions, or at an expiry time. Random choices are retry-stable and
+may use weights, a seed, recent-choice exclusion, round-robin, or least-recent
+selection. A check can contribute selectable items only when its skill returns
+non-sensitive structured result items; sensitive items are never copied into
+the choice layer. Notification templates expose only the selected ID, label,
+and value plus the check status, summary, and item count.
+
+Creation of standing background authority still receives normal review. Every
+nested action is a concrete registered skill call frozen when the schedule is
+created, so later model output cannot change it. You can inspect, pause, run,
+or stop these schedules with the same Automations commands and controls used
+for ordinary reminders.
+
 The full **Automations** tab shows live jobs, active/paused/pending schedules,
 their next run and risk, pending approvals, and recent run history. From there
 you can pause or resume one schedule, run it now, revoke its background
@@ -184,9 +222,11 @@ Calendar**, choose **Install Extension**, then review and enable it in
 **Skills**.
 
 The extension uses Local Assistant's Google Desktop OAuth client and the full
-Calendar scope so the same connection can perform explicitly approved reads and
-changes. Disable the global offline lock, return to the Google Calendar entry in
-**Extension Hub**, choose **Connect Account**, and select **Sign in with Google**.
+Calendar scope so the same shared Google account can perform explicitly approved
+reads and changes. Disable the global offline lock, return to the Google Calendar
+entry in **Extension Hub**, choose **Connect Account**, and select **Sign in with
+Google**. The first Google extension you connect establishes the shared account;
+Gmail and Drive reuse it and request only their additional product scopes.
 The bundled client ID is used by default. If Google requires a client secret for
 your Cloud project, expand **Configure OAuth client credentials**, enter the
 secret once, and retry. Local Assistant stores the client configuration in the
@@ -229,9 +269,10 @@ Gmail is an optional first-party Extension Hub component. Open **Extension
 Hub**, select **Gmail**, choose **Install Extension**, then connect the account
 from the Gmail detail page. Review the declared `integration.read`,
 `integration.write`, `messaging`, and `network` capabilities before enabling
-the skill. Gmail authorization is separate from Google Calendar authorization;
-its refresh and access tokens are encrypted separately in the local secret
-vault.
+the skill. Gmail uses the shared Google account established by Calendar or
+Drive when one is already connected, and requests only its additional Gmail
+scope. A single encrypted Google authorization is shared by all three Google
+extensions.
 
 The connection requests Google's `gmail.modify` scope. It supports reading and
 searching messages and threads, listing labels and drafts, composing drafts,
@@ -254,8 +295,14 @@ Google Drive is an optional first-party Extension Hub component. Open
 **Extension Hub**, select **Google Drive**, choose **Install Extension**, then
 connect the account from the Google Drive detail page. Review the declared
 `integration.read` and `network` capabilities before enabling the skill.
-Drive authorization is separate from Google Calendar and Gmail authorization;
-its tokens are encrypted separately in the local secret vault.
+Drive uses the shared encrypted Google account authorization used by Calendar
+and Gmail. If Drive is the first Google extension connected, its sign-in becomes
+the account used by the other Google extensions; later connections request only
+the missing Drive, Calendar, or Gmail scope.
+
+Disconnecting Google from any of these extension pages revokes the shared
+authorization and signs out Calendar, Gmail, and Drive together. Switching to a
+different Google account requires disconnecting the current shared account first.
 
 The first Drive slice requests read-only Drive access and supports searches such
 as “find my Drive for quarterly planning,” listing the files in the Drive root,

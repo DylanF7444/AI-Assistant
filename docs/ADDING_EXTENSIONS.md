@@ -392,10 +392,12 @@ reviewed provider service. Deleting a profile removes its referenced secrets;
 provider revocation remains the service's responsibility.
 
 `bootstrap.py` creates one `ConnectionProfileStore` with `SettingsStore` and
-`SecretVault` and exposes it on the application container. Existing Gmail and
-Google Calendar implementations intentionally retain their provider-specific
-secret names and separate authorization lifecycle. A new profile-aware
-provider can adopt the store without changing those integrations.
+`SecretVault` and exposes it on the application container. The direct Gmail,
+Google Calendar, and Google Drive service classes remain backward-compatible for
+callers that construct them explicitly. The desktop Hub composes the Google
+entries through one shared provider service and common encrypted authorization,
+with each binding retaining its own required scopes. A new profile-aware
+provider can adopt the store without changing those direct integration APIs.
 
 For desktop OAuth, use `run_loopback_authorization()` and
 `OAuthTokenManager` from `assistant.integrations.oauth`:
@@ -468,10 +470,11 @@ service itself supplies them.
 original `connected`, `account`, `healthy`, and `message` fields. A binding
 inspects the `status()` signature and supplies `profile_id` and
 `required_scopes` only when the service supports those keyword arguments.
-This keeps the existing Google Calendar and Gmail connection services and
-dialogs working while new providers adopt the shared status model. Preserve
-their separate token names and account lifecycles; do not silently merge
-existing authorization data into a new profile schema.
+This keeps the direct Google Calendar, Gmail, and Google Drive connection
+services and dialogs working while new providers adopt the shared status model.
+The desktop Hub performs a guarded migration from their old token names into
+the shared Google authorization only when legacy account identity is
+unambiguous; do not silently merge different accounts.
 
 ## Adding a signed catalog package
 

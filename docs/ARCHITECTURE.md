@@ -93,6 +93,25 @@ occurrence, claims it with a lease, validates its action and policy digests, and
 re-enters the normal registry, schema, file-policy, permission, confirmation,
 execution, cancellation, audit, and metrics pipeline.
 
+The optional logic layer is an additive scheduled-action variant rather than a
+second execution system. The planner maps an immediate selection to
+`core.choose`, and maps delayed or recurring control flow to `core.schedule`
+with a `logic_workflow` action. A logic workflow may contain one frozen check,
+a typed predicate over its structured result, a random or history-driven selection, one
+notification or frozen registered-skill action, and an explicit completion
+policy. Delay and repetition remain ordinary scheduler triggers; `max_runs`,
+expiry, condition, and success limits provide the stop behavior.
+
+At authoring time, every possible nested skill call is schema-validated and
+snapshotted. Its permissions, exact targets, background compatibility, and risk
+are folded into the existing schedule authorization. At run time, the logic
+evaluator can inspect only whitelisted `SkillResult` fields and non-sensitive
+typed result items. Selected calls still re-enter `ExecutionEngine`; the model
+does not generate code or reinterpret the workflow when it fires. SQLite stores
+bounded choice history, retry-stable choice checkpoints, and run/success/stop
+counters, while raw check results remain subject to the existing run-result and
+audit handling.
+
 The desktop owns one long-lived background asyncio loop. SQLite occurrence keys
 and compare-and-set leases prevent duplicate claims across processes; a Windows
 per-user mutex prevents duplicate desktop runtimes. Lease heartbeats protect

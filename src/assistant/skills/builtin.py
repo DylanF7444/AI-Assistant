@@ -83,6 +83,8 @@ def _category_for_skill(skill_id: str) -> str:
         "core.timer",
         "core.datetime",
         "core.calculator",
+        "core.chance",
+        "core.choose",
         "core.tasks",
         "core.notes",
         "core.reminder",

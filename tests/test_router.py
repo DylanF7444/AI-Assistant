@@ -213,6 +213,127 @@ def test_schedule_management_routes(text, arguments):
     assert result.intent.arguments == arguments
 
 
+def test_random_choice_routes_to_typed_choose_skill():
+    result = DeterministicRouter().route("pick a random item from tacos, pasta, or curry")
+
+    assert result.intent is not None
+    assert result.intent.name == "core.choose"
+    assert result.intent.arguments == {
+        "items": ("tacos", "pasta", "curry"),
+        "strategy": "random",
+    }
+
+    between = DeterministicRouter().route("choose between tea and coffee")
+    assert between.intent is not None
+    assert between.intent.name == "core.choose"
+    assert between.intent.arguments["items"] == ("tea", "coffee")
+
+
+def test_advanced_choice_constraints_route_with_stable_history():
+    result = DeterministicRouter().route(
+        "Choose from red, green, or blue using least-recent selection, "
+        "avoid the last choice, and remember the history as colors."
+    )
+
+    assert result.intent is not None
+    assert result.intent.name == "core.choose"
+    assert result.intent.arguments == {
+        "items": ("red", "green", "blue"),
+        "strategy": "least_recent",
+        "avoid_recent": 1,
+        "history_key": "colors",
+    }
+    assert result.needs_llm is False
+
+
+def test_reported_delayed_choice_maps_directly_to_logic_schedule():
+    result = DeterministicRouter().route(
+        "In one minute, choose tea, coffee, or water at random and notify me "
+        "with the choice. Stop after one run."
+    )
+
+    assert result.intent is not None
+    assert result.intent.name == "core.schedule"
+    assert result.intent.arguments["operation"] == "create_logic"
+    assert result.intent.arguments["delay_seconds"] == 60
+    workflow = result.intent.arguments["workflow"]
+    assert workflow["action"]["kind"] == "notification"
+    assert workflow["completion"]["max_runs"] == 1
+    assert [item["label"] for item in workflow["selection"]["options"]] == [
+        "tea",
+        "coffee",
+        "water",
+    ]
+
+
+def test_reported_conditional_calculation_maps_directly_to_logic_schedule():
+    result = DeterministicRouter().route(
+        "Every five minutes, calculate 6 * 7. If the result is greater than 40, "
+        "notify me with the result and then stop. Maximum three runs."
+    )
+
+    assert result.intent is not None
+    assert result.intent.name == "core.schedule"
+    arguments = result.intent.arguments
+    assert arguments["recurrence"] == {"frequency": "minutes", "interval": 5}
+    workflow = arguments["workflow"]
+    assert workflow["check"] == {
+        "skill_id": "core.calculator",
+        "arguments": {"expression": "6 * 7"},
+    }
+    assert workflow["when"]["operator"] == "greater_than"
+    assert workflow["completion"] == {
+        "stop_after_condition": True,
+        "max_runs": 3,
+    }
+
+
+def test_reported_probability_request_maps_to_immediate_chance_skill():
+    result = DeterministicRouter().route(
+        "give me a 20 percent chance of a Surprise notification and an 80 percent "
+        "chance of doing nothing."
+    )
+
+    assert result.intent is not None
+    assert result.intent.name == "core.chance"
+    assert result.intent.arguments == {
+        "probability_percent": 20,
+        "title": "Surprise",
+        "message": "Surprise!",
+    }
+    assert result.needs_llm is False
+
+
+def test_scheduled_probability_needs_no_external_condition():
+    result = DeterministicRouter().route(
+        "Every day at 9 AM, give me a 20 percent chance of a Surprise notification "
+        "and an 80 percent chance of doing nothing. Stop after ten runs."
+    )
+
+    assert result.intent is not None
+    assert result.intent.name == "core.schedule"
+    arguments = result.intent.arguments
+    assert arguments["operation"] == "create_logic"
+    assert arguments["recurrence"] == {
+        "frequency": "daily",
+        "interval": 1,
+        "local_time": "09:00:00",
+    }
+    workflow = arguments["workflow"]
+    assert "check" not in workflow
+    assert "when" not in workflow
+    assert workflow["action"]["call"]["skill_id"] == "core.chance"
+    assert workflow["completion"]["max_runs"] == 10
+
+
+def test_stop_reminder_is_an_easy_pause_alias():
+    result = DeterministicRouter().route("stop reminder stretch")
+
+    assert result.intent is not None
+    assert result.intent.name == "core.schedule"
+    assert result.intent.arguments == {"operation": "pause", "schedule": "stretch"}
+
+
 @pytest.mark.parametrize(
     ("text", "canonical", "application"),
     [

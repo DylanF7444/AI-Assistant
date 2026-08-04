@@ -15,6 +15,8 @@ the relevant setting, credential, local service, or device to be configured.
 | Area | Skill ID | Status | Risk | Permissions | Capability |
 | --- | --- | --- | --- | --- | --- |
 | Core | `core.calculator` | Implemented | Low | None | Evaluate arithmetic locally without executing code. |
+| Core | `core.chance` | Implemented | Low | `notification.create` | Roll an immediate percentage chance and show the requested notification only when it triggers. |
+| Core | `core.choose` | Implemented | Low | None | Choose from two to 100 values using random, seeded, weighted, round-robin, or least-recent selection with optional filters and bounded history. |
 | Core | `core.datetime` | Implemented | Low | None | Return the local date, time, or both. |
 | Core | `core.diagnostic` | Implemented | Low | None | Report local hardware, microphone, model, and skill health. |
 | Core | `core.file_access_policy` | Implemented | High | `settings.get`, `settings.set` | List and change filesystem read and write/delete allow and block lists. |
@@ -23,7 +25,7 @@ the relevant setting, credential, local service, or device to be configured.
 | Core | `core.notes` | Implemented | Low | None | Add, search, list, and delete local notes. |
 | Core | `core.playbook` | Extensible | Dynamic | None | Save, list, show/recall, enable, disable, or confirmation-gated delete of Markdown planning playbooks. |
 | Core | `core.reminder` | Implemented | Low | None | Create local reminders or alarms. |
-| Core | `core.schedule` | Implemented | Dynamic | None | Create recurring reminders or reviewed frozen actions/macros; list, inspect, pause, resume, revise, delete, snooze, run now, and inspect or clear run history. |
+| Core | `core.schedule` | Implemented | Dynamic | None | Create recurring reminders, reviewed frozen actions/macros, and bounded conditional or rotating logic workflows; list, inspect, pause, resume, revise, delete, snooze, run now, and inspect or clear run history. |
 | Core | `core.tasks` | Implemented | Low | None | Add, list, complete, and delete local tasks. |
 | Core | `core.timer` | Implemented | Low | None | Run a cancellable local timer. |
 | Core | `core.unit_conversion` | Implemented | Low | None | Convert common distance, weight, volume, and temperature units locally. |
@@ -108,20 +110,20 @@ the relevant setting, credential, local service, or device to be configured.
   Playbooks guide planning but cannot grant permissions or execute directly.
 - Optional MQTT, Home Assistant, Wyoming, web search/fetch, and cloud-model
   integrations behind explicit configuration and permissions.
-- Optional Google Calendar integration with desktop OAuth 2.0 PKCE, encrypted
-  refresh/access tokens, exact calendar/event permission targets, bounded typed
+- Optional Google Calendar integration backed by a shared Google desktop OAuth
+  2.0 PKCE account, exact calendar/event permission targets, bounded typed
   results, calendar and event CRUD, recurring instances, RSVP, free/busy,
   colors, settings, and confirmation-gated sharing and Workspace-admin
   ownership transfer.
-- Optional Gmail integration with desktop OAuth 2.0 PKCE, separately encrypted
-  Gmail tokens, scoped message/thread/draft permissions, bounded typed results,
+- Optional Gmail integration backed by the same scope-aware encrypted Google
+  account, with scoped message/thread/draft permissions, bounded typed results,
   Gmail-search queries, drafts, replies, sending, labels, read/unread, inbox,
   star, and trash state. Permanent deletion and attachments are excluded.
-- Optional Google Drive integration with separately encrypted desktop OAuth 2.0
-  PKCE tokens, bounded file/folder search, folder listing, metadata inspection,
-  selectable sensitive results, fixed-origin API access, and read-only
-  `integration.read` permissions. Content downloads, uploads, sharing, moves,
-  and deletes are deferred to a later scope review.
+- Optional Google Drive integration backed by the same encrypted Google account,
+  desktop OAuth 2.0 PKCE, bounded file/folder search, folder listing, metadata
+  inspection, selectable sensitive results, fixed-origin API access, and
+  read-only `integration.read` permissions. Content downloads, uploads, sharing,
+  moves, and deletes are deferred to a later scope review.
 - Optional Microsoft Graph integrations with a shared, scope-aware desktop OAuth
   boundary and separately managed read-only Outlook Mail, Outlook Calendar, and
   OneDrive extensions. Results are bounded typed sensitive items and use fixed
@@ -150,6 +152,11 @@ the relevant setting, credential, local service, or device to be configured.
   zones, DST handling, bounded misfire catch-up, multi-instance leases, restart
   reconciliation, durable result notifications, and an Automations control
   center.
+- A typed logic layer for immediate random/weighted/rotating choice and durable
+  delay, repetition, structured-result conditions, live non-sensitive item
+  filtering, retry backoff, no-repeat history, and stop-after-condition,
+  stop-after-success, maximum-run, or expiry limits. Nested actions are frozen
+  registered skill calls and use the normal authorization and execution path.
 - Revocable schedule-scoped background authorization for exact low-risk fixed
   skills and frozen macro plans, with capability/target/risk/runtime/rate bounds,
   skill drift detection, machine-bound restores, locked-session gating, and

@@ -30,7 +30,8 @@ AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
 # The OAuth desktop client identifies the Local Assistant application, not a
-# specific Google API. Gmail keeps separate user tokens and authorization.
+# specific Google API. The desktop Hub uses a shared Google authorization;
+# this direct service retains its legacy names for compatibility.
 DEFAULT_GMAIL_CLIENT_ID = DEFAULT_GOOGLE_CALENDAR_CLIENT_ID
 OAUTH_CLIENT_ID_NAME = "gmail_oauth_client_id"
 OAUTH_CLIENT_SECRET_NAME = "gmail_oauth_client_secret"

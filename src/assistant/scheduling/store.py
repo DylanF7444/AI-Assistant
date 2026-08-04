@@ -11,8 +11,10 @@ from pydantic import TypeAdapter
 from pydantic_core import to_jsonable_python
 from sqlalchemy import delete as sql_delete
 from sqlalchemy import or_, select, update
+from sqlalchemy.exc import IntegrityError
 
 from assistant.contracts import ResultStatus, RiskLevel
+from assistant.logic.contracts import LogicSkillAction
 from assistant.scheduling.clock import Clock, SystemClock
 from assistant.scheduling.contracts import (
     ACTION_ADAPTER,
@@ -23,6 +25,7 @@ from assistant.scheduling.contracts import (
     DeliveryPolicy,
     FixedSkillAction,
     FrozenPlanAction,
+    LogicWorkflowAction,
     NotificationAction,
     OneTimeTrigger,
     RecurrenceTrigger,
@@ -485,6 +488,54 @@ class ScheduleStore:
         self._notify_changed()
         return schedule
 
+    def complete(self, schedule_id: UUID, revision: int, reason: str) -> ScheduleDefinition:
+        """Atomically stop a bounded workflow if its authorized revision is still current."""
+        now = aware_utc(self.clock.now())
+        with self.database.session() as session:
+            row = session.get(ScheduleRow, str(schedule_id))
+            if row is None:
+                raise KeyError(schedule_id)
+            if row.revision != revision:
+                raise ValueError("Schedule revision changed before workflow completion")
+            if row.status not in {
+                ScheduleStatus.COMPLETED.value,
+                ScheduleStatus.DELETED.value,
+                ScheduleStatus.DISABLED.value,
+            }:
+                row.status = ScheduleStatus.COMPLETED.value
+                row.next_run_at = None
+            session.execute(
+                update(ScheduleRunRow)
+                .where(
+                    ScheduleRunRow.schedule_id == row.id,
+                    ScheduleRunRow.schedule_revision == revision,
+                    ScheduleRunRow.state.in_(
+                        [
+                            ScheduleRunState.PENDING.value,
+                            ScheduleRunState.AWAITING_APPROVAL.value,
+                        ]
+                    ),
+                )
+                .values(
+                    state=ScheduleRunState.CANCELLED.value,
+                    completed_at=now,
+                    blocked_reason="Workflow completion policy was met",
+                    retry_at=None,
+                )
+            )
+            row.review_reason = reason
+            row.updated_at = now
+            self._revoke_authorizations(session, row.id, now)
+        completed = self.get(schedule_id)
+        self._record_schedule_event(
+            "schedule_completed",
+            completed,
+            "completion_policy",
+            reason=reason,
+        )
+        self._notify_changed()
+        return completed
+
     def get_authorization(self, schedule_id: UUID) -> BackgroundAuthorization | None:
         with self.database.session() as session:
             row = session.scalar(
@@ -608,29 +659,39 @@ class ScheduleStore:
                     if existing is None:
                         run_id = str(uuid4())
                         skipped = skip_reason is not None
-                        session.add(
-                            ScheduleRunRow(
-                                id=run_id,
-                                schedule_id=row.id,
-                                schedule_revision=row.revision,
-                                occurrence_key=key,
-                                scheduled_for=scheduled_for,
-                                state=(
-                                    ScheduleRunState.SKIPPED.value
-                                    if skipped
-                                    else ScheduleRunState.PENDING.value
-                                ),
-                                attempt=0,
-                                lateness_seconds=lateness,
-                                idempotency_key=key,
-                                action_digest=row.action_digest,
-                                blocked_reason=skip_reason,
-                                created_at=now,
-                                completed_at=now if skipped else None,
-                            )
-                        )
-                        session.flush()
-                        created_ids.append(run_id)
+                        try:
+                            with session.begin_nested():
+                                session.add(
+                                    ScheduleRunRow(
+                                        id=run_id,
+                                        schedule_id=row.id,
+                                        schedule_revision=row.revision,
+                                        occurrence_key=key,
+                                        scheduled_for=scheduled_for,
+                                        state=(
+                                            ScheduleRunState.SKIPPED.value
+                                            if skipped
+                                            else ScheduleRunState.PENDING.value
+                                        ),
+                                        attempt=0,
+                                        lateness_seconds=lateness,
+                                        idempotency_key=key,
+                                        action_digest=row.action_digest,
+                                        blocked_reason=skip_reason,
+                                        created_at=now,
+                                        completed_at=now if skipped else None,
+                                    )
+                                )
+                                session.flush()
+                        except IntegrityError:
+                            # A concurrent scheduler materialized this exact
+                            # occurrence after our initial existence check.
+                            # The unique occurrence/idempotency keys are the
+                            # final authority, so keep the winning row and
+                            # preserve the rest of this transaction.
+                            pass
+                        else:
+                            created_ids.append(run_id)
                     row.last_run_at = scheduled_for
                     if occurrence_index == 0:
                         row.updated_at = now
@@ -1092,6 +1153,45 @@ class ScheduleStore:
             )
             return action.model_copy(
                 update={"plan": action.plan.model_copy(update={"steps": steps})}
+            )
+        if isinstance(action, LogicWorkflowAction):
+            workflow = action.workflow
+            check = (
+                revised_call(workflow.check, "logic-check")
+                if workflow.check is not None
+                else None
+            )
+            common_action = workflow.action
+            if isinstance(common_action, LogicSkillAction):
+                common_action = common_action.model_copy(
+                    update={"call": revised_call(common_action.call, "logic-action")}
+                )
+            selection = workflow.selection
+            if selection is not None:
+                options = tuple(
+                    option.model_copy(
+                        update={
+                            "action": revised_call(
+                                option.action,
+                                f"logic-choice-{option.option_id}",
+                            )
+                            if option.action is not None
+                            else None
+                        }
+                    )
+                    for option in selection.options
+                )
+                selection = selection.model_copy(update={"options": options})
+            return action.model_copy(
+                update={
+                    "workflow": workflow.model_copy(
+                        update={
+                            "check": check,
+                            "action": common_action,
+                            "selection": selection,
+                        }
+                    )
+                }
             )
         return action
 

@@ -37,28 +37,23 @@ from assistant.extensions.platform import (
     ManagedExtensionRegistry,
     ManagedExtensionSpec,
 )
+from assistant.integrations.api_token import ApiTokenProvider
 from assistant.integrations.connections import ConnectionBinding
+from assistant.integrations.github import GitHubAdapter, GitHubConnectionService
 from assistant.integrations.gmail import (
     GMAIL_SCOPE,
     GmailAdapter,
-    GmailConnectionService,
-    GmailTokenManager,
 )
+from assistant.integrations.google import GoogleConnectionService, GoogleTokenManager
 from assistant.integrations.google_calendar import (
     CALENDAR_SCOPE,
     GoogleCalendarAdapter,
-    GoogleCalendarConnectionService,
-    GoogleCalendarTokenManager,
 )
 from assistant.integrations.google_drive import (
     DRIVE_READ_SCOPE,
     GoogleDriveAdapter,
-    GoogleDriveConnectionService,
-    GoogleDriveTokenManager,
 )
 from assistant.integrations.headless_browser import PlaywrightHeadlessBrowser
-from assistant.integrations.api_token import ApiTokenProvider
-from assistant.integrations.github import GitHubAdapter, GitHubConnectionService
 from assistant.integrations.microsoft_graph import (
     ONEDRIVE_READ_SCOPE,
     OUTLOOK_CALENDAR_READ_SCOPE,
@@ -85,6 +80,7 @@ from assistant.language.retrieval import (
     WorkflowTemplateSemanticIndexer,
 )
 from assistant.logging import configure_logging
+from assistant.logic.store import LogicStateStore
 from assistant.models import ModelManager
 from assistant.orchestrator import AssistantOrchestrator
 from assistant.policy.confirmations import ConfirmationManager
@@ -114,18 +110,14 @@ from assistant.skills.builtin import (
     TimerSkill,
 )
 from assistant.skills.diagnostic import DiagnosticSkill
+from assistant.skills.github import GitHubSkill
 from assistant.skills.gmail import GmailSkill
 from assistant.skills.google_calendar import GoogleCalendarSkill
 from assistant.skills.google_drive import GoogleDriveSkill
-from assistant.skills.github import GitHubSkill
+from assistant.skills.logic import ChanceSkill, ChooseSkill
 from assistant.skills.macros import MacroSkill
 from assistant.skills.media import MediaPresentSkill, MediaViewerControlSkill
 from assistant.skills.memory import MemorySkill
-from assistant.skills.notion import NotionSkill
-from assistant.skills.onedrive import OneDriveSkill
-from assistant.skills.outlook_calendar import OutlookCalendarSkill
-from assistant.skills.outlook_mail import OutlookMailSkill
-from assistant.skills.slack import SlackSkill
 from assistant.skills.network import (
     CloudAskSkill,
     HeadlessReadSkill,
@@ -133,6 +125,10 @@ from assistant.skills.network import (
     WebFetchSkill,
     WebSearchSkill,
 )
+from assistant.skills.notion import NotionSkill
+from assistant.skills.onedrive import OneDriveSkill
+from assistant.skills.outlook_calendar import OutlookCalendarSkill
+from assistant.skills.outlook_mail import OutlookMailSkill
 from assistant.skills.playbooks import PlaybookSkill
 from assistant.skills.productivity import (
     NoteSkill,
@@ -142,6 +138,7 @@ from assistant.skills.productivity import (
 )
 from assistant.skills.registry import SkillRegistry
 from assistant.skills.scheduling import ScheduleSkill
+from assistant.skills.slack import SlackSkill
 from assistant.skills.windows import (
     ApplicationWindowSkill,
     BrowserNavigateSkill,
@@ -208,6 +205,7 @@ class Container:
     memory_semantic_indexer: MemorySemanticIndexer
     workflow_template_indexer: WorkflowTemplateSemanticIndexer
     memory_store: MemoryStore
+    logic_state: LogicStateStore
     schedule_store: ScheduleStore
     notification_store: NotificationStore
     notification_center: NotificationCenter
@@ -315,11 +313,14 @@ def _preferred_registered_browser(
 
 
 def _register_core_skills(
-    registry: SkillRegistry, file_access_policy: FileAccessPolicyStore
+    registry: SkillRegistry,
+    file_access_policy: FileAccessPolicyStore,
+    logic_state: LogicStateStore,
 ) -> None:
     registry.register(TimerSkill())
     registry.register(DateTimeSkill())
     registry.register(CalculatorSkill())
+    registry.register(ChooseSkill(logic_state))
     registry.register(FileAccessPolicySkill(file_access_policy))
 
 
@@ -327,6 +328,7 @@ def _register_windows_skills(
     registry: SkillRegistry,
     aliases: AliasStore,
     memory_store: MemoryStore,
+    logic_state: LogicStateStore,
 ) -> None:
     filesystem = LocalFileSystemAdapter()
     applications = WindowsApplicationAdapter()
@@ -365,6 +367,7 @@ def _register_windows_skills(
     registry.register(MediaSkill(WindowsMediaAdapter()))
     registry.register(ClipboardSkill(WindowsClipboardAdapter()))
     registry.register(NotificationSkill(WindowsNotificationAdapter()))
+    registry.register(ChanceSkill(logic_state, WindowsNotificationAdapter()))
     registry.register(ProcessSkill(WindowsProcessAdapter()))
     registry.register(InputAutomationSkill(WindowsInputAutomationAdapter()))
     registry.register(WindowsDeviceControlSkill(LocalWindowsDeviceAdapter()))
@@ -422,20 +425,20 @@ def _register_network_skills(
 
 def _google_calendar_skill_factory(secret_vault: SecretVault):
     return lambda: GoogleCalendarSkill(
-        GoogleCalendarAdapter(GoogleCalendarTokenManager(secret_vault))
+        GoogleCalendarAdapter(GoogleTokenManager(secret_vault))
     )
 
 
 def _gmail_skill_factory(secret_vault: SecretVault):
     return lambda: GmailSkill(
-        GmailAdapter(GmailTokenManager(secret_vault)),
-        account=lambda: secret_vault.get("gmail_account"),
+        GmailAdapter(GoogleTokenManager(secret_vault)),
+        account=lambda: secret_vault.get("google_account"),
     )
 
 
 def _google_drive_skill_factory(secret_vault: SecretVault):
     return lambda: GoogleDriveSkill(
-        GoogleDriveAdapter(GoogleDriveTokenManager(secret_vault))
+        GoogleDriveAdapter(GoogleTokenManager(secret_vault))
     )
 
 
@@ -485,9 +488,7 @@ def _managed_extension_registry(secret_vault: SecretVault) -> ManagedExtensionRe
     slack_factory = _slack_skill_factory(secret_vault)
     notion_factory = _notion_skill_factory(secret_vault)
     github_factory = _github_skill_factory(secret_vault)
-    google_calendar_connection = GoogleCalendarConnectionService(secret_vault)
-    gmail_connection = GmailConnectionService(secret_vault)
-    google_drive_connection = GoogleDriveConnectionService(secret_vault)
+    google_connection = GoogleConnectionService(secret_vault)
     microsoft_graph_connection = MicrosoftGraphConnectionService(secret_vault)
     slack_connection = SlackConnectionService(secret_vault)
     notion_connection = NotionConnectionService(secret_vault)
@@ -499,8 +500,8 @@ def _managed_extension_registry(secret_vault: SecretVault) -> ManagedExtensionRe
                 package_slug="google-calendar",
                 featured=True,
                 connection=ConnectionBinding(
-                    service=google_calendar_connection,
-                    provider_id=google_calendar_connection.provider_id,
+                    service=google_connection,
+                    provider_id=google_connection.provider_id,
                     required_scopes=(CALENDAR_SCOPE,),
                     dialog_entry_point=(
                         "assistant.ui.desktop.google_calendar_connection:"
@@ -513,8 +514,8 @@ def _managed_extension_registry(secret_vault: SecretVault) -> ManagedExtensionRe
                 package_slug="gmail",
                 featured=True,
                 connection=ConnectionBinding(
-                    service=gmail_connection,
-                    provider_id=gmail_connection.provider_id,
+                    service=google_connection,
+                    provider_id=google_connection.provider_id,
                     required_scopes=(GMAIL_SCOPE,),
                     dialog_entry_point=(
                         "assistant.ui.desktop.gmail_connection:GmailConnectionDialog"
@@ -526,8 +527,8 @@ def _managed_extension_registry(secret_vault: SecretVault) -> ManagedExtensionRe
                 package_slug="google-drive",
                 featured=True,
                 connection=ConnectionBinding(
-                    service=google_drive_connection,
-                    provider_id=google_drive_connection.provider_id,
+                    service=google_connection,
+                    provider_id=google_connection.provider_id,
                     required_scopes=(DRIVE_READ_SCOPE,),
                     dialog_entry_point=(
                         "assistant.ui.desktop.google_drive_connection:"
@@ -624,6 +625,7 @@ class _StorageServices:
     vector_index: VectorIndex
     secret_vault: SecretVault
     connection_profiles: ConnectionProfileStore
+    logic_state: LogicStateStore
     schedule_store: ScheduleStore
     notification_store: NotificationStore
 
@@ -665,6 +667,7 @@ def _build_storage_services(settings: Settings, database: Database) -> _StorageS
         vector_index=VectorIndex(database),
         secret_vault=secret_vault,
         connection_profiles=ConnectionProfileStore(settings_store, secret_vault),
+        logic_state=LogicStateStore(database),
         schedule_store=ScheduleStore(database, audit=audit),
         notification_store=NotificationStore(database),
     )
@@ -711,8 +714,13 @@ def _build_registry(
         trusted_signing_keys=_decode_trusted_keys(settings.trusted_skill_keys),
         managed_skill_factories=managed_extensions.skill_factories,
     )
-    _register_core_skills(registry, storage.file_access_policy)
-    _register_windows_skills(registry, storage.aliases, storage.memory_store)
+    _register_core_skills(registry, storage.file_access_policy, storage.logic_state)
+    _register_windows_skills(
+        registry,
+        storage.aliases,
+        storage.memory_store,
+        storage.logic_state,
+    )
     media_sessions = MediaSessionRegistry()
     media_resolver = MediaResolver()
     media_cache = RemoteMediaCache(
@@ -891,6 +899,7 @@ def build_container(settings: Settings | None = None) -> Container:
             metrics=storage.metrics,
             engine=engine,
             registry=registry,
+            logic_state=storage.logic_state,
             background_actions_enabled=settings.background_actions_enabled,
             pause_while_locked=settings.pause_background_while_locked,
             notify_on_success=settings.notify_on_background_success,
@@ -1029,6 +1038,7 @@ def build_container(settings: Settings | None = None) -> Container:
         memory_semantic_indexer=retrieval.memory_indexer,
         workflow_template_indexer=retrieval.workflow_indexer,
         memory_store=storage.memory_store,
+        logic_state=storage.logic_state,
         schedule_store=storage.schedule_store,
         notification_store=storage.notification_store,
         notification_center=notification_center,

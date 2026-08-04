@@ -48,8 +48,10 @@ Notion, and GitHub also retain their planned OAuth/App onboarding work.
    disambiguation remains a follow-up once more than one provider is enabled.
 4. Keep profile persistence reusable. The first new provider slices use one
    encrypted active token per provider; multi-account/profile selection uses
-   `ConnectionProfileStore` in a later increment. Existing Calendar/Gmail token
-   names stay separate until an explicit migration is designed.
+   `ConnectionProfileStore` in a later increment. Google Calendar, Gmail, and
+   Drive now use one shared Google authorization with incremental product scopes;
+   legacy product-specific token names migrate only when the account is
+   unambiguous.
 
 ### Stage 1: Google Drive
 
@@ -64,10 +66,12 @@ Initial read-only operations:
   and a dedicated response-size review.
 
 Do not implement upload, move, delete, sharing, or permission changes in the
-first slice. Keep Drive tokens separate from Calendar/Gmail tokens initially.
+first slice. Keep Drive's required scope separate from Calendar and Gmail even
+though all three products now share one Google account authorization.
 Use metadata-read access for discovery where possible; content retrieval is a
 separate scope and release review because Google classifies broad Drive reads
-as restricted access.
+as restricted access. Drive shares the Google account authorization but keeps
+its required scope separate from Calendar and Gmail.
 
 ### Stage 2: Microsoft Graph suite
 

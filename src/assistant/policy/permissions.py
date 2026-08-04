@@ -403,6 +403,22 @@ class PermissionManager:
             templates = tuple(
                 step.get("call", {}) for step in action.get("plan", {}).get("steps", ())
             )
+        elif action.get("kind") == "logic_workflow":
+            workflow = action.get("workflow", {})
+            templates_list = []
+            if isinstance(workflow.get("check"), dict):
+                templates_list.append(workflow["check"])
+            common_action = workflow.get("action", {})
+            if isinstance(common_action, dict) and common_action.get("kind") == "skill":
+                templates_list.append(common_action.get("call", {}))
+            selection = workflow.get("selection", {})
+            if isinstance(selection, dict):
+                templates_list.extend(
+                    option.get("action", {})
+                    for option in selection.get("options", ())
+                    if isinstance(option, dict) and isinstance(option.get("action"), dict)
+                )
+            templates = tuple(templates_list)
         else:
             return False
         return any(

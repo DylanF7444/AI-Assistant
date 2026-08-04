@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from typing import Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -9,11 +9,13 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel, Field, model_validator
 
 from assistant.contracts import ResultStatus, RiskLevel, SkillCall, SkillResult
+from assistant.logic.contracts import LogicWorkflowDraft
 from assistant.scheduling.authoring import ScheduleAuthoringService
 from assistant.scheduling.contracts import (
     DeliveryPolicy,
     OneTimeTrigger,
     RecurrenceTrigger,
+    RunPolicy,
     ScheduledTrigger,
     ScheduleStatus,
 )
@@ -37,6 +39,7 @@ class ScheduleManagementInput(BaseModel):
         "create",
         "create_action",
         "create_macro",
+        "create_logic",
         "list",
         "get",
         "pause",
@@ -57,7 +60,12 @@ class ScheduleManagementInput(BaseModel):
     skill_id: str | None = None
     arguments: dict = Field(default_factory=dict)
     macro_name: str | None = None
+    workflow: LogicWorkflowDraft | None = None
     delivery_mode: Literal["always", "summary", "silent"] = "summary"
+    max_attempts: int = Field(default=1, ge=1, le=3)
+    retry_delay_seconds: int = Field(default=5, ge=1, le=3_600)
+    retry_backoff: Literal["fixed", "exponential"] = "exponential"
+    max_retry_delay_seconds: int = Field(default=300, ge=1, le=86_400)
 
     @model_validator(mode="after")
     def _operation_has_required_fields(self) -> ScheduleManagementInput:
@@ -66,7 +74,13 @@ class ScheduleManagementInput(BaseModel):
         ):
             raise ValueError("Creating a schedule requires name, message, and recurrence")
         if self.operation == "create_action" and (
-            not self.name or not self.skill_id or (self.recurrence is None) == (self.run_at is None)
+            not self.name
+            or not self.skill_id
+            or sum(
+                value is not None
+                for value in (self.recurrence, self.run_at, self.delay_seconds)
+            )
+            != 1
         ):
             raise ValueError(
                 "Creating an action schedule requires name, skill_id, and exactly one trigger"
@@ -74,11 +88,29 @@ class ScheduleManagementInput(BaseModel):
         if self.operation == "create_macro" and (
             not self.name
             or not self.macro_name
-            or (self.recurrence is None) == (self.run_at is None)
+            or sum(
+                value is not None
+                for value in (self.recurrence, self.run_at, self.delay_seconds)
+            )
+            != 1
         ):
             raise ValueError(
                 "Creating a macro schedule requires name, macro_name, and exactly one trigger"
             )
+        if self.operation == "create_logic" and (
+            not self.name
+            or self.workflow is None
+            or sum(
+                value is not None
+                for value in (self.recurrence, self.run_at, self.delay_seconds)
+            )
+            != 1
+        ):
+            raise ValueError(
+                "Creating a logic schedule requires name, workflow, and exactly one trigger"
+            )
+        if self.max_retry_delay_seconds < self.retry_delay_seconds:
+            raise ValueError("max_retry_delay_seconds cannot be shorter than retry_delay_seconds")
         if (
             self.operation
             in {
@@ -125,7 +157,8 @@ class ScheduleSkill(Skill):
             display_name="Schedules",
             description=(
                 "Create recurring reminders and list, inspect, pause, resume, update, "
-                "delete, snooze, or run configured schedules."
+                "delete, snooze, or run configured schedules. It can author bounded guarded "
+                "workflows with conditions, deterministic selection, retries, and stop limits."
             ),
             input_model=self.input_model,
             output_model=self.output_model,
@@ -148,6 +181,14 @@ class ScheduleSkill(Skill):
                 f"Create schedule {args.name}: {self._trigger_value(args)}; "
                 f"frozen macro: {args.macro_name}"
             )
+        if args.operation == "create_logic":
+            if self.authoring is None:
+                raise ValueError("Logic workflow authoring is unavailable")
+            assert args.name and args.workflow
+            return (
+                f"Create bounded logic schedule {args.name}: {self._trigger_value(args)}; "
+                f"workflow: {args.workflow.model_dump(mode='json')}"
+            )
         return f"{args.operation.replace('_', ' ').title()} schedule {args.schedule or ''}".strip()
 
     def risk_for(self, call: SkillCall) -> RiskLevel:
@@ -160,6 +201,8 @@ class ScheduleSkill(Skill):
             )
         if args.operation == "create_macro" and args.macro_name:
             return self._authorization_risk(self.authoring.risk_for_macro(args.macro_name))
+        if args.operation == "create_logic" and args.workflow:
+            return self._authorization_risk(self.authoring.risk_for_logic(args.workflow))
         return RiskLevel.LOW
 
     @staticmethod
@@ -191,6 +234,7 @@ class ScheduleSkill(Skill):
                 skill_id=args.skill_id,
                 arguments=args.arguments,
                 delivery_policy=DeliveryPolicy(on_success=args.delivery_mode),
+                run_policy=self._run_policy(args),
             )
         elif args.operation == "create_macro":
             if self.authoring is None:
@@ -201,6 +245,18 @@ class ScheduleSkill(Skill):
                 trigger=self._trigger_value(args),
                 macro_name=args.macro_name,
                 delivery_policy=DeliveryPolicy(on_success=args.delivery_mode),
+                run_policy=self._run_policy(args),
+            )
+        elif args.operation == "create_logic":
+            if self.authoring is None:
+                raise ValueError("Logic workflow authoring is unavailable")
+            assert args.name and args.workflow
+            changed = self.authoring.create_logic(
+                name=args.name,
+                trigger=self._trigger_value(args),
+                workflow=args.workflow,
+                delivery_policy=DeliveryPolicy(on_success=args.delivery_mode),
+                run_policy=self._run_policy(args),
             )
         elif args.operation == "list":
             pass
@@ -308,6 +364,10 @@ class ScheduleSkill(Skill):
     def _trigger_value(self, args: ScheduleManagementInput) -> ScheduledTrigger:
         if args.run_at is not None:
             return OneTimeTrigger(run_at=args.run_at)
+        if args.delay_seconds is not None:
+            return OneTimeTrigger(
+                run_at=self.store.clock.now() + timedelta(seconds=args.delay_seconds)
+            )
         assert args.recurrence is not None
         return self._trigger(args.recurrence)
 
@@ -321,6 +381,7 @@ class ScheduleSkill(Skill):
             "trigger": schedule.trigger.model_dump(mode="json"),
             "action": schedule.action.model_dump(mode="json"),
             "delivery_policy": schedule.delivery_policy.model_dump(mode="json"),
+            "run_policy": schedule.run_policy.model_dump(mode="json"),
             "next_run_at": schedule.next_run_at.isoformat() if schedule.next_run_at else None,
             "last_run_at": schedule.last_run_at.isoformat() if schedule.last_run_at else None,
         }
@@ -347,6 +408,7 @@ class ScheduleSkill(Skill):
             "create": "Created",
             "create_action": "Created",
             "create_macro": "Created",
+            "create_logic": "Created",
             "get": "Found",
             "pause": "Paused",
             "resume": "Resumed",
@@ -369,3 +431,12 @@ class ScheduleSkill(Skill):
         for run in runs:
             lines.append(f"- Run {run['run_id']}: {run['state']} at {run['scheduled_for']}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _run_policy(args: ScheduleManagementInput) -> RunPolicy:
+        return RunPolicy(
+            max_attempts=args.max_attempts,
+            retry_delay_seconds=args.retry_delay_seconds,
+            retry_backoff=args.retry_backoff,
+            max_retry_delay_seconds=args.max_retry_delay_seconds,
+        )

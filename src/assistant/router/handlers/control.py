@@ -40,8 +40,16 @@ class ControlHandler:
                     source="deterministic",
                 )
             )
-        if match := re.fullmatch(
-            r"(?:select|choose|pick) (?:file |result |item |number )?(.+)", routed
+        choice_list_request = bool(
+            re.fullmatch(
+                r"(?:(?:randomly )?(?:select|choose|pick).*(?: from | between )).+",
+                routed,
+            )
+        )
+        if not choice_list_request and (
+            match := re.fullmatch(
+                r"(?:select|choose|pick) (?:file |result |item |number )?(.+)", routed
+            )
         ):
             return RouteResult(
                 Intent(

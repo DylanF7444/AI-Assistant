@@ -225,6 +225,10 @@ class ProductivityHandler:
         routed = context.routed
         if playbook_route := self._route_playbook_command(context):
             return playbook_route
+        if choice_route := self._route_choice(routed):
+            return choice_route
+        if logic_route := self._route_logic_primitive(routed):
+            return logic_route
         daily_message_patterns = (
             rf"(?:say|announce)\s+(?P<message>.+?)\s+{_DAILY_CADENCE}\s+at\s+(?P<time>.+)",
             rf"(?:say|announce)\s+(?P<message>.+?)\s+at\s+(?P<time>.+?)\s+{_DAILY_CADENCE}",
@@ -372,11 +376,15 @@ class ProductivityHandler:
                     source="rule",
                 )
             )
-        if match := re.fullmatch(r"(pause|resume|delete) (?:schedule|reminder) (.+)", routed):
+        if match := re.fullmatch(
+            r"(pause|stop|resume|delete) (?:schedule|reminder) (.+)",
+            routed,
+        ):
+            operation = "pause" if match.group(1) == "stop" else match.group(1)
             return RouteResult(
                 Intent(
                     name="core.schedule",
-                    arguments={"operation": match.group(1), "schedule": match.group(2)},
+                    arguments={"operation": operation, "schedule": match.group(2)},
                     confidence=0.98,
                     source="rule",
                 )
@@ -638,6 +646,322 @@ class ProductivityHandler:
                 )
             )
         return None
+
+    @staticmethod
+    def _route_choice(routed: str) -> RouteResult | None:
+        if re.search(r"\b(?:weight|weighted|chance|probability)\b", routed):
+            return None
+        patterns = (
+            r"(?:pick|choose|select)(?: one| a)?(?: random(?:ly)?| at random)? "
+            r"(?:item )?from (.+)",
+            r"(?:pick|choose|select)(?: random(?:ly)?| at random)? between (.+)",
+            r"randomly (?:pick|choose|select) (?:between|from) (.+)",
+            r"(?:pick|choose|select) (?:a |one )?random item[:,]? (.+)",
+        )
+        match = next(
+            (match for pattern in patterns if (match := re.fullmatch(pattern, routed))),
+            None,
+        )
+        if match is None:
+            return None
+        raw_items = re.split(
+            r"\s+(?:using|but|and remember|remember|avoid|excluding|with seed)\b",
+            match.group(1),
+            maxsplit=1,
+        )[0].strip(" ,.")
+        items = tuple(
+            item.strip(" .")
+            for item in re.split(r"\s*(?:,|;|\bor\b|\band\b)\s*", raw_items)
+            if item.strip(" .")
+        )
+        if len(items) < 2:
+            return RouteResult(
+                None,
+                clarification="Which two or more items should I choose from?",
+            )
+        strategy = (
+            "least_recent"
+            if re.search(r"\bleast[- ]recent\b", routed)
+            else "round_robin"
+            if re.search(r"\b(?:round[- ]robin|rotate|rotation)\b", routed)
+            else "random"
+        )
+        avoid_recent = 0
+        if re.search(r"\b(?:avoid|exclude)(?: the)? (?:last|most recent|recent)\b", routed):
+            avoid_recent = 1
+        history_match = re.search(
+            r"\bhistory as (?P<key>[a-z0-9][a-z0-9_.:-]*)\b",
+            routed,
+        )
+        seed_match = re.search(r"\bwith seed (?P<seed>[a-z0-9_.:-]+)\b", routed)
+        arguments: dict[str, object] = {
+            "items": items,
+            "strategy": strategy,
+        }
+        if avoid_recent:
+            arguments["avoid_recent"] = avoid_recent
+        if history_match:
+            arguments["history_key"] = history_match.group("key")
+        if seed_match:
+            arguments["seed"] = seed_match.group("seed")
+        return RouteResult(
+            Intent(
+                name="core.choose",
+                arguments=arguments,
+                confidence=0.99,
+                source="rule",
+            )
+        )
+
+    @staticmethod
+    def _route_logic_primitive(routed: str) -> RouteResult | None:
+        scheduled_chance = re.fullmatch(
+            rf"every day at (?P<time>{_CLOCK_VALUE}),? give me (?:a )?"
+            r"(?P<chance>.+?) (?:percent|%) chance of (?:a )?"
+            r"(?P<title>.+?) notification and (?:a |an )?"
+            r"(?P<skip>.+?) (?:percent|%) chance of doing nothing\. "
+            r"stop after (?P<max_runs>.+?) runs?",
+            routed,
+        )
+        if scheduled_chance:
+            local_time = _clock_time(scheduled_chance.group("time"))
+            chance = ProductivityHandler._whole_number(scheduled_chance.group("chance"))
+            skip = ProductivityHandler._whole_number(scheduled_chance.group("skip"))
+            max_runs = ProductivityHandler._whole_number(scheduled_chance.group("max_runs"))
+            if local_time is None:
+                return RouteResult(None, clarification="What time should the chance run?")
+            if chance is None or skip is None or chance + skip != 100:
+                return RouteResult(
+                    None,
+                    clarification="The notification and do-nothing percentages must total 100.",
+                )
+            if max_runs is None or not 1 <= max_runs <= 10_000:
+                return RouteResult(None, clarification="How many runs should I allow?")
+            title = scheduled_chance.group("title").strip(" .").title()
+            return RouteResult(
+                Intent(
+                    name="core.schedule",
+                    arguments={
+                        "operation": "create_logic",
+                        "name": f"{chance}% {title} chance",
+                        "recurrence": {
+                            "frequency": "daily",
+                            "interval": 1,
+                            "local_time": local_time,
+                        },
+                        "workflow": {
+                            "action": {
+                                "kind": "skill",
+                                "call": {
+                                    "skill_id": "core.chance",
+                                    "arguments": {
+                                        "probability_percent": chance,
+                                        "title": title,
+                                        "message": f"{title}!",
+                                    },
+                                },
+                            },
+                            "completion": {"max_runs": max_runs},
+                        },
+                    },
+                    confidence=0.99,
+                    source="rule",
+                )
+            )
+
+        chance_match = re.fullmatch(
+            r"(?:give me|roll|make) (?:a )?(?P<chance>.+?) (?:percent|%) chance of "
+            r"(?:a )?(?P<title>.+?) notification"
+            r"(?: and (?:a |an )?(?P<skip>.+?) (?:percent|%) chance of doing nothing)?",
+            routed,
+        )
+        if chance_match:
+            chance = ProductivityHandler._whole_number(chance_match.group("chance"))
+            skip = (
+                ProductivityHandler._whole_number(chance_match.group("skip"))
+                if chance_match.group("skip")
+                else None
+            )
+            if chance is None or not 0 <= chance <= 100:
+                return RouteResult(
+                    None,
+                    clarification="What percentage chance should I use, from 0 to 100?",
+                )
+            if skip is not None and chance + skip != 100:
+                return RouteResult(
+                    None,
+                    clarification="The notification and do-nothing percentages must total 100.",
+                )
+            title = chance_match.group("title").strip(" .").title()
+            return RouteResult(
+                Intent(
+                    name="core.chance",
+                    arguments={
+                        "probability_percent": chance,
+                        "title": title,
+                        "message": f"{title}!",
+                    },
+                    confidence=0.99,
+                    source="rule",
+                )
+            )
+
+        delayed_choice = re.fullmatch(
+            r"in (?P<amount>.+?) (?P<unit>seconds?|minutes?|hours?|days?),? "
+            r"(?:choose|pick|select) (?P<choices>.+?)"
+            r"(?: at random| randomly)? and notify me (?:with|of|about) (?:the )?choice"
+            r"(?:\.?(?: and)? stop after (?:one|1) run)?",
+            routed,
+        )
+        if delayed_choice:
+            delay_seconds = _duration_seconds(
+                delayed_choice.group("amount"),
+                delayed_choice.group("unit"),
+            )
+            choices_text = re.sub(
+                r"\s+(?:at random|randomly)$",
+                "",
+                delayed_choice.group("choices"),
+            )
+            choices = ProductivityHandler._choice_values(choices_text)
+            if delay_seconds is None:
+                return RouteResult(None, clarification="How long should I wait?")
+            if len(choices) < 2:
+                return RouteResult(
+                    None,
+                    clarification="Which two or more items should I choose from?",
+                )
+            return RouteResult(
+                Intent(
+                    name="core.schedule",
+                    arguments={
+                        "operation": "create_logic",
+                        "name": "Delayed random choice",
+                        "delay_seconds": delay_seconds,
+                        "workflow": {
+                            "selection": {
+                                "strategy": "random",
+                                "options": [
+                                    {
+                                        "option_id": f"choice-{index}",
+                                        "label": choice,
+                                        "value": choice,
+                                    }
+                                    for index, choice in enumerate(choices, 1)
+                                ],
+                            },
+                            "action": {
+                                "kind": "notification",
+                                "title": "Random choice",
+                                "message": "{choice.label}",
+                            },
+                            "completion": {"max_runs": 1},
+                        },
+                    },
+                    confidence=0.99,
+                    source="rule",
+                )
+            )
+
+        conditional = re.fullmatch(
+            r"every (?P<interval>.+?) (?P<unit>minutes?|hours?),? calculate "
+            r"(?P<expression>.+?)\. if (?:the )?result is "
+            r"(?P<comparison>greater than|above|less than|below|equal to) "
+            r"(?P<threshold>.+?), notify me with (?:the )?result and then stop\. "
+            r"maximum (?P<max_runs>.+?) runs?",
+            routed,
+        )
+        if conditional:
+            interval = ProductivityHandler._whole_number(conditional.group("interval"))
+            threshold = ProductivityHandler._number(conditional.group("threshold"))
+            max_runs = ProductivityHandler._whole_number(conditional.group("max_runs"))
+            if interval is None or interval < 1:
+                return RouteResult(None, clarification="How often should I run the check?")
+            if threshold is None:
+                return RouteResult(None, clarification="What value should I compare against?")
+            if max_runs is None or not 1 <= max_runs <= 10_000:
+                return RouteResult(None, clarification="What maximum number of runs should I use?")
+            comparison = {
+                "greater than": "greater_than",
+                "above": "greater_than",
+                "less than": "less_than",
+                "below": "less_than",
+                "equal to": "equals",
+            }[conditional.group("comparison")]
+            expression = (
+                conditional.group("expression")
+                .replace(" plus ", " + ")
+                .replace(" minus ", " - ")
+                .replace(" times ", " * ")
+                .replace(" multiplied by ", " * ")
+                .replace(" divided by ", " / ")
+            )
+            return RouteResult(
+                Intent(
+                    name="core.schedule",
+                    arguments={
+                        "operation": "create_logic",
+                        "name": "Conditional calculation",
+                        "recurrence": {
+                            "frequency": (
+                                "minutes"
+                                if conditional.group("unit").startswith("minute")
+                                else "hours"
+                            ),
+                            "interval": interval,
+                        },
+                        "workflow": {
+                            "check": {
+                                "skill_id": "core.calculator",
+                                "arguments": {"expression": expression},
+                            },
+                            "when": {
+                                "reference": "check.data.value",
+                                "operator": comparison,
+                                "value": threshold,
+                            },
+                            "action": {
+                                "kind": "notification",
+                                "title": "Calculation condition met",
+                                "message": "{check.summary}",
+                            },
+                            "completion": {
+                                "stop_after_condition": True,
+                                "max_runs": max_runs,
+                            },
+                        },
+                    },
+                    confidence=0.99,
+                    source="rule",
+                )
+            )
+        return None
+
+    @staticmethod
+    def _choice_values(value: str) -> tuple[str, ...]:
+        return tuple(
+            item.strip(" .")
+            for item in re.split(r"\s*(?:,|;|\bor\b|\band\b)\s*", value)
+            if item.strip(" .")
+        )
+
+    @staticmethod
+    def _number(value: str) -> float | None:
+        cleaned = value.strip(" .")
+        try:
+            return float(cleaned)
+        except ValueError:
+            try:
+                return float(spoken_number(cleaned))
+            except ValueError:
+                return None
+
+    @staticmethod
+    def _whole_number(value: str | None) -> int | None:
+        if value is None:
+            return None
+        number = ProductivityHandler._number(value)
+        return int(number) if number is not None and number.is_integer() else None
 
     @staticmethod
     def _route_playbook_command(context: RouteContext) -> RouteResult | None:

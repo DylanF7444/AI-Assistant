@@ -9,12 +9,23 @@ from assistant.contracts import (
     RiskLevel,
     SkillCall,
 )
+from assistant.logic.contracts import (
+    ChoiceOption,
+    LogicNotificationAction,
+    LogicSelection,
+    LogicSelectionResultAction,
+    LogicSkillAction,
+    LogicWorkflow,
+    LogicWorkflowDraft,
+)
 from assistant.policy.background import background_compatibility
 from assistant.scheduling.contracts import (
     AutonomyPolicy,
     DeliveryPolicy,
     FixedSkillAction,
     FrozenPlanAction,
+    LogicWorkflowAction,
+    RunPolicy,
     ScheduleDefinition,
     ScheduledTrigger,
     ScheduleStatus,
@@ -59,6 +70,7 @@ class ScheduleAuthoringService:
         user_id: str = "local-user",
         description: str = "",
         delivery_policy: DeliveryPolicy | None = None,
+        run_policy: RunPolicy | None = None,
     ) -> ScheduleDefinition:
         schedule_id = uuid4()
         call, snapshot, capabilities, targets, risk = self._prepared_call(
@@ -79,6 +91,7 @@ class ScheduleAuthoringService:
             trigger=trigger,
             action=FixedSkillAction(call=call),
             autonomy_policy=self._policy((skill_id,), capabilities, targets, risk, max_steps=1),
+            run_policy=run_policy or RunPolicy(),
             delivery_policy=delivery_policy or DeliveryPolicy(),
             skill_snapshot=(snapshot,),
             created_at=now,
@@ -95,6 +108,7 @@ class ScheduleAuthoringService:
         user_id: str = "local-user",
         description: str = "",
         delivery_policy: DeliveryPolicy | None = None,
+        run_policy: RunPolicy | None = None,
     ) -> ScheduleDefinition:
         macro = self.macros.get(macro_name)
         schedule_id = uuid4()
@@ -145,6 +159,111 @@ class ScheduleAuthoringService:
                 effective_risk,
                 max_steps=len(calls),
             ),
+            run_policy=run_policy or RunPolicy(),
+            delivery_policy=delivery_policy or DeliveryPolicy(),
+            skill_snapshot=tuple(snapshots),
+            created_at=now,
+            updated_at=now,
+        )
+        return self.store.create(definition, authorize=True)
+
+    def create_logic(
+        self,
+        *,
+        name: str,
+        trigger: ScheduledTrigger,
+        workflow: LogicWorkflowDraft,
+        user_id: str = "local-user",
+        description: str = "",
+        delivery_policy: DeliveryPolicy | None = None,
+        run_policy: RunPolicy | None = None,
+    ) -> ScheduleDefinition:
+        schedule_id = uuid4()
+        snapshots: list[SkillSnapshot] = []
+        capabilities: set[str] = set()
+        targets: set[str] = set()
+        risks: list[RiskLevel] = []
+
+        def prepare(draft, step_id: str) -> SkillCall:
+            call, snapshot, call_capabilities, call_targets, risk = self._prepared_call(
+                schedule_id,
+                1,
+                draft.skill_id,
+                draft.arguments,
+                step_id=step_id,
+                user_id=user_id,
+            )
+            snapshots.append(snapshot)
+            capabilities.update(call_capabilities)
+            targets.update(call_targets)
+            risks.append(risk)
+            return call
+
+        check = prepare(workflow.check, "logic-check") if workflow.check is not None else None
+        if workflow.action.kind == "skill":
+            prepared_action = LogicSkillAction(
+                call=prepare(workflow.action.call, "logic-action")
+            )
+        elif workflow.action.kind == "notification":
+            prepared_action = LogicNotificationAction(
+                title=workflow.action.title,
+                message=workflow.action.message,
+            )
+        else:
+            prepared_action = LogicSelectionResultAction()
+
+        selection = None
+        if workflow.selection is not None:
+            options = tuple(
+                ChoiceOption(
+                    option_id=option.option_id,
+                    label=option.label,
+                    value=option.value,
+                    metadata=option.metadata,
+                    weight=option.weight,
+                    action=(
+                        prepare(option.action, f"logic-choice-{option.option_id}")
+                        if option.action is not None
+                        else None
+                    ),
+                )
+                for option in workflow.selection.options
+            )
+            selection = LogicSelection(
+                source=workflow.selection.source,
+                strategy=workflow.selection.strategy,
+                options=options,
+                filters=workflow.selection.filters,
+                avoid_recent=workflow.selection.avoid_recent,
+                seed=workflow.selection.seed,
+                history_key=workflow.selection.history_key,
+            )
+
+        prepared = LogicWorkflow(
+            check=check,
+            when=workflow.when,
+            selection=selection,
+            action=prepared_action,
+            completion=workflow.completion,
+        )
+        effective_risk = max(risks, key=_RISK_ORDER.get, default=RiskLevel.LOW)
+        now = self.store.clock.now()
+        definition = ScheduleDefinition(
+            schedule_id=schedule_id,
+            user_id=user_id,
+            name=name,
+            description=description,
+            status=ScheduleStatus.PENDING_AUTHORIZATION,
+            trigger=trigger,
+            action=LogicWorkflowAction(workflow=prepared),
+            autonomy_policy=self._policy(
+                tuple(snapshot.skill_id for snapshot in snapshots),
+                capabilities,
+                targets,
+                effective_risk,
+                max_steps=max(1, len(snapshots)),
+            ),
+            run_policy=run_policy or RunPolicy(),
             delivery_policy=delivery_policy or DeliveryPolicy(),
             skill_snapshot=tuple(snapshots),
             created_at=now,
@@ -174,6 +293,17 @@ class ScheduleAuthoringService:
             self.risk_for_action(step.skill_id, step.arguments)
             for step in self.macros.get(macro_name).steps
         ]
+        return max(risks, key=_RISK_ORDER.get, default=RiskLevel.LOW)
+
+    def risk_for_logic(self, workflow: LogicWorkflowDraft) -> RiskLevel:
+        drafts = []
+        if workflow.check is not None:
+            drafts.append(workflow.check)
+        if workflow.action.kind == "skill":
+            drafts.append(workflow.action.call)
+        if workflow.selection is not None:
+            drafts.extend(option.action for option in workflow.selection.options if option.action)
+        risks = [self.risk_for_action(item.skill_id, item.arguments) for item in drafts]
         return max(risks, key=_RISK_ORDER.get, default=RiskLevel.LOW)
 
     async def preview_action(self, skill_id: str, arguments: dict) -> str:

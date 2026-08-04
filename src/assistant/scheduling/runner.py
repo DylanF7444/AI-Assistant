@@ -18,6 +18,9 @@ from assistant.contracts import (
     TracePhase,
 )
 from assistant.execution.engine import ExecutionEngine
+from assistant.logic.contracts import LogicNotificationAction, workflow_calls
+from assistant.logic.runner import LogicWorkflowRunner
+from assistant.logic.store import LogicStateStore
 from assistant.policy.background import background_compatibility
 from assistant.scheduling.clock import Clock
 from assistant.scheduling.contracts import (
@@ -25,6 +28,7 @@ from assistant.scheduling.contracts import (
     ApprovalReview,
     FixedSkillAction,
     FrozenPlanAction,
+    LogicWorkflowAction,
     NotificationAction,
     OneTimeTrigger,
     ScheduleDefinition,
@@ -50,6 +54,7 @@ class BackgroundRunner:
         metrics: MetricsStore | None = None,
         engine: ExecutionEngine | None = None,
         registry: SkillRegistry | None = None,
+        logic_state: LogicStateStore | None = None,
         background_actions_enabled: bool = False,
         pause_while_locked: bool = True,
         session_unlocked: Callable[[], bool] = is_session_unlocked,
@@ -64,6 +69,16 @@ class BackgroundRunner:
         self.metrics = metrics
         self.engine = engine
         self.registry = registry
+        self.logic_runner = (
+            LogicWorkflowRunner(
+                engine,
+                logic_state or LogicStateStore(store.database),
+                notifications,
+                self.clock,
+            )
+            if engine is not None
+            else None
+        )
         self.background_actions_enabled = background_actions_enabled
         self.pause_while_locked = pause_while_locked
         self.session_unlocked = session_unlocked
@@ -157,6 +172,8 @@ class BackgroundRunner:
                 return await self._execute_fixed(schedule, running, correlation_id)
             if isinstance(schedule.action, FrozenPlanAction):
                 return await self._execute_plan(schedule, running, correlation_id)
+            if isinstance(schedule.action, LogicWorkflowAction):
+                return await self._execute_logic(schedule, running, correlation_id)
             return self._blocked(running, correlation_id, "Unsupported scheduled action type")
         except TimeoutError:
             current = self.store.get_run(run.run_id)
@@ -348,6 +365,17 @@ class BackgroundRunner:
                     correlation_id,
                     confirmations=approvals,
                 )
+            if isinstance(schedule.action, LogicWorkflowAction):
+                approvals = {
+                    step_id: (confirmation_id, tokens.get(step_id))
+                    for step_id, confirmation_id in confirmation_ids.items()
+                }
+                return await self._execute_logic(
+                    schedule,
+                    running,
+                    correlation_id,
+                    confirmations=approvals,
+                )
             return self._blocked(running, correlation_id, "Unsupported approval action type")
         finally:
             heartbeat.cancel()
@@ -504,6 +532,63 @@ class BackgroundRunner:
         )
         return completed
 
+    async def _execute_logic(
+        self,
+        schedule: ScheduleDefinition,
+        run: ScheduleRun,
+        correlation_id,
+        *,
+        confirmations: Mapping[str, tuple[UUID, str | None]] | None = None,
+    ) -> ScheduleRun:
+        assert isinstance(schedule.action, LogicWorkflowAction)
+        assert self.logic_runner is not None
+        calls = dict(self._occurrence_calls(schedule, run))
+        outcome = await asyncio.wait_for(
+            self.logic_runner.run(
+                schedule,
+                run,
+                schedule.action.workflow,
+                calls,
+                confirmations=confirmations,
+            ),
+            timeout=schedule.autonomy_policy.max_runtime_seconds,
+        )
+        if not self._logic_will_retry(schedule, run, outcome.result):
+            outcome = self.logic_runner.record(
+                schedule,
+                schedule.action.workflow,
+                outcome,
+            )
+        completed = self._finish_skill_result(
+            schedule,
+            run,
+            correlation_id,
+            outcome.result,
+        )
+        if (
+            outcome.progress is not None
+            and outcome.progress.should_stop
+            and completed.state != ScheduleRunState.PENDING
+        ):
+            self.store.complete(
+                schedule.schedule_id,
+                schedule.revision,
+                outcome.progress.stop_reason or "Workflow completion policy was met",
+            )
+        return completed
+
+    def _logic_will_retry(
+        self,
+        schedule: ScheduleDefinition,
+        run: ScheduleRun,
+        result: SkillResult,
+    ) -> bool:
+        return (
+            result.status in {ResultStatus.FAILED, ResultStatus.PARTIAL}
+            and run.attempt < schedule.run_policy.max_attempts
+            and self._all_safe_to_retry(schedule)
+        )
+
     @staticmethod
     def _occurrence_calls(
         schedule: ScheduleDefinition,
@@ -522,18 +607,31 @@ class BackgroundRunner:
                     ),
                 ),
             )
-        assert isinstance(schedule.action, FrozenPlanAction)
+        if isinstance(schedule.action, FrozenPlanAction):
+            return tuple(
+                (
+                    step.step_id,
+                    step.call.model_copy(
+                        update={
+                            "correlation_id": correlation_id,
+                            "idempotency_key": f"{run.idempotency_key}:{step.step_id}",
+                        }
+                    ),
+                )
+                for step in schedule.action.plan.steps
+            )
+        assert isinstance(schedule.action, LogicWorkflowAction)
         return tuple(
             (
-                step.step_id,
-                step.call.model_copy(
+                step_id,
+                call.model_copy(
                     update={
                         "correlation_id": correlation_id,
-                        "idempotency_key": f"{run.idempotency_key}:{step.step_id}",
+                        "idempotency_key": f"{run.idempotency_key}:{step_id}",
                     }
                 ),
             )
-            for step in schedule.action.plan.steps
+            for step_id, call in workflow_calls(schedule.action.workflow)
         )
 
     def _finish_skill_result(
@@ -599,7 +697,10 @@ class BackgroundRunner:
         result_status: str,
         result: dict,
     ) -> ScheduleRun:
-        delay_seconds = min(300, 5 * (2 ** max(0, run.attempt - 1)))
+        delay_seconds = schedule.run_policy.retry_delay_seconds
+        if schedule.run_policy.retry_backoff == "exponential":
+            delay_seconds *= 2 ** max(0, run.attempt - 1)
+        delay_seconds = min(schedule.run_policy.max_retry_delay_seconds, delay_seconds)
         pending = self.store.transition_run(
             run.run_id,
             expected=(ScheduleRunState.RUNNING,),
@@ -620,11 +721,7 @@ class BackgroundRunner:
 
     def _all_safe_to_retry(self, schedule: ScheduleDefinition) -> bool:
         assert self.registry is not None
-        calls = (
-            (schedule.action.call,)
-            if isinstance(schedule.action, FixedSkillAction)
-            else tuple(step.call for step in schedule.action.plan.steps)
-        )
+        calls = self._template_calls(schedule)
         return all(self.registry.get(call.skill_id).manifest.safe_to_retry for call in calls)
 
     def _denial_reason(self, schedule: ScheduleDefinition, run: ScheduleRun) -> str | None:
@@ -655,8 +752,9 @@ class BackgroundRunner:
                 "Background authorization expired",
             )
             return "Background authorization expired"
-        if isinstance(schedule.action, (FixedSkillAction, FrozenPlanAction)):
-            if not self.background_actions_enabled:
+        if isinstance(schedule.action, (FixedSkillAction, FrozenPlanAction, LogicWorkflowAction)):
+            calls = self._template_calls(schedule)
+            if calls and not self.background_actions_enabled:
                 return "Background skill actions are disabled in settings"
             if self.engine is None or self.registry is None:
                 return "Background execution services are unavailable"
@@ -696,11 +794,7 @@ class BackgroundRunner:
 
     def _background_compatibility_reason(self, schedule: ScheduleDefinition) -> str | None:
         assert self.registry is not None
-        calls = (
-            (schedule.action.call,)
-            if isinstance(schedule.action, FixedSkillAction)
-            else tuple(step.call for step in schedule.action.plan.steps)
-        )
+        calls = self._template_calls(schedule)
         for call in calls:
             try:
                 skill = self.registry.get(call.skill_id)
@@ -717,11 +811,7 @@ class BackgroundRunner:
 
     def _snapshot_denial_reason(self, schedule: ScheduleDefinition) -> str | None:
         assert self.registry is not None
-        calls = (
-            (schedule.action.call,)
-            if isinstance(schedule.action, FixedSkillAction)
-            else tuple(step.call for step in schedule.action.plan.steps)
-        )
+        calls = self._template_calls(schedule)
         if len(calls) > schedule.autonomy_policy.max_steps:
             return "Plan exceeds the authorized step budget"
         if len(schedule.skill_snapshot) != len(calls):
@@ -765,16 +855,22 @@ class BackgroundRunner:
         if isinstance(schedule.action, NotificationAction):
             return RiskLevel.LOW
         assert self.registry is not None
-        calls = (
-            (schedule.action.call,)
-            if isinstance(schedule.action, FixedSkillAction)
-            else tuple(step.call for step in schedule.action.plan.steps)
-        )
+        calls = self._template_calls(schedule)
         return max(
             (self.registry.get(call.skill_id).risk_for(call) for call in calls),
             key=self._risk_rank,
             default=RiskLevel.LOW,
         )
+
+    @staticmethod
+    def _template_calls(schedule: ScheduleDefinition) -> tuple[SkillCall, ...]:
+        if isinstance(schedule.action, FixedSkillAction):
+            return (schedule.action.call,)
+        if isinstance(schedule.action, FrozenPlanAction):
+            return tuple(step.call for step in schedule.action.plan.steps)
+        if isinstance(schedule.action, LogicWorkflowAction):
+            return tuple(call for _step_id, call in workflow_calls(schedule.action.workflow))
+        return ()
 
     @staticmethod
     def _risk_rank(risk: RiskLevel) -> int:
@@ -839,6 +935,7 @@ class BackgroundRunner:
             and self.notify_on_success
             and schedule.delivery_policy.on_success != "silent"
             and not isinstance(schedule.action, NotificationAction)
+            and not self._logic_suppresses_success_notification(schedule, run)
         ):
             category = self._success_notification_category(schedule, run)
             self.notifications.publish(
@@ -883,6 +980,20 @@ class BackgroundRunner:
                 duration_ms=duration_ms,
                 outcome=decision,
             )
+
+    @staticmethod
+    def _logic_suppresses_success_notification(
+        schedule: ScheduleDefinition,
+        run: ScheduleRun,
+    ) -> bool:
+        if not isinstance(schedule.action, LogicWorkflowAction):
+            return False
+        if isinstance(schedule.action.workflow.action, LogicNotificationAction):
+            return True
+        if not isinstance(run.result, dict):
+            return False
+        data = run.result.get("data")
+        return isinstance(data, dict) and data.get("action_executed") is False
 
     @staticmethod
     def _success_notification_message(
