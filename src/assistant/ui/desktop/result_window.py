@@ -12,7 +12,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from assistant.contracts import VisualArtifact
 from assistant.ui.desktop.media_viewer import MediaViewer
+from assistant.ui.desktop.visualization_view import VisualizationView
 
 
 class ResultWindow(QMainWindow):
@@ -20,7 +22,11 @@ class ResultWindow(QMainWindow):
 
     automation_requested = Signal(str)
 
-    def __init__(self, media_viewer: MediaViewer) -> None:
+    def __init__(
+        self,
+        media_viewer: MediaViewer,
+        visualization_view: VisualizationView | None = None,
+    ) -> None:
         super().__init__(None)
         self.setObjectName("assistantResultWindow")
         self.setAccessibleName("Assistant results window")
@@ -32,6 +38,7 @@ class ResultWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.stack.setObjectName("resultWindowStack")
         self.media_viewer = media_viewer
+        self.visualization_view = visualization_view or VisualizationView()
         self.report_page = QWidget()
         report_layout = QVBoxLayout(self.report_page)
         report_layout.setContentsMargins(22, 20, 22, 20)
@@ -66,6 +73,7 @@ class ResultWindow(QMainWindow):
 
         self.stack.addWidget(self.report_page)
         self.stack.addWidget(self.media_viewer)
+        self.stack.addWidget(self.visualization_view)
         self.setCentralWidget(self.stack)
         self.media_viewer.fullscreen_requested.connect(self.set_media_fullscreen)
         self.hide()
@@ -79,6 +87,16 @@ class ResultWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
         self.media_viewer.setFocus()
+
+    def show_visual(self, artifact: VisualArtifact) -> None:
+        self._run_id = None
+        self.visualization_view.set_artifact(artifact)
+        self.stack.setCurrentWidget(self.visualization_view)
+        self.setWindowTitle(f"Local Assistant — {artifact.title}")
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.visualization_view.setFocus()
 
     def show_report(
         self,

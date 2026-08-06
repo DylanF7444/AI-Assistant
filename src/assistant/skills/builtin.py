@@ -92,8 +92,9 @@ def _category_for_skill(skill_id: str) -> str:
         "core.schedule",
         "core.macro",
         "core.playbook",
+        "core.visualize",
     }:
-        return "Productivity"
+        return "Visualization" if skill_id == "core.visualize" else "Productivity"
     if skill_id.startswith("core."):
         return "Assistant & Security"
     return "General"

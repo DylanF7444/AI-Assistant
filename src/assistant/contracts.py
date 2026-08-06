@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
@@ -85,6 +86,13 @@ class MediaKind(StrEnum):
     IMAGE = "image"
     AUDIO = "audio"
     VIDEO = "video"
+
+
+class VisualKind(StrEnum):
+    CHART = "chart"
+    FLOWCHART = "flowchart"
+    TIMELINE = "timeline"
+    TABLE = "table"
 
 
 class MediaSourceType(StrEnum):
@@ -194,6 +202,153 @@ class MediaDirective(StrictModel):
             ):
                 raise ValueError(f"{field_name} is not valid for {self.action.value}")
         return self
+
+
+def _validate_visual_text(value: str) -> str:
+    if any(ord(character) < 32 for character in value):
+        raise ValueError("Visual text cannot contain control characters")
+    return value
+
+
+class ChartSpec(StrictModel):
+    kind: Literal["chart"] = "chart"
+    chart_type: Literal["bar", "line"] = "bar"
+    labels: tuple[str, ...] = Field(min_length=1, max_length=30)
+    values: tuple[float, ...] = Field(min_length=1, max_length=30)
+    x_label: str | None = Field(default=None, max_length=120)
+    y_label: str | None = Field(default=None, max_length=120)
+
+    @field_validator("labels", mode="before")
+    @classmethod
+    def _labels_are_safe(cls, values: Any) -> Any:
+        return tuple(_validate_visual_text(str(value).strip()) for value in values)
+
+    @field_validator("values")
+    @classmethod
+    def _values_are_finite(cls, values: tuple[float, ...]) -> tuple[float, ...]:
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("Chart values must be finite")
+        return values
+
+    @field_validator("x_label", "y_label")
+    @classmethod
+    def _axis_labels_are_safe(cls, value: str | None) -> str | None:
+        return _validate_visual_text(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def _labels_match_values(self) -> ChartSpec:
+        if len(self.labels) != len(self.values):
+            raise ValueError("Charts require one label for every value")
+        if any(not label for label in self.labels):
+            raise ValueError("Chart labels cannot be empty")
+        return self
+
+
+class VisualNode(StrictModel):
+    node_id: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
+    label: str = Field(min_length=1, max_length=160)
+
+    @field_validator("label")
+    @classmethod
+    def _label_is_safe(cls, value: str) -> str:
+        return _validate_visual_text(value)
+
+
+class VisualEdge(StrictModel):
+    source: str = Field(min_length=1, max_length=80)
+    target: str = Field(min_length=1, max_length=80)
+    label: str | None = Field(default=None, max_length=120)
+
+    @field_validator("source", "target")
+    @classmethod
+    def _endpoint_is_safe(cls, value: str) -> str:
+        return _validate_visual_text(value)
+
+    @field_validator("label")
+    @classmethod
+    def _edge_label_is_safe(cls, value: str | None) -> str | None:
+        return _validate_visual_text(value) if value is not None else None
+
+
+class FlowchartSpec(StrictModel):
+    kind: Literal["flowchart"] = "flowchart"
+    nodes: tuple[VisualNode, ...] = Field(min_length=1, max_length=30)
+    edges: tuple[VisualEdge, ...] = Field(default=(), max_length=60)
+
+    @model_validator(mode="after")
+    def _edges_reference_nodes(self) -> FlowchartSpec:
+        node_ids = {node.node_id for node in self.nodes}
+        if len(node_ids) != len(self.nodes):
+            raise ValueError("Flowchart node IDs must be unique")
+        if any(edge.source not in node_ids or edge.target not in node_ids for edge in self.edges):
+            raise ValueError("Flowchart edges must reference existing nodes")
+        return self
+
+
+class TimelineEvent(StrictModel):
+    when: str = Field(min_length=1, max_length=120)
+    label: str = Field(min_length=1, max_length=160)
+    detail: str | None = Field(default=None, max_length=300)
+
+    @field_validator("when", "label", "detail")
+    @classmethod
+    def _event_text_is_safe(cls, value: str | None) -> str | None:
+        return _validate_visual_text(value) if value is not None else None
+
+
+class TimelineSpec(StrictModel):
+    kind: Literal["timeline"] = "timeline"
+    events: tuple[TimelineEvent, ...] = Field(min_length=1, max_length=30)
+
+
+class TableSpec(StrictModel):
+    kind: Literal["table"] = "table"
+    columns: tuple[str, ...] = Field(min_length=1, max_length=12)
+    rows: tuple[tuple[str, ...], ...] = Field(default=(), max_length=100)
+
+    @field_validator("columns", mode="before")
+    @classmethod
+    def _columns_are_safe(cls, values: Any) -> Any:
+        return tuple(_validate_visual_text(str(value).strip()) for value in values)
+
+    @field_validator("rows", mode="before")
+    @classmethod
+    def _rows_are_safe(cls, values: Any) -> Any:
+        return tuple(
+            tuple(_validate_visual_text(str(cell).strip()) for cell in row) for row in values
+        )
+
+    @model_validator(mode="after")
+    def _rows_match_columns(self) -> TableSpec:
+        if len(set(self.columns)) != len(self.columns):
+            raise ValueError("Table columns must be unique")
+        if any(not column for column in self.columns):
+            raise ValueError("Table columns cannot be empty")
+        if any(len(row) != len(self.columns) for row in self.rows):
+            raise ValueError("Every table row must match the number of columns")
+        return self
+
+
+VisualSpec = Annotated[
+    ChartSpec | FlowchartSpec | TimelineSpec | TableSpec,
+    Field(discriminator="kind"),
+]
+
+
+class VisualArtifact(StrictModel):
+    artifact_id: UUID = Field(default_factory=uuid4)
+    title: str = Field(min_length=1, max_length=200)
+    alt_text: str = Field(min_length=1, max_length=2_000)
+    spec: VisualSpec
+
+    @field_validator("title", "alt_text")
+    @classmethod
+    def _artifact_text_is_safe(cls, value: str) -> str:
+        return _validate_visual_text(value)
+
+    @property
+    def kind(self) -> VisualKind:
+        return VisualKind(self.spec.kind)
 
 
 class AudioSession(StrictModel):
@@ -350,6 +505,7 @@ class SkillResult(StrictModel):
     display_text: str | None = None
     speech_text: str | None = None
     media_directive: MediaDirective | None = None
+    visual_artifact: VisualArtifact | None = None
     sensitive: bool = False
 
     @model_validator(mode="after")
@@ -382,6 +538,7 @@ class Response(StrictModel):
     sensitive: bool = False
     updates_display: bool = True
     media_directive: MediaDirective | None = None
+    visual_artifact: VisualArtifact | None = None
     items: tuple[RequestResultItem, ...] = ()
     selected_item_id: str | None = None
 

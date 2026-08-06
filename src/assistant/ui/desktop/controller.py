@@ -26,6 +26,29 @@ class DesktopController:
     async def run_text(self, text: str) -> tuple[Response, ExecutionOutcome]:
         return await self.container.orchestrator.handle_text(text)
 
+    def has_replanning_continuation(self, outcome: ExecutionOutcome) -> bool:
+        return self.container.orchestrator.has_replanning_continuation(outcome)
+
+    def discard_replanning_continuation(self, outcome: ExecutionOutcome) -> None:
+        self.container.orchestrator.discard_replanning_continuation(outcome)
+
+    async def continue_replanning(
+        self,
+        outcome: ExecutionOutcome,
+    ) -> tuple[Response, ExecutionOutcome]:
+        return await self.container.orchestrator.continue_replanning(outcome)
+
+    async def confirm_replanning(
+        self,
+        outcome: ExecutionOutcome,
+        *,
+        typed_token: str | None = None,
+    ) -> tuple[Response, ExecutionOutcome]:
+        return await self.container.orchestrator.confirm_replanning(
+            outcome,
+            typed_token=typed_token,
+        )
+
     async def cancel(self) -> None:
         await self.container.audio_capture.stop()
         await self.container.stt.cancel()

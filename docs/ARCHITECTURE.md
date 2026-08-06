@@ -59,6 +59,26 @@ suppressing microphone capture. The desktop pauses viewer media for an explicit
 assistant interaction and resumes only the same unmodified session. Emergency
 Stop and shutdown stop playback.
 
+## Structured visual presentation
+
+`core.visualize` produces an immutable `VisualArtifact` containing a bounded
+chart, flowchart, timeline, or table specification plus accessible alternative
+text. The artifact follows the ordinary skill, execution, response, audit, and
+plan aggregation path. It is separate from `MediaDirective`, is not stored in
+the media session registry, and requires no filesystem or network permission.
+
+`assistant.visualization.parser` is shared by deterministic routing and direct
+`core.visualize` natural-language calls. It converts typed text or normalized
+speech into the same typed specification while treating punctuation and spoken
+equivalents as optional cues. The skill also accepts a precise structured spec,
+so planner-generated and conversational visuals converge after parsing.
+
+The desktop sends the artifact to `VisualizationView` in the existing results
+window. The local QPainter renderer treats all labels as text, while the
+conversation, terminal, and speech paths retain the artifact's text fallback.
+If Qt is unavailable, callers still receive the typed artifact and its
+description.
+
 ## Application self-knowledge
 
 Open-ended questions about Local Assistant itself use the same planner path as
@@ -182,8 +202,8 @@ and device implementations are injected behind typed interfaces.
 `assistant.dashboard` is a UI-independent read model. Strict card, layout,
 connection, definition, request, snapshot, and numeric point contracts flow
 through `DashboardService` and a provider registry. Built-in providers aggregate
-only bounded `MetricsStore` and scheduler data, including request, model, and
-skill-execution latency cards. The Windows device provider
+only bounded `MetricsStore`, local task, and scheduler data, including request,
+model, skill-execution latency, and task summary cards. The Windows device provider
 uses the existing device interface, and the Home Assistant provider exposes
 only health and exact entity-state reads.
 
@@ -212,6 +232,16 @@ The implemented context-aware routing and planning roadmap is documented in
 for semantic retrieval, context snapshots, intent interpretation, preference
 memory, and adaptive replanning while preserving the permission-gated
 execution model described above.
+
+Retrieved workflow templates may declare registered `skill_ids`, alternative
+`skill_stages`, and terminal `completion_skill_ids`. For these result-dependent
+goals, the planner selects only the currently executable stage and binds only
+that skill's arguments. The orchestrator executes the call through normal
+permissions, records its typed result, then asks the planner to select and bind
+the next stage. A workflow cannot skip a declared stage or report completion
+before a completion skill succeeds. Observation compaction prioritizes the
+newest result so an early large search response cannot hide a later fetched
+document from argument binding.
 
 ## Compatibility
 
@@ -250,6 +280,8 @@ migration. Stable skill IDs are never inferred from display names.
 - `assistant.ui.desktop.media_backend`, `media_viewer`, and `result_window` own
   Qt decoding, detached presentation, playback, report display, controls, and
   applied/failed lifecycle reporting.
+- `assistant.ui.desktop.visualization_view` owns local rendering of structured
+  visual artifacts and remains independent from media decoding and playback.
 
 The dependency direction remains contracts/interfaces -> policy and domain
 services -> orchestration -> UI/composition. Model output never calls platform

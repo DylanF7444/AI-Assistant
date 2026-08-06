@@ -167,6 +167,354 @@ def test_semantic_news_candidate_precedes_weak_lexical_report_match():
     ]
 
 
+def test_research_visualization_workflow_selects_the_complete_skill_chain():
+    from assistant.skills.network import HeadlessReadSkill, WebFetchSkill, WebSearchSkill
+    from assistant.skills.visualize import VisualizeSkill
+
+    manifests = (
+        WebSearchSkill(None, key=lambda _provider: None).manifest,
+        WebFetchSkill(None).manifest,
+        HeadlessReadSkill(object()).manifest,
+        VisualizeSkill.manifest,
+    )
+    planner = LocalPlanner(FakeProvider({}), SkillRetriever(manifests))
+    retrieved = (
+        RetrievedContextItem(
+            namespace="workflow_template",
+            source_id="research_visualization",
+            text="Research current public data and render the requested table.",
+            metadata={
+                "skill_ids": [
+                    "web.search",
+                    "web.fetch",
+                    "web.headless_read",
+                    "core.visualize",
+                ]
+            },
+            score=0.95,
+        ),
+    )
+
+    selected = planner.candidate_skills(
+        "show me a table of the highest earning movies this year",
+        retrieved,
+    )
+
+    assert [manifest.skill_id for manifest in selected] == [
+        "web.search",
+        "web.fetch",
+        "web.headless_read",
+        "core.visualize",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_grounded_workflow_selects_and_binds_only_the_entry_stage():
+    from assistant.skills.network import HeadlessReadSkill, WebFetchSkill, WebSearchSkill
+    from assistant.skills.visualize import VisualizeSkill
+
+    provider = FakeProvider(
+        {
+            "arguments": {
+                "query": "highest grossing movies this year worldwide",
+                "count": 10,
+            },
+            "confidence": 0.96,
+        }
+    )
+    manifests = (
+        WebSearchSkill(None, key=lambda _provider: None).manifest,
+        WebFetchSkill(None).manifest,
+        HeadlessReadSkill(object()).manifest,
+        VisualizeSkill.manifest,
+    )
+    planner = LocalPlanner(provider, SkillRetriever(manifests))
+    text = "show me a table of the highest earning movies this year"
+    retrieved = (
+        RetrievedContextItem(
+            namespace="workflow_template",
+            source_id="research_visualization",
+            text="Search, read a result, then render the observed data.",
+            metadata={
+                "skill_ids": [manifest.skill_id for manifest in manifests],
+                "skill_stages": [
+                    ["web.search"],
+                    ["web.fetch", "web.headless_read"],
+                    ["core.visualize"],
+                ],
+                "completion_skill_ids": ["core.visualize"],
+            },
+            score=0.95,
+        ),
+    )
+
+    decision = await planner.plan_grounded(
+        text,
+        context=ContextSnapshot(request_text=text, session_id="s1"),
+        retrieved=retrieved,
+    )
+
+    assert provider.calls == 1
+    assert decision.intent is not None
+    assert decision.intent.name == "web.search"
+    assert decision.intent.arguments == {
+        "query": "highest grossing movies this year worldwide",
+        "count": 10,
+    }
+    assert decision.interpretation is not None
+    assert decision.interpretation.request_type == "multi_step_goal"
+    assert provider.last_schema == LocalPlanner.ARGUMENT_BINDING_OUTPUT_SCHEMA
+    assert "Selected skill: web.search" in provider.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_workflow_revision_chooses_an_alternative_in_the_next_stage():
+    from assistant.skills.network import HeadlessReadSkill, WebFetchSkill, WebSearchSkill
+    from assistant.skills.visualize import VisualizeSkill
+
+    provider = FakeProvider(
+        [
+            {
+                "disposition": "next_step",
+                "skill_id": "web.fetch",
+                "rationale": "Read the ranked result returned by search.",
+                "clarification": None,
+                "response": None,
+                "confidence": 0.95,
+            },
+            {
+                "arguments": {
+                    "url": "https://movies.example/2026",
+                    "max_characters": 12000,
+                },
+                "confidence": 0.97,
+            },
+        ]
+    )
+    manifests = (
+        WebSearchSkill(None, key=lambda _provider: None).manifest,
+        WebFetchSkill(None).manifest,
+        HeadlessReadSkill(object()).manifest,
+        VisualizeSkill.manifest,
+    )
+    planner = LocalPlanner(provider, SkillRetriever(manifests))
+    text = "make a table of the highest grossing films this year"
+    retrieved = (
+        RetrievedContextItem(
+            namespace="workflow_template",
+            source_id="research_visualization",
+            text="Search, read a result, then render the observed data.",
+            metadata={
+                "skill_ids": [manifest.skill_id for manifest in manifests],
+                "skill_stages": [
+                    ["web.search"],
+                    ["web.fetch", "web.headless_read"],
+                    ["core.visualize"],
+                ],
+                "completion_skill_ids": ["core.visualize"],
+            },
+            score=0.95,
+        ),
+    )
+
+    revision = await planner.revise_plan(
+        text,
+        interpretation=UserIntentInterpretation(
+            user_goal=text,
+            request_type="multi_step_goal",
+            confidence=0.95,
+        ),
+        context=ContextSnapshot(request_text=text, session_id="s1"),
+        retrieved=retrieved,
+        observations=(
+            {
+                "iteration": 1,
+                "skill_id": "web.search",
+                "result_status": "completed",
+                "summary": "Found one ranked source.",
+                "result_data": {
+                    "results": [
+                        {
+                            "title": "2026 worldwide box office",
+                            "url": "https://movies.example/2026",
+                            "description": "Ranked worldwide theatrical grosses.",
+                        }
+                    ]
+                },
+            },
+        ),
+    )
+
+    assert provider.calls == 2
+    assert revision.disposition == "next_step"
+    assert revision.skill_id == "web.fetch"
+    assert revision.arguments["url"] == "https://movies.example/2026"
+
+
+@pytest.mark.asyncio
+async def test_workflow_binding_preserves_latest_result_and_recovers_inner_payload():
+    from assistant.skills.network import HeadlessReadSkill, WebFetchSkill, WebSearchSkill
+    from assistant.skills.visualize import VisualizeSkill
+
+    visualize = VisualizeSkill()
+    provider = FakeProvider(
+        {
+            "arguments": {
+                "kind": "table",
+                "columns": ["Rank", "Movie", "Worldwide gross"],
+                "rows": [
+                    [1, "Starfall", "USD 1.20 billion"],
+                    [2, "Metro Run", "USD 980 million"],
+                ],
+            },
+            "confidence": 0.98,
+        }
+    )
+    manifests = (
+        WebSearchSkill(None, key=lambda _provider: None).manifest,
+        WebFetchSkill(None).manifest,
+        HeadlessReadSkill(object()).manifest,
+        visualize.manifest,
+    )
+    planner = LocalPlanner(
+        provider,
+        SkillRetriever(manifests),
+        argument_validator=lambda skill_id, arguments: (
+            visualize.validate(arguments)
+            if skill_id == "core.visualize"
+            else arguments
+        ),
+    )
+    text = "make a table of the highest grossing films this year"
+    retrieved = (
+        RetrievedContextItem(
+            namespace="workflow_template",
+            source_id="research_visualization",
+            text="Search, read a result, then render the observed data.",
+            metadata={
+                "skill_ids": [manifest.skill_id for manifest in manifests],
+                "skill_stages": [
+                    ["web.search"],
+                    ["web.fetch", "web.headless_read"],
+                    ["core.visualize"],
+                ],
+                "completion_skill_ids": ["core.visualize"],
+            },
+            score=0.95,
+        ),
+    )
+
+    revision = await planner.revise_plan(
+        text,
+        interpretation=UserIntentInterpretation(
+            user_goal=text,
+            request_type="multi_step_goal",
+            confidence=0.95,
+        ),
+        context=ContextSnapshot(request_text=text, session_id="s1"),
+        retrieved=retrieved,
+        observations=(
+            {
+                "iteration": 1,
+                "skill_id": "web.search",
+                "result_status": "completed",
+                "summary": "Found many results.",
+                "result_data": {"results": [{"description": "x" * 5000}]},
+            },
+            {
+                "iteration": 2,
+                "skill_id": "web.fetch",
+                "result_status": "completed",
+                "summary": "Read the ranked source.",
+                "result_data": {
+                    "url": "https://movies.example/2026",
+                    "text": (
+                        "1. Starfall - USD 1.20 billion\n"
+                        "2. Metro Run - USD 980 million"
+                    ),
+                },
+            },
+        ),
+    )
+
+    assert provider.calls == 1
+    assert revision.skill_id == "core.visualize"
+    assert revision.arguments["spec"]["kind"] == "table"
+    assert revision.arguments["spec"]["rows"] == [
+        ["1", "Starfall", "USD 1.20 billion"],
+        ["2", "Metro Run", "USD 980 million"],
+    ]
+    assert "Starfall" in provider.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_plan_revision_builds_requested_visual_from_observed_source_data():
+    from assistant.skills.network import WebFetchSkill
+    from assistant.skills.visualize import VisualizeSkill
+
+    provider = FakeProvider(
+        {
+            "disposition": "next_step",
+            "rationale": "The fetched ranking can now be rendered as a table.",
+            "skill_id": "core.visualize",
+            "arguments": {
+                "title": "Highest-grossing movies this year",
+                "spec": {
+                    "kind": "table",
+                    "columns": ["Rank", "Movie", "Worldwide gross"],
+                    "rows": [["1", "Starfall", "$1.20 billion"]],
+                },
+            },
+            "clarification": None,
+            "response": None,
+            "confidence": 0.96,
+        }
+    )
+    planner = LocalPlanner(
+        provider,
+        SkillRetriever((WebFetchSkill(None).manifest, VisualizeSkill.manifest)),
+    )
+    text = "show me a table of the highest earning movies this year"
+
+    revision = await planner.revise_plan(
+        text,
+        interpretation=UserIntentInterpretation(
+            user_goal="Research current movie grosses and show a ranked table",
+            request_type="multi_step_goal",
+            confidence=0.95,
+        ),
+        context=ContextSnapshot(request_text=text, session_id="s1"),
+        retrieved=(
+            RetrievedContextItem(
+                namespace="workflow_template",
+                source_id="research_visualization",
+                text="Research current facts and render the requested table.",
+                metadata={"skill_ids": ["web.fetch", "core.visualize"]},
+                score=0.95,
+            ),
+        ),
+        observations=(
+            {
+                "iteration": 2,
+                "skill_id": "web.fetch",
+                "arguments": {"url": "https://movies.example/box-office"},
+                "outcome": "completed",
+                "result_status": "completed",
+                "summary": "Read the ranked source.",
+                "result_data": {
+                    "url": "https://movies.example/box-office",
+                    "text": "1. Starfall — $1.20 billion",
+                },
+            },
+        ),
+    )
+
+    assert revision.disposition == "next_step"
+    assert revision.skill_id == "core.visualize"
+    assert revision.arguments["spec"]["rows"] == [["1", "Starfall", "$1.20 billion"]]
+    assert "choose next_step with core.visualize" in provider.last_prompt
+
+
 @pytest.mark.asyncio
 async def test_grounded_planner_recovers_news_call_mislabeled_as_answer():
     provider = FakeProvider(

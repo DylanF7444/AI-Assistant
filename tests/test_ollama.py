@@ -20,6 +20,12 @@ class FakeHttpResponse:
         return None
 
 
+def test_default_prompt_budget_can_hold_grounded_multi_skill_context():
+    provider = OllamaProvider("test-model")
+
+    assert provider.max_prompt_chars == 12000
+
+
 @pytest.mark.asyncio
 async def test_completion_bounds_prompt_without_discarding_rules_or_request(monkeypatch, capsys):
     raw_response = '{"answer":"exact model response"}'

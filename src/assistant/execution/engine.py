@@ -687,8 +687,8 @@ class ExecutionEngine:
             decision=result.status.value,
             permissions=[item.capability for item in required_permissions],
             details={
-                "arguments": call.arguments,
-                "result": result.model_dump(mode="json"),
+                "arguments": self._audit_arguments(call),
+                "result": self._audit_result(result),
                 "attempts": attempts,
             },
         )
@@ -904,6 +904,34 @@ class ExecutionEngine:
         return results
 
     @staticmethod
+    def _audit_arguments(call: SkillCall) -> dict[str, Any]:
+        if call.skill_id != "core.visualize":
+            return call.arguments
+        spec = call.arguments.get("spec")
+        return {
+            "title": call.arguments.get("title", "Visualization"),
+            "kind": spec.get("kind") if isinstance(spec, dict) else None,
+            "payload_omitted": True,
+        }
+
+    @staticmethod
+    def _audit_result(result: SkillResult) -> dict[str, Any]:
+        payload = result.model_dump(mode="json")
+        if result.visual_artifact is None:
+            return payload
+        metadata = {
+            "artifact_id": str(result.visual_artifact.artifact_id),
+            "kind": result.visual_artifact.kind.value,
+            "payload_omitted": True,
+        }
+        payload["visual_artifact"] = metadata
+        payload["display_text"] = "[VISUAL_DESCRIPTION_OMITTED]"
+        payload["speech_text"] = "[VISUAL_DESCRIPTION_OMITTED]"
+        if isinstance(payload.get("data"), dict) and "artifact" in payload["data"]:
+            payload["data"] = {"artifact": metadata}
+        return payload
+
+    @staticmethod
     def _aggregate_plan_results(results: Mapping[str, SkillResult]) -> SkillResult:
         if all(result.status == ResultStatus.COMPLETED for result in results.values()):
             status = ResultStatus.COMPLETED
@@ -935,6 +963,14 @@ class ExecutionEngine:
                     result.media_directive
                     for result in reversed(tuple(results.values()))
                     if result.media_directive is not None
+                ),
+                None,
+            ),
+            visual_artifact=next(
+                (
+                    result.visual_artifact
+                    for result in reversed(tuple(results.values()))
+                    if result.visual_artifact is not None
                 ),
                 None,
             ),

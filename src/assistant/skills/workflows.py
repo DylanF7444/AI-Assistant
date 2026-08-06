@@ -11,10 +11,44 @@ class WorkflowTemplate(BaseModel):
     description: str
     triggers: tuple[str, ...] = Field(default_factory=tuple)
     steps: tuple[str, ...] = Field(default_factory=tuple)
+    skill_ids: tuple[str, ...] = Field(default_factory=tuple)
+    skill_stages: tuple[tuple[str, ...], ...] = Field(default_factory=tuple)
+    completion_skill_ids: tuple[str, ...] = Field(default_factory=tuple)
     clarification: str | None = None
 
 
 DEFAULT_WORKFLOW_TEMPLATES: tuple[WorkflowTemplate, ...] = (
+    WorkflowTemplate(
+        template_id="research_visualization",
+        title="Research current data and visualize it",
+        description=(
+            "Find current public facts, inspect a credible source, and present the "
+            "grounded results as a requested chart, table, or timeline."
+        ),
+        triggers=(
+            "show me a table of the highest earning movies this year",
+            "make a table of current rankings",
+            "chart the latest public statistics",
+            "visualize current web data",
+        ),
+        steps=(
+            "Search the public web for the requested current facts.",
+            "Fetch or render a credible result when search snippets are insufficient.",
+            "Use only observed source data to build the requested visualization.",
+        ),
+        skill_ids=(
+            "web.search",
+            "web.fetch",
+            "web.headless_read",
+            "core.visualize",
+        ),
+        skill_stages=(
+            ("web.search",),
+            ("web.fetch", "web.headless_read"),
+            ("core.visualize",),
+        ),
+        completion_skill_ids=("core.visualize",),
+    ),
     WorkflowTemplate(
         template_id="organize_folder",
         title="Organize a folder",

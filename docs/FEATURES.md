@@ -29,6 +29,7 @@ the relevant setting, credential, local service, or device to be configured.
 | Core | `core.tasks` | Implemented | Low | None | Add, list, complete, and delete local tasks. |
 | Core | `core.timer` | Implemented | Low | None | Run a cancellable local timer. |
 | Core | `core.unit_conversion` | Implemented | Low | None | Convert common distance, weight, volume, and temperature units locally. |
+| Core | `core.visualize` | Implemented | Low | None | Create local charts, flowcharts, timelines, and tables from natural typed/dictated language or typed specs, with accessible text fallbacks. |
 | Network | `cloud.ask` | Optional | Low | `network`, `process.launch` for Codex | Ask configured OpenAI, Anthropic, or local Codex CLI providers. |
 | Network | `web.fetch` | Optional | Low | `network` | Read text from a specific public HTTPS page. |
 | Network | `web.headless_read` | Optional | Low | `network` | Render a public HTTPS page in a fresh non-persistent headless browser and return bounded visible text/links or matching deal, product, article, listing, and result cards without opening a user window. |
@@ -91,9 +92,17 @@ the relevant setting, credential, local service, or device to be configured.
   actions, source-aware TTS/microphone coordination, fingerprint revalidation,
   and optional verified public-HTTPS downloads in a bounded privacy-clearable
   cache.
-- Deterministic routing plus a single grounded schema-constrained planner
-  completion for unmatched requests, demand-driven concurrent cached context,
-  proportional response budgets, and configurable Ollama preload/keep-alive.
+- Structured visual responses for local charts, flowcharts, timelines, and
+  tables. Visual artifacts use typed local rendering, open in the results
+  window, and retain text and speech fallbacks for non-visual clients. A shared
+  parser accepts flexible label/value separators, spoken numbers and
+  punctuation, timed events, process steps, and column/row cues.
+- Deterministic routing plus grounded schema-constrained planning for unmatched
+  requests. Result-dependent workflows use staged skill selection and argument
+  binding after each typed observation, while ordinary requests retain the
+  compact single-completion path. Context collection is demand-driven,
+  concurrent, and cached; response budgets and Ollama preload/keep-alive remain
+  configurable.
 - Default-deny scoped permissions, action-bound confirmations, audit logging,
   emergency stop, rollback where supported, and file access allow/block policy.
 - Signed skill-package validation, isolated worker execution, update review for

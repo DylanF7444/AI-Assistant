@@ -11,6 +11,7 @@ import urllib.error
 from collections import deque
 from collections.abc import Callable
 from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -92,6 +93,22 @@ from assistant.windows.paths import (
 logger = logging.getLogger("assistant.orchestrator")
 
 
+@dataclass(frozen=True)
+class _ReplanningContinuation:
+    correlation_id: UUID
+    text: str
+    current_intent: Intent
+    interpretation: Any
+    context: ContextSnapshot
+    retrieved: tuple[RetrievedContextItem, ...]
+    session_id: str
+    invoked_by_voice: bool
+    observations: tuple[dict[str, Any], ...]
+    step_summaries: tuple[str, ...]
+    iteration: int
+    max_iterations: int
+
+
 class AssistantOrchestrator:
     def __init__(
         self,
@@ -151,6 +168,7 @@ class AssistantOrchestrator:
         self.file_resolver = FileReferenceResolver(self._resolve_file_placeholders)
         self.planner_flow = PlannerCoordinator()
         self._pending_confirmation: ExecutionOutcome | None = None
+        self._replanning_continuations: dict[UUID, _ReplanningContinuation] = {}
 
     @property
     def terminal_debug(self) -> bool:
@@ -897,6 +915,8 @@ class AssistantOrchestrator:
             for key in (
                 "skill_id",
                 "skill_ids",
+                "skill_stages",
+                "completion_skill_ids",
                 "playbook_id",
                 "template_id",
                 "knowledge_base_id",
@@ -2389,6 +2409,72 @@ class AssistantOrchestrator:
             retrieved=decision.retrieved,
         )
 
+    def has_replanning_continuation(self, outcome: ExecutionOutcome) -> bool:
+        call = outcome.call
+        return bool(call and call.correlation_id in self._replanning_continuations)
+
+    def discard_replanning_continuation(self, outcome: ExecutionOutcome) -> None:
+        if outcome.call is not None:
+            self._replanning_continuations.pop(outcome.call.correlation_id, None)
+        if self._pending_confirmation is outcome:
+            self._pending_confirmation = None
+
+    async def continue_replanning(
+        self,
+        outcome: ExecutionOutcome,
+    ) -> tuple[Response, ExecutionOutcome]:
+        if outcome.call is None:
+            raise ValueError("A replanning continuation requires its pending skill call")
+        state = self._replanning_continuations.pop(outcome.call.correlation_id, None)
+        if state is None:
+            raise ValueError("No replanning continuation is pending for this call")
+        prepared = await self.engine.prepare(outcome.call)
+        return await self._resume_replanning(state, prepared)
+
+    async def confirm_replanning(
+        self,
+        outcome: ExecutionOutcome,
+        *,
+        typed_token: str | None = None,
+    ) -> tuple[Response, ExecutionOutcome]:
+        if outcome.call is None or outcome.confirmation is None:
+            raise ValueError("A confirmed replanning continuation requires its pending call")
+        state = self._replanning_continuations.pop(outcome.call.correlation_id, None)
+        if state is None:
+            raise ValueError("No replanning continuation is pending for this call")
+        if self._pending_confirmation is outcome:
+            self._pending_confirmation = None
+        result = await self.engine.execute(
+            outcome.call,
+            confirmation_id=outcome.confirmation.confirmation_id,
+            typed_token=typed_token,
+        )
+        return await self._resume_replanning(
+            state,
+            ExecutionOutcome(result=result, call=outcome.call),
+        )
+
+    async def _resume_replanning(
+        self,
+        state: _ReplanningContinuation,
+        prepared_outcome: ExecutionOutcome,
+    ) -> tuple[Response, ExecutionOutcome]:
+        return await self._handle_replanning_intent(
+            state.correlation_id,
+            state.text,
+            state.current_intent,
+            interpretation=state.interpretation,
+            context=state.context,
+            retrieved=state.retrieved,
+            session_id=state.session_id,
+            invoked_by_voice=state.invoked_by_voice,
+            max_iterations=state.max_iterations,
+            prior_observations=state.observations,
+            prior_step_summaries=state.step_summaries,
+            start_iteration=state.iteration,
+            prepared_outcome=prepared_outcome,
+        )
+
     async def _handle_replanning_intent(
         self,
         correlation_id: UUID,
@@ -2401,13 +2487,17 @@ class AssistantOrchestrator:
         session_id: str,
         invoked_by_voice: bool,
         max_iterations: int = 5,
+        prior_observations: tuple[dict[str, Any], ...] = (),
+        prior_step_summaries: tuple[str, ...] = (),
+        start_iteration: int = 1,
+        prepared_outcome: ExecutionOutcome | None = None,
     ) -> tuple[Response, ExecutionOutcome]:
         assert self.planner is not None
-        observations: list[dict[str, Any]] = []
+        observations = list(prior_observations)
         current_intent = intent
-        last_outcome = ExecutionOutcome()
-        step_summaries: list[str] = []
-        for iteration in range(1, max_iterations + 1):
+        last_outcome = prepared_outcome or ExecutionOutcome()
+        step_summaries = list(prior_step_summaries)
+        for iteration in range(start_iteration, max_iterations + 1):
             call = SkillCall(
                 skill_id=current_intent.name,
                 caller="planner",
@@ -2415,22 +2505,82 @@ class AssistantOrchestrator:
                 permission_context=PermissionContext(session_id=session_id),
                 correlation_id=correlation_id,
             )
-            try:
-                outcome = await self.engine.prepare(call)
-            except Exception as exc:
-                logger.warning("Replanned command preparation failed", exc_info=exc)
-                response = Response(
-                    display_text=f"I could not prepare that command: {exc}",
-                    speech_text="I could not prepare that command.",
-                    response_type=ResponseType.ERROR,
-                    severity="warning",
-                )
+            if prepared_outcome is not None:
+                outcome = prepared_outcome
+                prepared_outcome = None
+            else:
+                try:
+                    outcome = await self.engine.prepare(call)
+                except Exception as exc:
+                    logger.warning("Replanned command preparation failed", exc_info=exc)
+                    self._replanning_continuations.pop(correlation_id, None)
+                    response = Response(
+                        display_text=f"I could not prepare that command: {exc}",
+                        speech_text="I could not prepare that command.",
+                        response_type=ResponseType.ERROR,
+                        severity="warning",
+                    )
+                    response = self._with_reasoning_steps(
+                        response,
+                        request_text=text,
+                        intent=current_intent,
+                        outcome_label="preparation_failed",
+                        step_summaries=tuple(step_summaries),
+                        interpretation=interpretation,
+                        context=context,
+                        retrieved=retrieved,
+                    )
+                    return await self._finish_interaction(
+                        correlation_id,
+                        text,
+                        response,
+                        intent_name=current_intent.name,
+                        outcome_label="preparation_failed",
+                        invoked_by_voice=invoked_by_voice,
+                    )
+            last_outcome = outcome
+            attempt_summary = (
+                f"Prepare {current_intent.name} with "
+                f"{json.dumps(current_intent.arguments, default=str)}"
+            )
+            outcome_label = self._outcome_label(outcome)
+            if (
+                outcome.confirmation
+                or outcome.permission_requests
+                or outcome.registration_requests
+                or outcome.result is None
+                or outcome.result.status.value != "completed"
+            ):
+                if (
+                    outcome.confirmation
+                    or outcome.permission_requests
+                    or outcome.registration_requests
+                ):
+                    self._replanning_continuations[correlation_id] = (
+                        _ReplanningContinuation(
+                            correlation_id=correlation_id,
+                            text=text,
+                            current_intent=current_intent,
+                            interpretation=interpretation,
+                            context=context,
+                            retrieved=retrieved,
+                            session_id=session_id,
+                            invoked_by_voice=invoked_by_voice,
+                            observations=tuple(observations),
+                            step_summaries=tuple(step_summaries),
+                            iteration=iteration,
+                            max_iterations=max_iterations,
+                        )
+                    )
+                else:
+                    self._replanning_continuations.pop(correlation_id, None)
+                response = self._response_from_outcome(outcome)
                 response = self._with_reasoning_steps(
                     response,
                     request_text=text,
                     intent=current_intent,
-                    outcome_label="preparation_failed",
-                    step_summaries=tuple(step_summaries),
+                    outcome_label=outcome_label,
+                    step_summaries=(*step_summaries, attempt_summary),
                     interpretation=interpretation,
                     context=context,
                     retrieved=retrieved,
@@ -2439,16 +2589,12 @@ class AssistantOrchestrator:
                     correlation_id,
                     text,
                     response,
+                    outcome,
                     intent_name=current_intent.name,
-                    outcome_label="preparation_failed",
+                    outcome_label=outcome_label,
                     invoked_by_voice=invoked_by_voice,
                 )
-            last_outcome = outcome
-            step_summaries.append(
-                f"Prepare {current_intent.name} with "
-                f"{json.dumps(current_intent.arguments, default=str)}"
-            )
-            outcome_label = self._outcome_label(outcome)
+            step_summaries.append(attempt_summary)
             observations.append(
                 self._observation_from_outcome(
                     current_intent,
@@ -2457,33 +2603,6 @@ class AssistantOrchestrator:
                     outcome_label=outcome_label,
                 )
             )
-            if (
-                outcome.confirmation
-                or outcome.permission_requests
-                or outcome.registration_requests
-                or outcome.result is None
-                or outcome.result.status.value != "completed"
-            ):
-                response = self._response_from_outcome(outcome)
-                response = self._with_reasoning_steps(
-                    response,
-                    request_text=text,
-                    intent=current_intent,
-                    outcome_label=outcome_label,
-                    step_summaries=tuple(step_summaries),
-                    interpretation=interpretation,
-                    context=context,
-                    retrieved=retrieved,
-                )
-                return await self._finish_interaction(
-                    correlation_id,
-                    text,
-                    response,
-                    outcome,
-                    intent_name=current_intent.name,
-                    outcome_label=outcome_label,
-                    invoked_by_voice=invoked_by_voice,
-                )
             revision = await self.planner.revise_plan(
                 text,
                 interpretation=interpretation,
@@ -2541,14 +2660,24 @@ class AssistantOrchestrator:
                     outcome_label="needs_clarification",
                     invoked_by_voice=invoked_by_voice,
                 )
-            response = Response(
-                display_text=revision.response or last_outcome.result.summary,
-                speech_text=revision.response or last_outcome.result.summary,
-                response_type=(
-                    ResponseType.ERROR if revision.disposition == "reject" else ResponseType.STATUS
-                ),
-                severity="warning" if revision.disposition == "reject" else "success",
-            )
+            self._replanning_continuations.pop(correlation_id, None)
+            message = revision.response or last_outcome.result.summary
+            if revision.disposition == "stop":
+                response = self._response_from_outcome(last_outcome).model_copy(
+                    update={
+                        "display_text": message,
+                        "speech_text": message,
+                        "response_type": ResponseType.STATUS,
+                        "severity": "success",
+                    }
+                )
+            else:
+                response = Response(
+                    display_text=message,
+                    speech_text=message,
+                    response_type=ResponseType.ERROR,
+                    severity="warning",
+                )
             response = self._with_reasoning_steps(
                 response,
                 request_text=text,
@@ -2568,6 +2697,7 @@ class AssistantOrchestrator:
                 outcome_label=f"replan_{revision.disposition}",
                 invoked_by_voice=invoked_by_voice,
             )
+        self._replanning_continuations.pop(correlation_id, None)
         response = Response(
             display_text=(
                 "I stopped after reaching the replanning limit before taking more steps."
@@ -3029,6 +3159,7 @@ class AssistantOrchestrator:
     async def cancel(self, *, exclude_correlation: UUID | None = None) -> None:
         # Provider cancellation is coordinated by the desktop/bootstrap layer.
         self._pending_confirmation = None
+        self._replanning_continuations.clear()
         with self._request_state_lock:
             active_requests = tuple(self._active_request_correlations)
         request_correlation = next(

@@ -5150,6 +5150,8 @@ def run_desktop(container: Container) -> int:
                 default_choice="deny",
             )
             if decision != "approve":
+                if continuation is None:
+                    controller.discard_replanning_continuation(outcome)
                 self._set_pipeline_state(PipelineState.CANCELLED, "Permission was not granted")
                 if cancelled is not None:
                     cancelled()
@@ -5173,6 +5175,8 @@ def run_desktop(container: Container) -> int:
                 default_choice="deny",
             )
             if mode_label not in labels:
+                if continuation is None:
+                    controller.discard_replanning_continuation(outcome)
                 self._set_pipeline_state(PipelineState.CANCELLED, "Permission was not granted")
                 if cancelled is not None:
                     cancelled()
@@ -5195,6 +5199,8 @@ def run_desktop(container: Container) -> int:
                 default_choice="deny",
             )
             if target_mode not in {"requested_targets", "any_target"}:
+                if continuation is None:
+                    controller.discard_replanning_continuation(outcome)
                 self._set_pipeline_state(PipelineState.CANCELLED, "Permission was not granted")
                 if cancelled is not None:
                     cancelled()
@@ -5227,8 +5233,17 @@ def run_desktop(container: Container) -> int:
                 )
             self._reload_permissions()
             self._set_pipeline_state(PipelineState.THINKING, "Preparing the approved action")
-            worker = AsyncWorker(container.engine.prepare(outcome.call))
-            worker.complete.connect(continuation or self._show_continued_outcome)
+            resumes_plan = continuation is None and controller.has_replanning_continuation(outcome)
+            worker = AsyncWorker(
+                controller.continue_replanning(outcome)
+                if resumes_plan
+                else container.engine.prepare(outcome.call)
+            )
+            worker.complete.connect(
+                self._show_result
+                if resumes_plan
+                else continuation or self._show_continued_outcome
+            )
             worker.failed.connect(
                 self._show_skill_demo_error if continuation is not None else self._show_error
             )
@@ -5262,18 +5277,31 @@ def run_desktop(container: Container) -> int:
                 default_choice="deny",
             )
             if decision != "approve":
+                if continuation is None:
+                    controller.discard_replanning_continuation(outcome)
                 self._set_pipeline_state(PipelineState.CANCELLED, "Application was not registered")
                 if cancelled is not None:
                     cancelled()
                 return
             if not self._register_application_alias(request.application):
+                if continuation is None:
+                    controller.discard_replanning_continuation(outcome)
                 self._set_pipeline_state(PipelineState.CANCELLED, "Application was not registered")
                 if cancelled is not None:
                     cancelled()
                 return
             self._set_pipeline_state(PipelineState.THINKING, "Preparing the registered application")
-            worker = AsyncWorker(container.engine.prepare(outcome.call))
-            worker.complete.connect(continuation or self._show_continued_outcome)
+            resumes_plan = continuation is None and controller.has_replanning_continuation(outcome)
+            worker = AsyncWorker(
+                controller.continue_replanning(outcome)
+                if resumes_plan
+                else container.engine.prepare(outcome.call)
+            )
+            worker.complete.connect(
+                self._show_result
+                if resumes_plan
+                else continuation or self._show_continued_outcome
+            )
             worker.failed.connect(
                 self._show_skill_demo_error if continuation is not None else self._show_error
             )
@@ -5331,6 +5359,8 @@ def run_desktop(container: Container) -> int:
             )
             if decision != "approve":
                 container.confirmations.deny(request.confirmation_id)
+                if result_handler is None:
+                    controller.discard_replanning_continuation(outcome)
                 self._set_pipeline_state(PipelineState.CANCELLED, "Action was not confirmed")
                 if cancelled is not None:
                     cancelled()
@@ -5360,19 +5390,28 @@ def run_desktop(container: Container) -> int:
                         typed_token = None
                 if typed_token != expected:
                     container.confirmations.deny(request.confirmation_id)
+                    if result_handler is None:
+                        controller.discard_replanning_continuation(outcome)
                     self._set_pipeline_state(PipelineState.CANCELLED, "Action was not confirmed")
                     if cancelled is not None:
                         cancelled()
                     return
             self._set_pipeline_state(PipelineState.EXECUTING, request.exact_action)
+            resumes_plan = result_handler is None and controller.has_replanning_continuation(
+                outcome
+            )
             worker = AsyncWorker(
-                container.engine.execute(
+                controller.confirm_replanning(outcome, typed_token=typed_token)
+                if resumes_plan
+                else container.engine.execute(
                     outcome.call,
                     confirmation_id=request.confirmation_id,
                     typed_token=typed_token,
                 )
             )
-            worker.complete.connect(result_handler or self._show_skill_result)
+            worker.complete.connect(
+                self._show_result if resumes_plan else result_handler or self._show_skill_result
+            )
             worker.failed.connect(
                 self._show_skill_demo_error if result_handler is not None else self._show_error
             )
@@ -5403,6 +5442,11 @@ def run_desktop(container: Container) -> int:
                 self.media_viewer.apply_directive(response.media_directive)
                 if response.media_directive.action.value == "show":
                     QTimer.singleShot(0, self._open_media_viewer)
+            if response.visual_artifact is not None:
+                QTimer.singleShot(
+                    0,
+                    lambda artifact=response.visual_artifact: self._open_visualization(artifact),
+                )
             if not response.updates_display:
                 return
             self.response.setPlainText(response.display_text)
@@ -5413,6 +5457,9 @@ def run_desktop(container: Container) -> int:
 
         def _open_media_viewer(self) -> None:
             self.result_window.show_media()
+
+        def _open_visualization(self, artifact: Any) -> None:
+            self.result_window.show_visual(artifact)
 
         def _set_media_fullscreen(self, enabled: bool) -> None:
             self.result_window.set_media_fullscreen(enabled)
@@ -5643,7 +5690,7 @@ def run_desktop(container: Container) -> int:
             border-bottom: 1px solid #263952;
             padding: 10px;
         }
-        #assistantResultWindow, #resultWindowStack {
+        #assistantResultWindow, #resultWindowStack, #visualizationView {
             background: #0c1626;
         }
         #resultWindowTitle {

@@ -4,6 +4,8 @@ import threading
 from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, uuid5
 
+from sqlalchemy import select
+
 from assistant.config import Settings
 from assistant.contracts import PipelineState
 from assistant.dashboard.contracts import (
@@ -20,14 +22,20 @@ from assistant.dashboard.contracts import (
     ProviderHealth,
 )
 from assistant.scheduling.service import SchedulerService
-from assistant.storage.database import MetricsStore
+from assistant.storage.database import Database, ItemRow, MetricsStore
 
 ASSISTANT_PROVIDER_ID = "assistant.local"
 AUTOMATION_PROVIDER_ID = "assistant.automations"
+TASKS_PROVIDER_ID = "assistant.tasks"
 
 
 def _card_id(name: str):
     return uuid5(NAMESPACE_URL, f"local-assistant:dashboard:{name}")
+
+
+def _dashboard_task_title(title: str) -> str:
+    normalized = " ".join(title.split())
+    return normalized if len(normalized) <= 160 else f"{normalized[:157].rstrip()}..."
 
 
 def default_dashboard_layout() -> DashboardLayout:
@@ -38,6 +46,7 @@ def default_dashboard_layout() -> DashboardLayout:
         ("assistant.model_latency", MetricPresentation.DURATION),
         ("assistant.execution_latency", MetricPresentation.DURATION),
         ("automations.summary", MetricPresentation.NUMBER),
+        ("tasks.summary", MetricPresentation.NUMBER),
         ("assistant.recent_activity", MetricPresentation.STATUS),
     )
     return DashboardLayout(
@@ -48,7 +57,11 @@ def default_dashboard_layout() -> DashboardLayout:
                 presentation=presentation,
                 refresh_seconds=60,
                 position=position,
-                size="wide" if metric_id == "assistant.recent_activity" else "medium",
+                size=(
+                    "wide"
+                    if metric_id in {"assistant.recent_activity", "tasks.summary"}
+                    else "medium"
+                ),
             )
             for position, (metric_id, presentation) in enumerate(metrics)
         )
@@ -293,6 +306,93 @@ class AssistantMetricsProvider:
             summary=(
                 f"{latest['stage'].replace('_', ' ').title()}"
                 f"  •  {timestamp.astimezone().strftime('%b %d at %H:%M')}"
+            ),
+        )
+
+
+class TaskMetricsProvider:
+    provider_id = TASKS_PROVIDER_ID
+    permission_subject = "dashboard.tasks"
+    remote = False
+
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    def definitions(self) -> tuple[MetricDefinition, ...]:
+        return (
+            MetricDefinition(
+                metric_id="tasks.summary",
+                provider_id=self.provider_id,
+                display_name="Tasks",
+                description="Open and completed tasks in the local task list.",
+                source_label="Local Tasks",
+                value_kind=MetricValueKind.NUMBER,
+                supported_presentations=(MetricPresentation.NUMBER,),
+                default_presentation=MetricPresentation.NUMBER,
+            ),
+        )
+
+    def validate_card(
+        self,
+        _card: DashboardCard,
+        connection: ProviderConnection | None,
+    ) -> None:
+        if connection is not None:
+            raise ValueError("Local task metrics do not use a connection")
+
+    @staticmethod
+    def required_capabilities(
+        definition: MetricDefinition,
+        _connection: ProviderConnection | None,
+        _options: dict,
+    ):
+        return definition.required_capabilities
+
+    def permission_subject_for(self, _connection: ProviderConnection | None) -> str:
+        return self.permission_subject
+
+    async def health(self, _connection: ProviderConnection | None = None) -> ProviderHealth:
+        return ProviderHealth(healthy=True, checked_at=datetime.now(UTC), message="Ready")
+
+    async def collect(
+        self,
+        request: MetricRequest,
+        _connection: ProviderConnection | None = None,
+    ) -> MetricSnapshot:
+        if request.metric_id != "tasks.summary":
+            raise KeyError(request.metric_id)
+        with self.database.session() as session:
+            rows = list(
+                session.scalars(
+                    select(ItemRow)
+                    .where(ItemRow.kind == "task")
+                    .order_by(ItemRow.completed, ItemRow.id)
+                )
+            )
+
+        open_count = sum(not row.completed for row in rows)
+        completed_count = len(rows) - open_count
+        if not rows:
+            return MetricSnapshot(
+                metric_id=request.metric_id,
+                collected_at=datetime.now(UTC),
+                state=MetricState.EMPTY,
+                value=0,
+                summary="No tasks in the local list.",
+            )
+
+        return MetricSnapshot(
+            metric_id=request.metric_id,
+            collected_at=datetime.now(UTC),
+            state=MetricState.READY,
+            value=open_count,
+            summary=f"{open_count} open  •  {completed_count} completed",
+            details=tuple(
+                MetricDetail(
+                    label=f"{'Open' if not row.completed else 'Done'} #{row.id}",
+                    value=_dashboard_task_title(row.title),
+                )
+                for row in rows
             ),
         )
 

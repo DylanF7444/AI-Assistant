@@ -46,11 +46,12 @@ restored. Use `Ctrl+1` for Dashboard and `Ctrl+2` for Assistant.
 
 The default Dashboard contains local Assistant status, request outcomes,
 end-to-end request latency, model latency, skill-execution latency, automation
-summary, and recent activity cards. Select
+summary, local tasks, and recent activity cards. The Tasks card shows open and
+completed counts plus task titles and status. Select
 **Customize** to add, remove, hide, reorder, resize, rename, or change the
 presentation and refresh interval of a card. Changes are staged until **Save**;
 **Cancel** leaves the saved layout untouched, and **Reset to defaults** restores
-the seven local cards. The catalog also offers CPU, memory, storage, and battery
+the eight local cards. The catalog also offers CPU, memory, storage, and battery
 cards. These remain unavailable until the exact read-only `device.read` grant
 is approved from the card.
 
@@ -453,6 +454,42 @@ priority, passive listening ignores speaker output, and Emergency Stop stops
 playback. Runtime formats, output devices, cache size, and decoder error codes
 appear in Diagnostics. See `MEDIA_VIEWER.md` for keyboard controls, supported
 workflow boundaries, and the release matrix.
+
+## Visual responses
+
+The assistant can create local charts, flowcharts, timelines, and tables in the
+same results window. Ask in ordinary language; these are examples, not command
+formats:
+
+- `Can you chart monthly sales for January 12, February 18, and March 15?`
+- `Draw the release flow: plan, then build, then test, then deploy.`
+- `Show my morning timeline—nine AM standup, ten AM build, two PM review.`
+- `Make a table with columns name and status, and rows Alice ready, Bob waiting.`
+
+Punctuation is optional. For chart label/value pairs, `January=12`,
+`January: 12`, `January is 12`, `January at 12`, and `January twelve` are
+equivalent. Dictation can use words such as “then,” “columns,” “rows,” “AM,”
+and “PM” as structural cues. Spoken numbers are converted to numeric values.
+When a transcript does not contain enough information to infer a boundary—for
+example, multiword table cells with no column or row cues—the assistant asks a
+clarifying question.
+
+The visualization capability itself accepts either natural language or a typed
+visual specification. This lets conversational requests, voice transcripts,
+deterministic routing, and planner-created visuals share the same validation
+and rendering path.
+
+Visual requests that depend on current public facts can use a permission-gated
+skill chain. For example, `Show me a table of the highest-grossing movies this
+year` can search for a current source, read one result, and then build the table
+from the observed values. Each network skill still requests its normal scoped
+permission, and the table is not considered complete until the local
+visualization skill succeeds.
+
+Visuals are generated from bounded typed data, require no network or file
+permission, and keep an accessible text description in the conversation and
+speech paths. Existing `show` and `play` media commands continue to use the
+media viewer. See `VISUAL_CAPABILITIES_IMPLEMENTATION_PLAN.md` for the roadmap.
 
 ## Microphone and privacy
 

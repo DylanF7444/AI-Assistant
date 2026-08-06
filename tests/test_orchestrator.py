@@ -361,6 +361,97 @@ class ReplanningPlanner:
         pass
 
 
+class FakeMovieResearchClient:
+    def __init__(self):
+        self.search_queries = []
+        self.fetch_urls = []
+
+    async def search(self, query, provider="duckduckgo", api_key=None, count=5):
+        self.search_queries.append((query, provider, count))
+        return [
+            {
+                "title": "Current-year worldwide box office",
+                "url": "https://movies.example/box-office",
+                "description": "Ranked worldwide theatrical grosses for current releases.",
+            }
+        ]
+
+    async def fetch(self, url, max_characters=12000):
+        self.fetch_urls.append((url, max_characters))
+        return {
+            "url": url,
+            "text": "1. Starfall — $1.20 billion\n2. Metro Run — $980 million",
+        }
+
+
+class MovieResearchTablePlanner:
+    def __init__(self):
+        self.revision_calls = []
+
+    async def interpret(self, text, *, context, retrieved):
+        return UserIntentInterpretation(
+            user_goal="Research current movie grosses and show a ranked table",
+            request_type="multi_step_goal",
+            explicit_requests=[text],
+            success_criteria=["a sourced table is displayed"],
+            confidence=0.95,
+        )
+
+    async def plan_from_interpretation(self, text, *, interpretation, context, retrieved):
+        return PlannerDecision(
+            intent=Intent(
+                name="web.search",
+                arguments={
+                    "query": "current year highest-grossing movies worldwide box office",
+                    "count": 5,
+                },
+                confidence=0.95,
+                source="llm",
+            )
+        )
+
+    async def revise_plan(self, text, *, interpretation, context, retrieved, observations):
+        self.revision_calls.append(observations)
+        if len(observations) == 1:
+            url = observations[0]["result_data"]["results"][0]["url"]
+            return PlanRevision(
+                disposition="next_step",
+                rationale="Read the ranked source returned by search.",
+                skill_id="web.fetch",
+                arguments={"url": url, "max_characters": 12000},
+                confidence=0.95,
+            )
+        if len(observations) == 2:
+            source_text = observations[1]["result_data"]["text"]
+            assert "Starfall" in source_text
+            return PlanRevision(
+                disposition="next_step",
+                rationale="Render the observed ranking as the requested table.",
+                skill_id="core.visualize",
+                arguments={
+                    "title": "Highest-grossing movies this year",
+                    "spec": {
+                        "kind": "table",
+                        "columns": ["Rank", "Movie", "Worldwide gross"],
+                        "rows": [
+                            ["1", "Starfall", "$1.20 billion"],
+                            ["2", "Metro Run", "$980 million"],
+                        ],
+                    },
+                },
+                confidence=0.96,
+            )
+        return PlanRevision(
+            disposition="stop",
+            rationale="The requested sourced table was rendered.",
+            response="Highest-grossing movies this year, ranked by worldwide gross.",
+            confidence=0.98,
+        )
+
+    async def cancel(self):
+        pass
+
+
 class InterpretingLaunchPlanner:
     async def interpret(self, text, *, context, retrieved):
         return UserIntentInterpretation(
@@ -1799,6 +1890,69 @@ async def test_broad_goal_replanning_can_continue_after_observation(settings):
     assert planner.revision_calls[0][1][0]["skill_id"] == "core.calculator"
     assert planner.revision_calls[0][1][0]["result_data"] == {"value": 4.0}
     assert planner.revision_calls[1][1][1]["skill_id"] == "core.datetime"
+
+
+@pytest.mark.asyncio
+async def test_research_request_chains_search_fetch_and_visualize_into_a_table(settings):
+    container = build_container(settings)
+    client = FakeMovieResearchClient()
+    container.registry.get("web.search").client = client
+    container.registry.get("web.fetch").client = client
+    planner = MovieResearchTablePlanner()
+    container.orchestrator.planner = planner
+
+    response, outcome = await container.orchestrator.handle_text(
+        "show me a table of the highest earning movies this year"
+    )
+
+    assert response.response_type == ResponseType.PERMISSION
+    assert outcome.call is not None
+    assert outcome.call.skill_id == "web.search"
+    assert container.orchestrator.has_replanning_continuation(outcome)
+    for request in outcome.permission_requests:
+        container.permissions.grant(
+            user_id=request.call.permission_context.user_id,
+            skill_id=request.call.skill_id,
+            capability=request.scope.capability,
+            grant_type=GrantType.ALWAYS,
+            targets=request.scope.targets,
+        )
+    response, outcome = await container.orchestrator.continue_replanning(outcome)
+
+    assert response.response_type == ResponseType.PERMISSION
+    assert outcome.call is not None
+    assert outcome.call.skill_id == "web.fetch"
+    assert container.orchestrator.has_replanning_continuation(outcome)
+    for request in outcome.permission_requests:
+        container.permissions.grant(
+            user_id=request.call.permission_context.user_id,
+            skill_id=request.call.skill_id,
+            capability=request.scope.capability,
+            grant_type=GrantType.ALWAYS,
+            targets=request.scope.targets,
+        )
+    response, outcome = await container.orchestrator.continue_replanning(outcome)
+
+    assert outcome.result is not None
+    assert outcome.result.status == ResultStatus.COMPLETED
+    assert outcome.call is not None
+    assert outcome.call.skill_id == "core.visualize"
+    assert response.visual_artifact is not None
+    assert response.visual_artifact.spec.columns == (
+        "Rank",
+        "Movie",
+        "Worldwide gross",
+    )
+    assert response.visual_artifact.spec.rows == (
+        ("1", "Starfall", "$1.20 billion"),
+        ("2", "Metro Run", "$980 million"),
+    )
+    assert client.fetch_urls[0][0] == "https://movies.example/box-office"
+    assert [items[-1]["skill_id"] for items in planner.revision_calls] == [
+        "web.search",
+        "web.fetch",
+        "core.visualize",
+    ]
 
 
 @pytest.mark.asyncio

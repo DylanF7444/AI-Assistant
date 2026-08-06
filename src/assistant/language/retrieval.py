@@ -314,6 +314,23 @@ class WorkflowTemplateSemanticIndexer:
             workflow_embeddings,
             strict=True,
         ):
+            available_skill_ids = tuple(
+                skill_id
+                for skill_id in template.skill_ids
+                if enabled_skill_ids is None or skill_id in enabled_skill_ids
+            )
+            available_completion_skill_ids = tuple(
+                skill_id
+                for skill_id in template.completion_skill_ids
+                if skill_id in available_skill_ids
+            )
+            available_skill_stages = tuple(
+                tuple(skill_id for skill_id in stage if skill_id in available_skill_ids)
+                for stage in template.skill_stages
+            )
+            available_skill_stages = tuple(
+                stage for stage in available_skill_stages if stage
+            )
             self.index.upsert(
                 namespace="workflow_template",
                 source_id=template.template_id,
@@ -323,6 +340,9 @@ class WorkflowTemplateSemanticIndexer:
                     "title": template.title,
                     "clarification": template.clarification,
                     "triggers": list(template.triggers),
+                    "skill_ids": list(available_skill_ids),
+                    "skill_stages": [list(stage) for stage in available_skill_stages],
+                    "completion_skill_ids": list(available_completion_skill_ids),
                 },
                 embedding=embedding,
                 embedding_model=model_name,
@@ -388,6 +408,10 @@ def _workflow_text(template: WorkflowTemplate) -> str:
         f"Description: {template.description}\n"
         f"Triggers: {', '.join(template.triggers)}\n"
         f"Steps: {'; '.join(template.steps)}\n"
+        f"Registered skills: {', '.join(template.skill_ids)}\n"
+        "Skill stages: "
+        f"{' -> '.join(' | '.join(stage) for stage in template.skill_stages)}\n"
+        f"Completion skills: {', '.join(template.completion_skill_ids)}\n"
         f"Clarification: {template.clarification or ''}"
     )
 

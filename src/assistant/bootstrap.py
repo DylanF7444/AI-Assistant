@@ -18,6 +18,7 @@ from assistant.context.providers import (
 from assistant.dashboard.builtins import (
     AssistantMetricsProvider,
     AutomationMetricsProvider,
+    TaskMetricsProvider,
     default_dashboard_layout,
 )
 from assistant.dashboard.device import WindowsDeviceMetricProvider
@@ -139,6 +140,7 @@ from assistant.skills.productivity import (
 from assistant.skills.registry import SkillRegistry
 from assistant.skills.scheduling import ScheduleSkill
 from assistant.skills.slack import SlackSkill
+from assistant.skills.visualize import VisualizeSkill
 from assistant.skills.windows import (
     ApplicationWindowSkill,
     BrowserNavigateSkill,
@@ -320,6 +322,7 @@ def _register_core_skills(
     registry.register(TimerSkill())
     registry.register(DateTimeSkill())
     registry.register(CalculatorSkill())
+    registry.register(VisualizeSkill())
     registry.register(ChooseSkill(logic_state))
     registry.register(FileAccessPolicySkill(file_access_policy))
 
@@ -914,6 +917,7 @@ def build_container(settings: Settings | None = None) -> Container:
     dashboard_registry = DashboardProviderRegistry()
     dashboard_registry.register(AssistantMetricsProvider(storage.metrics, settings))
     dashboard_registry.register(AutomationMetricsProvider(scheduler, storage.metrics))
+    dashboard_registry.register(TaskMetricsProvider(database))
     dashboard_registry.register(WindowsDeviceMetricProvider(LocalWindowsDeviceAdapter()))
     dashboard_registry.register(HomeAssistantMetricProvider(storage.secret_vault))
     dashboard = DashboardService(

@@ -40,7 +40,7 @@ class OllamaProvider:
         model: str,
         endpoint: str = "http://127.0.0.1:11434/api/generate",
         max_tokens: int = 256,
-        max_prompt_chars: int = 4500,
+        max_prompt_chars: int = 12000,
         terminal_debug: bool = False,
         keep_alive: str = "30m",
         usage_callback: Callable[[OllamaUsage], None] | None = None,

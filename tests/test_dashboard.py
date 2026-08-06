@@ -22,7 +22,7 @@ from assistant.dashboard.contracts import (
 from assistant.dashboard.registry import DashboardProviderRegistry
 from assistant.dashboard.service import DashboardService
 from assistant.dashboard.storage import DashboardLayoutStore
-from assistant.storage.database import SettingsStore
+from assistant.storage.database import ItemRow, SettingsStore, now
 
 
 @pytest.mark.asyncio
@@ -77,6 +77,7 @@ async def test_default_dashboard_aggregates_privacy_bounded_local_metrics(settin
         "assistant.model_latency",
         "assistant.execution_latency",
         "automations.summary",
+        "tasks.summary",
         "assistant.recent_activity",
     ]
     assert SettingsStore(container.database).get(DashboardLayoutStore.KEY) is not None
@@ -89,8 +90,62 @@ async def test_default_dashboard_aggregates_privacy_bounded_local_metrics(settin
     assert by_metric["assistant.execution_latency"].value == 50
     assert "p95 80.0 ms" in by_metric["assistant.execution_latency"].summary
     assert by_metric["automations.summary"].state == MetricState.READY
+    assert by_metric["tasks.summary"].state == MetricState.EMPTY
     assert by_metric["assistant.recent_activity"].value == "Failed"
     assert all("transcript" not in snapshot.model_dump() for snapshot in snapshots.values())
+
+
+@pytest.mark.asyncio
+async def test_tasks_dashboard_metric_shows_open_and_completed_tasks(settings):
+    container = build_container(settings)
+    with container.database.session() as session:
+        session.add(ItemRow(kind="task", title="Review the release", body="", created_at=now()))
+        session.add(
+            ItemRow(
+                kind="task",
+                title="Ship the checklist",
+                body="",
+                completed=True,
+                created_at=now(),
+            )
+        )
+
+    layout = container.dashboard.layout()
+    snapshots = await container.dashboard.refresh()
+    task_card = next(card for card in layout.cards if card.metric_id == "tasks.summary")
+    snapshot = snapshots[task_card.card_id]
+
+    assert snapshot.value == 1
+    assert snapshot.summary == "1 open  •  1 completed"
+    assert [(detail.label, detail.value) for detail in snapshot.details] == [
+        ("Open #1", "Review the release"),
+        ("Done #2", "Ship the checklist"),
+    ]
+
+
+def test_dashboard_layout_store_migrates_default_cards_once(settings):
+    container = build_container(settings)
+    values = SettingsStore(container.database)
+    defaults = default_dashboard_layout()
+    legacy = defaults.model_copy(
+        update={
+            "cards": tuple(card for card in defaults.cards if card.metric_id != "tasks.summary")
+        }
+    )
+    values.set(DashboardLayoutStore.KEY, legacy.model_dump(mode="json"))
+    store = DashboardLayoutStore(values, default_dashboard_layout)
+
+    migrated = store.load()
+
+    assert [card.metric_id for card in migrated.cards].count("tasks.summary") == 1
+    assert values.get(DashboardLayoutStore.DEFAULT_MIGRATION_KEY) is True
+
+    removed = DashboardLayout(
+        cards=tuple(card for card in migrated.cards if card.metric_id != "tasks.summary")
+    )
+    store.save(removed)
+
+    assert "tasks.summary" not in {card.metric_id for card in store.load().cards}
 
 
 def test_dashboard_layout_store_falls_back_without_overwriting_invalid_payload(settings):

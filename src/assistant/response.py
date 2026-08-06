@@ -46,6 +46,11 @@ def response_from_result(
         if result.error and result.error.code == "clarification_required"
         else ResponseType.SKILL
     )
+    visual_artifact = (
+        None
+        if result.sensitive and hide_sensitive_display
+        else result.visual_artifact
+    )
     return Response(
         display_text=display,
         speech_text=speech,
@@ -54,6 +59,7 @@ def response_from_result(
         speak=True,
         sensitive=result.sensitive,
         media_directive=result.media_directive,
+        visual_artifact=visual_artifact,
         items=result.items or (),
     )
 

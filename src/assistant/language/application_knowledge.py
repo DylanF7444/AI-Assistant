@@ -54,6 +54,14 @@ APPLICATION_KNOWLEDGE: dict[str, Any] = {
         "offline mode, and is downloaded into a bounded verified cache before display. "
         "Viewer controls affect only the active in-app presentation, not other apps."
     ),
+    "visual_presentation": (
+        "The Assistant can create local structured visualizations for bounded data: "
+        "bar or line charts, flowcharts, timelines, and tables. Visual artifacts use "
+        "typed contracts and a local results-window renderer, require no network or "
+        "filesystem permission, and retain accessible text and speech fallbacks. The "
+        "visualization skill accepts ordinary typed or dictated language without fixed "
+        "punctuation, as well as precise typed specifications."
+    ),
     "self_knowledge_limits": (
         "The assistant can explain this supplied application design and live context, but it "
         "does not have subjective self-awareness or introspective access to hidden model "

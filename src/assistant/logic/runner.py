@@ -309,6 +309,7 @@ class LogicWorkflowRunner:
             display_text=result.display_text,
             speech_text=result.speech_text,
             media_directive=result.media_directive,
+            visual_artifact=result.visual_artifact,
             sensitive=result.sensitive,
             items=result.items or LogicWorkflowRunner._choice_items(choice),
             data={

@@ -79,6 +79,12 @@ fullscreen, voice, and keyboard controls. Remote media is downloaded into a
 bounded verified cache and is unavailable under offline lock. See
 `docs/MEDIA_VIEWER.md`.
 
+It can also create local structured visuals—charts, flowcharts, timelines, and
+tables—in the same results window. These visuals are typed, offline, and have
+text and speech fallbacks. They can be requested in ordinary typed or dictated
+language without fixed punctuation or label/value separators. See
+`docs/VISUAL_CAPABILITIES_IMPLEMENTATION_PLAN.md`.
+
 Background reminders and results are retained in a durable notification Inbox
 with unread badges, a recent-item drawer, in-app banners, Windows click-through,
 quiet hours, and links to the exact automation run.

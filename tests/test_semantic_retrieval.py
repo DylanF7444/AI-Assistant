@@ -17,7 +17,9 @@ from assistant.language.retrieval import (
 from assistant.providers import EmbeddingProvider
 from assistant.skills.builtin import CalculatorSkill
 from assistant.skills.examples import SkillExample
+from assistant.skills.network import HeadlessReadSkill, WebFetchSkill, WebSearchSkill
 from assistant.skills.registry import SkillRegistry
+from assistant.skills.visualize import VisualizeSkill
 from assistant.skills.windows import ApplicationWindowSkill
 from assistant.storage.database import Database, VectorItemRow
 from assistant.storage.knowledge import KnowledgeBaseStore
@@ -343,6 +345,43 @@ async def test_workflow_template_indexer_adds_common_workflows(tmp_path):
 
     assert results
     assert results[0].metadata["template_id"] == "organize_folder"
+
+
+@pytest.mark.asyncio
+async def test_research_visualization_workflow_exposes_its_enabled_skill_chain(tmp_path):
+    database = Database(f"sqlite:///{tmp_path / 'data.db'}")
+    database.migrate()
+    registry = SkillRegistry(require_signatures=False)
+    registry.register(WebSearchSkill(None, key=lambda _provider: None))
+    registry.register(WebFetchSkill(None))
+    registry.register(HeadlessReadSkill(object()))
+    registry.register(VisualizeSkill())
+    index = VectorIndex(database)
+    provider = LexicalFallbackEmbeddingProvider()
+    indexer = WorkflowTemplateSemanticIndexer(index, provider)
+
+    await indexer.refresh(registry)
+    results = await SemanticRetriever(index, provider).search(
+        "show me a table of the highest earning movies this year",
+        namespaces={"workflow_template"},
+        limit=3,
+    )
+
+    research = next(
+        item for item in results if item.metadata["template_id"] == "research_visualization"
+    )
+    assert research.metadata["skill_ids"] == [
+        "web.search",
+        "web.fetch",
+        "web.headless_read",
+        "core.visualize",
+    ]
+    assert research.metadata["skill_stages"] == [
+        ["web.search"],
+        ["web.fetch", "web.headless_read"],
+        ["core.visualize"],
+    ]
+    assert research.metadata["completion_skill_ids"] == ["core.visualize"]
 
 
 def _cosine(left, right):

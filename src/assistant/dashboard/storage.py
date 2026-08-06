@@ -19,6 +19,7 @@ from assistant.storage.secrets import SecretVault
 
 class DashboardLayoutStore:
     KEY = "dashboard.layout.v1"
+    DEFAULT_MIGRATION_KEY = "dashboard.layout.default_cards.v1"
 
     def __init__(
         self,
@@ -33,15 +34,41 @@ class DashboardLayoutStore:
         if payload is None:
             layout = self.default_factory()
             self.save(layout)
+            self.settings.set(self.DEFAULT_MIGRATION_KEY, True)
             return layout
         try:
-            return DashboardLayout.model_validate(payload)
+            layout = DashboardLayout.model_validate(payload)
         except (TypeError, ValidationError, ValueError):
             return self.default_factory()
+        if self.settings.get(self.DEFAULT_MIGRATION_KEY) is not True:
+            migrated = self._add_missing_default_cards(layout)
+            if migrated != layout:
+                self.save(migrated)
+                layout = migrated
+            self.settings.set(self.DEFAULT_MIGRATION_KEY, True)
+        return layout
+
+    def _add_missing_default_cards(self, layout: DashboardLayout) -> DashboardLayout:
+        defaults = self.default_factory()
+        existing_metrics = {card.metric_id for card in layout.cards}
+        missing = [card for card in defaults.cards if card.metric_id not in existing_metrics]
+        if not missing:
+            return layout
+        next_position = max((card.position for card in layout.cards), default=-1) + 1
+        return layout.model_copy(
+            update={
+                "cards": layout.cards
+                + tuple(
+                    card.model_copy(update={"position": next_position + offset})
+                    for offset, card in enumerate(missing)
+                )
+            }
+        )
 
     def save(self, layout: DashboardLayout) -> None:
         validated = DashboardLayout.model_validate(layout)
         self.settings.set(self.KEY, validated.model_dump(mode="json"))
+        self.settings.set(self.DEFAULT_MIGRATION_KEY, True)
 
     def default(self) -> DashboardLayout:
         return self.default_factory()
