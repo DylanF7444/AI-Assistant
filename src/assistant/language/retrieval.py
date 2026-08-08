@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
@@ -15,6 +16,31 @@ from assistant.storage.playbooks import Playbook, PlaybookStore
 from assistant.storage.vector_index import VectorIndex
 
 
+def _embedding_signature(provider: EmbeddingProvider) -> str:
+    values = [provider.__class__.__name__]
+    for attribute in ("model", "model_name", "dimensions"):
+        value = getattr(provider, attribute, None)
+        if value is not None:
+            values.append(f"{attribute}={value}")
+    primary = getattr(provider, "primary", None)
+    fallback = getattr(provider, "fallback", None)
+    if primary is not None:
+        values.append(f"primary={_embedding_signature(primary)}")
+    if fallback is not None:
+        values.append(f"fallback={_embedding_signature(fallback)}")
+    return "|".join(values)
+
+
+def _signature_digest(value: Any, provider: EmbeddingProvider) -> str:
+    payload = json.dumps(
+        {"content": value, "embedding": _embedding_signature(provider)},
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 class RetrievedContextItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -26,13 +52,28 @@ class RetrievedContextItem(BaseModel):
 
 
 class SemanticRetriever:
+    DEFAULT_MINIMUM_SCORES = {
+        "skill": 0.05,
+        "skill_example": 0.08,
+        "workflow_template": 0.08,
+        "playbook": 0.10,
+        "knowledge": 0.08,
+        "memory": 0.08,
+    }
+
     def __init__(
         self,
         index: VectorIndex,
         embedding_provider: EmbeddingProvider,
+        *,
+        minimum_scores: dict[str, float] | None = None,
     ) -> None:
         self.index = index
         self.embedding_provider = embedding_provider
+        self.minimum_scores = {
+            **self.DEFAULT_MINIMUM_SCORES,
+            **(minimum_scores or {}),
+        }
 
     async def search(
         self,
@@ -57,9 +98,10 @@ class SemanticRetriever:
             for item in self.index.search(
                 embeddings[0],
                 namespaces=namespaces,
-                limit=limit,
+                limit=max(limit * 3, limit),
             )
-        )
+            if item.score >= self.minimum_scores.get(item.namespace, 0)
+        )[:limit]
 
 
 class SkillSemanticIndexer:
@@ -101,7 +143,13 @@ class SkillSemanticIndexer:
                 json.dumps(example.model_dump(mode="json"), sort_keys=True) for example in examples
             ),
         )
-        if signature == self._last_signature:
+        signature_digest = _signature_digest(signature, self.embedding_provider)
+        expected_count = len(manifests) + len(examples)
+        if signature == self._last_signature or (
+            self.index.stored_signature("skills") == signature_digest
+            and self.index.namespace_count({"skill", "skill_example"}) == expected_count
+        ):
+            self._last_signature = signature
             return
         self.index.delete_namespace("skill")
         self.index.delete_namespace("skill_example")
@@ -147,6 +195,7 @@ class SkillSemanticIndexer:
                 embedding_model=model_name,
             )
         self._last_signature = signature
+        self.index.store_signature("skills", signature_digest)
 
 
 class MemorySemanticIndexer:
@@ -175,7 +224,12 @@ class MemorySemanticIndexer:
                 for item in memories
             )
         )
-        if signature == self._last_signature:
+        signature_digest = _signature_digest(signature, self.embedding_provider)
+        if signature == self._last_signature or (
+            self.index.stored_signature("memory") == signature_digest
+            and self.index.namespace_count({"memory"}) == len(memories)
+        ):
+            self._last_signature = signature
             return
         self.index.delete_namespace("memory")
         texts = [_memory_text(item) for item in memories]
@@ -196,6 +250,7 @@ class MemorySemanticIndexer:
                 embedding_model=model_name,
             )
         self._last_signature = signature
+        self.index.store_signature("memory", signature_digest)
 
 
 class KnowledgeSemanticIndexer:
@@ -223,15 +278,20 @@ class KnowledgeSemanticIndexer:
                 for item in knowledge_bases
             )
         )
-        if signature == self._last_signature:
-            return
-        self.index.delete_namespace("knowledge")
         chunks: list[tuple[Any, int, str]] = []
         for knowledge_base in knowledge_bases:
             if not knowledge_base.enabled:
                 continue
             for index, chunk in enumerate(KnowledgeBaseStore._chunks(knowledge_base.content)):
                 chunks.append((knowledge_base, index, chunk))
+        signature_digest = _signature_digest(signature, self.embedding_provider)
+        if signature == self._last_signature or (
+            self.index.stored_signature("knowledge") == signature_digest
+            and self.index.namespace_count({"knowledge"}) == len(chunks)
+        ):
+            self._last_signature = signature
+            return
+        self.index.delete_namespace("knowledge")
         texts = [_knowledge_text(item, chunk) for item, _, chunk in chunks]
         embeddings = await self.embedding_provider.embed(texts) if texts else []
         model_name = self.embedding_provider.__class__.__name__
@@ -255,6 +315,7 @@ class KnowledgeSemanticIndexer:
                 embedding_model=model_name,
             )
         self._last_signature = signature
+        self.index.store_signature("knowledge", signature_digest)
 
 
 class WorkflowTemplateSemanticIndexer:
@@ -297,7 +358,13 @@ class WorkflowTemplateSemanticIndexer:
             ),
             tuple(sorted(enabled_skill_ids)) if enabled_skill_ids is not None else None,
         )
-        if signature == self._last_signature:
+        signature_digest = _signature_digest(signature, self.embedding_provider)
+        expected_count = len(self.templates) + len(playbooks)
+        if signature == self._last_signature or (
+            self.index.stored_signature("workflows") == signature_digest
+            and self.index.namespace_count({"workflow_template", "playbook"}) == expected_count
+        ):
+            self._last_signature = signature
             return
         self.index.delete_namespace("workflow_template")
         self.index.delete_namespace("playbook")
@@ -328,9 +395,7 @@ class WorkflowTemplateSemanticIndexer:
                 tuple(skill_id for skill_id in stage if skill_id in available_skill_ids)
                 for stage in template.skill_stages
             )
-            available_skill_stages = tuple(
-                stage for stage in available_skill_stages if stage
-            )
+            available_skill_stages = tuple(stage for stage in available_skill_stages if stage)
             self.index.upsert(
                 namespace="workflow_template",
                 source_id=template.template_id,
@@ -362,6 +427,7 @@ class WorkflowTemplateSemanticIndexer:
                 embedding_model=model_name,
             )
         self._last_signature = signature
+        self.index.store_signature("workflows", signature_digest)
 
 
 def _skill_text(manifest) -> str:

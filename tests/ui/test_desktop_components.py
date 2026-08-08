@@ -10,9 +10,11 @@ pytest.importorskip("pytestqt")
 from assistant.bootstrap import build_container
 from assistant.contracts import (
     ActivityTrace,
+    CitationSourceType,
     PipelineEvent,
     PipelineState,
     Response,
+    ResponseCitation,
     ResponseType,
     TracePhase,
     Transcript,
@@ -174,6 +176,25 @@ def test_compact_companion_switches_views_renders_and_hides_to_tray(
     assert "calculate 17 times 19" in window.compact_panel.latest_request.text()
     assert window.response.toPlainText() == window.compact_panel.response.toPlainText()
 
+    window._display_response(
+        Response(
+            display_text="Grounded answer",
+            response_type=ResponseType.ANSWER,
+            citations=(
+                ResponseCitation(
+                    source_id="local-1",
+                    title="Selected document",
+                    source_type=CitationSourceType.LOCAL_DOCUMENT,
+                    local_reference="document:abc123",
+                ),
+            ),
+        )
+    )
+    assert window.inspect_sources_button.isEnabled()
+    assert window.copy_sources_button.isEnabled()
+    window._copy_sources()
+    assert QApplication.clipboard().text() == "[1] Selected document — document:abc123"
+
     previous_request = window.transcript.toPlainText()
     previous_response = window.response.toPlainText()
     previous_response_type = window.response_type.text()
@@ -297,10 +318,17 @@ def test_compact_companion_switches_views_renders_and_hides_to_tray(
     window.setting_wake_word_enabled.setChecked(True)
     window.setting_wake_word_model.setText(str(wake_model))
     window.setting_wake_word_threshold.setText("0.73")
+    window.setting_text_scale.setCurrentIndex(window.setting_text_scale.findData(1.5))
+    window.setting_high_contrast.setChecked(True)
+    window.setting_reduced_motion.setChecked(True)
     window._save_settings()
     assert container.settings.wake_word_enabled is True
     assert container.settings.wake_word_model == wake_model
     assert container.settings.wake_word_threshold == 0.73
+    assert container.settings.ui_text_scale == 1.5
+    assert container.settings.ui_high_contrast is True
+    assert container.settings.ui_reduced_motion is True
+    assert "font-size: 15pt" in QApplication.instance().styleSheet()
 
     window._switch_window_mode("compact")
     window.close()

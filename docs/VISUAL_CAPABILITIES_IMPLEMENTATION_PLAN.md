@@ -13,6 +13,23 @@ The implementation is intentionally additive. Existing `media.present`,
 results-window behavior remain responsible for media and are not repurposed for
 structured visuals.
 
+## Implementation and acceptance status
+
+The Release 1 slice is implemented in the August 6, 2026 source baseline. The
+contract, parser, routing, transcript, orchestration, response, audit, and
+offscreen desktop lanes are automated. The focused verification run passed 73
+contract/media/response tests and 17 marked visualization/media UI tests.
+
+The physical dictated-speech variants in the manual matrix remain part of the
+packaged voice acceptance gate. They require a person speaking through the
+configured microphone and do not block the source-level visual feature claim.
+They do block a claim that punctuation-free visual dictation has been accepted
+on every supported microphone/STT configuration. A separate bounded
+`vision.understand_image` slice now supports explicit local-image OCR,
+description, chart explanation, and error-dialog explanation; it does not alter
+this structured-rendering boundary. Export, image editing, live screen/camera
+vision, and interactive visual workspaces remain explicitly deferred below.
+
 ## Product decisions
 
 1. Structured visuals are preferred for data and explanations. The assistant
@@ -251,7 +268,10 @@ python -m ruff check src/assistant/contracts.py src/assistant/skills/visualize.p
 
 ## Explicitly deferred
 
-The first release does not add generic web image search, OCR, document
-understanding, image generation/editing, live camera/screen vision, maps,
-3D/AR, spreadsheet editing, or automatic export. Each requires a distinct
-input, privacy, permission, and packaging review.
+The structured-visual release does not add generic web image search, image
+generation/editing, live camera/screen vision, maps, 3D/AR, spreadsheet editing,
+or automatic export. Explicit local-image understanding and bounded local
+document understanding are implemented as separate permission-gated skills;
+they do not capture a screen or turn documents into editable visual workspaces.
+Every remaining area requires a distinct input, privacy, permission, and
+packaging review.

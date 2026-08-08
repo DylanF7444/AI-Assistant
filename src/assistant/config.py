@@ -28,6 +28,9 @@ class Settings(BaseModel):
     voice_activation_clap_threshold: float = Field(default=0.35, gt=0, le=1)
     speech_mode: Literal["always", "voice_only", "never"] = "voice_only"
     response_detail: Literal["short", "normal", "detailed"] = "normal"
+    ui_text_scale: float = Field(default=1.0, ge=1.0, le=1.75)
+    ui_high_contrast: bool = False
+    ui_reduced_motion: bool = False
     show_reasoning_steps: bool = False
     terminal_debug: bool = True
     allow_sensitive_speech: bool = False
@@ -38,6 +41,8 @@ class Settings(BaseModel):
     context_allow_browser: bool = False
     context_allow_screen: bool = False
     context_allow_file_contents: bool = False
+    vision_model: str = ""
+    vision_timeout_seconds: float = Field(default=60, ge=5, le=300)
     stt_provider: str = "faster-whisper"
     stt_model: str = "small.en"
     stt_device: Literal["auto", "cuda", "cpu"] = "auto"
@@ -89,6 +94,8 @@ class Settings(BaseModel):
     confirmation_overrides: dict[str, bool] = Field(default_factory=dict)
     trusted_model_keys: dict[str, str] = Field(default_factory=dict)
     trusted_skill_keys: dict[str, str] = Field(default_factory=dict)
+    revoked_skill_key_ids: tuple[str, ...] = ()
+    allow_reviewed_worker_extensions: bool = False
     push_to_talk_hotkey: str = "ctrl+space"
     cancel_hotkey: str = "esc"
     audio_input_device: int | None = None
@@ -136,9 +143,7 @@ class Settings(BaseModel):
     def _validate_llm_keep_alive(cls, value: str) -> str:
         normalized = value.strip().casefold()
         if not re.fullmatch(r"-?\d+(?:\.\d+)?(?:ms|s|m|h)?", normalized):
-            raise ValueError(
-                "LLM keep-alive must be a duration such as 30m, 2h, 0, or -1"
-            )
+            raise ValueError("LLM keep-alive must be a duration such as 30m, 2h, 0, or -1")
         return normalized
 
     @field_validator(

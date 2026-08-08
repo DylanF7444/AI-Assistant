@@ -51,14 +51,19 @@ from assistant.integrations.google_calendar import (
     GoogleCalendarAdapter,
 )
 from assistant.integrations.google_drive import (
+    DRIVE_FILE_SCOPE,
     DRIVE_READ_SCOPE,
     GoogleDriveAdapter,
 )
 from assistant.integrations.headless_browser import PlaywrightHeadlessBrowser
 from assistant.integrations.microsoft_graph import (
     ONEDRIVE_READ_SCOPE,
+    ONEDRIVE_WRITE_SCOPE,
     OUTLOOK_CALENDAR_READ_SCOPE,
+    OUTLOOK_CALENDAR_WRITE_SCOPE,
     OUTLOOK_MAIL_READ_SCOPE,
+    OUTLOOK_MAIL_SEND_SCOPE,
+    OUTLOOK_MAIL_WRITE_SCOPE,
     MicrosoftGraphAdapter,
     MicrosoftGraphConnectionService,
     MicrosoftGraphTokenManager,
@@ -83,6 +88,7 @@ from assistant.language.retrieval import (
 from assistant.logging import configure_logging
 from assistant.logic.store import LogicStateStore
 from assistant.models import ModelManager
+from assistant.observability import MetricDimensions, RequestPath
 from assistant.orchestrator import AssistantOrchestrator
 from assistant.policy.confirmations import ConfirmationManager
 from assistant.policy.file_access import FileAccessPolicyStore
@@ -90,9 +96,15 @@ from assistant.policy.permissions import PermissionManager
 from assistant.presentation.media_resolver import MediaResolver
 from assistant.presentation.remote_media import RemoteMediaCache
 from assistant.presentation.session import MediaSessionRegistry
-from assistant.providers import TTSProvider
+from assistant.providers import EmbeddingProvider, TTSProvider
 from assistant.router.deterministic import DeterministicRouter
 from assistant.scheduling.authoring import ScheduleAuthoringService
+from assistant.scheduling.event_sources import (
+    DeviceEventSource,
+    FileEventSource,
+    ProcessEventSource,
+    WebEventSource,
+)
 from assistant.scheduling.notifications import NotificationCenter, NotificationStore
 from assistant.scheduling.runner import BackgroundRunner
 from assistant.scheduling.runtime import BackgroundRuntime
@@ -111,6 +123,7 @@ from assistant.skills.builtin import (
     TimerSkill,
 )
 from assistant.skills.diagnostic import DiagnosticSkill
+from assistant.skills.documents import DocumentContentSearchSkill, LocalDocumentSkill
 from assistant.skills.github import GitHubSkill
 from assistant.skills.gmail import GmailSkill
 from assistant.skills.google_calendar import GoogleCalendarSkill
@@ -140,6 +153,7 @@ from assistant.skills.productivity import (
 from assistant.skills.registry import SkillRegistry
 from assistant.skills.scheduling import ScheduleSkill
 from assistant.skills.slack import SlackSkill
+from assistant.skills.vision import OllamaVisionProvider, VisualUnderstandingSkill
 from assistant.skills.visualize import VisualizeSkill
 from assistant.skills.windows import (
     ApplicationWindowSkill,
@@ -240,12 +254,14 @@ def _record_ollama_usage(metrics: MetricsStore, usage: OllamaUsage) -> None:
         stage="model.preload" if usage.operation == "preload" else "model.total",
         duration_ms=usage.total_duration_ms or usage.wall_duration_ms,
         outcome=usage.operation,
+        dimensions=MetricDimensions(path=RequestPath.PLANNER, provider="OllamaProvider"),
     )
     metrics.record(
         correlation_id=correlation_id,
         stage="model.load",
         duration_ms=usage.load_duration_ms,
         outcome=usage.operation,
+        dimensions=MetricDimensions(path=RequestPath.PLANNER, provider="OllamaProvider"),
     )
     metrics.record(
         correlation_id=correlation_id,
@@ -253,6 +269,7 @@ def _record_ollama_usage(metrics: MetricsStore, usage: OllamaUsage) -> None:
         duration_ms=usage.prompt_eval_duration_ms,
         value=usage.prompt_tokens,
         outcome=usage.operation,
+        dimensions=MetricDimensions(path=RequestPath.PLANNER, provider="OllamaProvider"),
     )
     metrics.record(
         correlation_id=correlation_id,
@@ -260,6 +277,7 @@ def _record_ollama_usage(metrics: MetricsStore, usage: OllamaUsage) -> None:
         duration_ms=usage.generation_duration_ms,
         value=usage.output_tokens,
         outcome=usage.operation,
+        dimensions=MetricDimensions(path=RequestPath.PLANNER, provider="OllamaProvider"),
     )
 
 
@@ -427,9 +445,7 @@ def _register_network_skills(
 
 
 def _google_calendar_skill_factory(secret_vault: SecretVault):
-    return lambda: GoogleCalendarSkill(
-        GoogleCalendarAdapter(GoogleTokenManager(secret_vault))
-    )
+    return lambda: GoogleCalendarSkill(GoogleCalendarAdapter(GoogleTokenManager(secret_vault)))
 
 
 def _gmail_skill_factory(secret_vault: SecretVault):
@@ -440,15 +456,11 @@ def _gmail_skill_factory(secret_vault: SecretVault):
 
 
 def _google_drive_skill_factory(secret_vault: SecretVault):
-    return lambda: GoogleDriveSkill(
-        GoogleDriveAdapter(GoogleTokenManager(secret_vault))
-    )
+    return lambda: GoogleDriveSkill(GoogleDriveAdapter(GoogleTokenManager(secret_vault)))
 
 
 def _outlook_mail_skill_factory(secret_vault: SecretVault):
-    return lambda: OutlookMailSkill(
-        MicrosoftGraphAdapter(MicrosoftGraphTokenManager(secret_vault))
-    )
+    return lambda: OutlookMailSkill(MicrosoftGraphAdapter(MicrosoftGraphTokenManager(secret_vault)))
 
 
 def _outlook_calendar_skill_factory(secret_vault: SecretVault):
@@ -458,15 +470,11 @@ def _outlook_calendar_skill_factory(secret_vault: SecretVault):
 
 
 def _onedrive_skill_factory(secret_vault: SecretVault):
-    return lambda: OneDriveSkill(
-        MicrosoftGraphAdapter(MicrosoftGraphTokenManager(secret_vault))
-    )
+    return lambda: OneDriveSkill(MicrosoftGraphAdapter(MicrosoftGraphTokenManager(secret_vault)))
 
 
 def _slack_skill_factory(secret_vault: SecretVault):
-    return lambda: SlackSkill(
-        SlackAdapter(ApiTokenProvider(SlackConnectionService(secret_vault)))
-    )
+    return lambda: SlackSkill(SlackAdapter(ApiTokenProvider(SlackConnectionService(secret_vault))))
 
 
 def _notion_skill_factory(secret_vault: SecretVault):
@@ -532,10 +540,9 @@ def _managed_extension_registry(secret_vault: SecretVault) -> ManagedExtensionRe
                 connection=ConnectionBinding(
                     service=google_connection,
                     provider_id=google_connection.provider_id,
-                    required_scopes=(DRIVE_READ_SCOPE,),
+                    required_scopes=(DRIVE_READ_SCOPE, DRIVE_FILE_SCOPE),
                     dialog_entry_point=(
-                        "assistant.ui.desktop.google_drive_connection:"
-                        "GoogleDriveConnectionDialog"
+                        "assistant.ui.desktop.google_drive_connection:GoogleDriveConnectionDialog"
                     ),
                 ),
             ),
@@ -546,7 +553,11 @@ def _managed_extension_registry(secret_vault: SecretVault) -> ManagedExtensionRe
                 connection=ConnectionBinding(
                     service=microsoft_graph_connection,
                     provider_id=microsoft_graph_connection.provider_id,
-                    required_scopes=(OUTLOOK_MAIL_READ_SCOPE,),
+                    required_scopes=(
+                        OUTLOOK_MAIL_READ_SCOPE,
+                        OUTLOOK_MAIL_WRITE_SCOPE,
+                        OUTLOOK_MAIL_SEND_SCOPE,
+                    ),
                     dialog_entry_point=(
                         "assistant.ui.desktop.microsoft_graph_connection:"
                         "MicrosoftGraphConnectionDialog"
@@ -560,7 +571,10 @@ def _managed_extension_registry(secret_vault: SecretVault) -> ManagedExtensionRe
                 connection=ConnectionBinding(
                     service=microsoft_graph_connection,
                     provider_id=microsoft_graph_connection.provider_id,
-                    required_scopes=(OUTLOOK_CALENDAR_READ_SCOPE,),
+                    required_scopes=(
+                        OUTLOOK_CALENDAR_READ_SCOPE,
+                        OUTLOOK_CALENDAR_WRITE_SCOPE,
+                    ),
                     dialog_entry_point=(
                         "assistant.ui.desktop.microsoft_graph_connection:"
                         "MicrosoftGraphConnectionDialog"
@@ -574,7 +588,7 @@ def _managed_extension_registry(secret_vault: SecretVault) -> ManagedExtensionRe
                 connection=ConnectionBinding(
                     service=microsoft_graph_connection,
                     provider_id=microsoft_graph_connection.provider_id,
-                    required_scopes=(ONEDRIVE_READ_SCOPE,),
+                    required_scopes=(ONEDRIVE_READ_SCOPE, ONEDRIVE_WRITE_SCOPE),
                     dialog_entry_point=(
                         "assistant.ui.desktop.microsoft_graph_connection:"
                         "MicrosoftGraphConnectionDialog"
@@ -635,6 +649,7 @@ class _StorageServices:
 
 @dataclass
 class _RetrievalServices:
+    embedding_provider: EmbeddingProvider
     semantic_retriever: SemanticRetriever
     skill_indexer: SkillSemanticIndexer
     knowledge_indexer: KnowledgeSemanticIndexer
@@ -693,6 +708,7 @@ def _build_retrieval_services(
         else lexical
     )
     return _RetrievalServices(
+        embedding_provider=embedding_provider,
         semantic_retriever=SemanticRetriever(storage.vector_index, embedding_provider),
         skill_indexer=SkillSemanticIndexer(storage.vector_index, embedding_provider),
         knowledge_indexer=KnowledgeSemanticIndexer(storage.vector_index, embedding_provider),
@@ -709,12 +725,15 @@ def _build_registry(
     settings: Settings,
     database: Database,
     storage: _StorageServices,
+    retrieval: _RetrievalServices,
     events: EventBus,
     managed_extensions: ManagedExtensionRegistry,
 ) -> tuple[SkillRegistry, MacroStore, MediaSessionRegistry, RemoteMediaCache]:
     registry = SkillRegistry(
         settings.data_dir / "skills",
         trusted_signing_keys=_decode_trusted_keys(settings.trusted_skill_keys),
+        revoked_signing_key_ids=set(settings.revoked_skill_key_ids),
+        allow_reviewed_worker_extensions=settings.allow_reviewed_worker_extensions,
         managed_skill_factories=managed_extensions.skill_factories,
     )
     _register_core_skills(registry, storage.file_access_policy, storage.logic_state)
@@ -723,6 +742,22 @@ def _build_registry(
         storage.aliases,
         storage.memory_store,
         storage.logic_state,
+    )
+    registry.register(LocalDocumentSkill())
+    registry.register(
+        DocumentContentSearchSkill(storage.vector_index, retrieval.embedding_provider)
+    )
+    registry.register(
+        VisualUnderstandingSkill(
+            vision_provider=(
+                OllamaVisionProvider(
+                    settings.vision_model,
+                    timeout_seconds=settings.vision_timeout_seconds,
+                )
+                if settings.vision_model
+                else None
+            )
+        )
     )
     media_sessions = MediaSessionRegistry()
     media_resolver = MediaResolver()
@@ -868,6 +903,7 @@ def build_container(settings: Settings | None = None) -> Container:
         settings,
         database,
         storage,
+        retrieval,
         events,
         managed_extensions,
     )
@@ -910,6 +946,12 @@ def build_container(settings: Settings | None = None) -> Container:
         ),
         enabled=settings.scheduler_enabled,
         max_concurrency=settings.max_background_concurrency,
+        event_sources=(
+            FileEventSource(storage.schedule_store, storage.file_access_policy),
+            ProcessEventSource(storage.schedule_store, WindowsProcessAdapter()),
+            DeviceEventSource(storage.schedule_store, LocalWindowsDeviceAdapter()),
+            WebEventSource(storage.schedule_store),
+        ),
     )
     if settings.automations_paused:
         scheduler.pause()

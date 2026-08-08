@@ -8,7 +8,7 @@ from assistant.config import Settings
 from assistant.storage.aliases import AliasStore
 from assistant.storage.database import SettingsStore
 from assistant.tts.elevenlabs import ElevenLabsProvider
-from assistant.ui.desktop.app import _notification_quiet_hours_active
+from assistant.ui.desktop.app import _accessible_stylesheet, _notification_quiet_hours_active
 
 
 def test_database_path_and_url_are_pure(settings, tmp_path):
@@ -81,6 +81,26 @@ def test_ollama_keep_alive_validates_supported_duration_syntax(tmp_path):
 def test_duckduckgo_is_the_default_search_provider(settings):
     container = build_container(settings)
     assert container.settings.search_provider == "duckduckgo"
+
+
+def test_accessibility_settings_are_bounded_persisted_and_transform_styles(settings):
+    first = build_container(settings)
+    SettingsStore(first.database).set(
+        "application_settings",
+        {"ui_text_scale": 1.5, "ui_high_contrast": True, "ui_reduced_motion": True},
+    )
+    restored = build_container(settings).settings
+    rendered = _accessible_stylesheet(
+        "QLabel { font-size: 10pt; color: #dce7f3; }",
+        text_scale=restored.ui_text_scale,
+        high_contrast=restored.ui_high_contrast,
+    )
+
+    assert restored.ui_reduced_motion is True
+    assert "font-size: 15pt" in rendered
+    assert "border: 3px solid #00ffff" in rendered
+    with pytest.raises(ValueError, match="less than or equal to 1.75"):
+        Settings(data_dir=settings.data_dir, ui_text_scale=2.0)
 
 
 def test_notification_quiet_hours_validate_and_handle_overnight_window(tmp_path):

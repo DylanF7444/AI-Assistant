@@ -342,9 +342,7 @@ def test_ambiguous_visual_structure_asks_for_clarification():
 
 
 def test_data_seeking_visual_request_uses_planner_instead_of_inventing_table_cells():
-    route = DeterministicRouter().route(
-        "show me a table of the highest earning movies this year"
-    )
+    route = DeterministicRouter().route("show me a table of the highest earning movies this year")
 
     assert route.needs_llm is True
     assert route.intent is not None

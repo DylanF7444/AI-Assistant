@@ -1,6 +1,6 @@
 # Feature Catalog
 
-Updated August 2, 2026. This catalog lists the built-in features registered by
+Updated August 6, 2026. This catalog lists the built-in features registered by
 the application container. Optional integrations are implemented but require
 the relevant setting, credential, local service, or device to be configured.
 
@@ -30,6 +30,9 @@ the relevant setting, credential, local service, or device to be configured.
 | Core | `core.timer` | Implemented | Low | None | Run a cancellable local timer. |
 | Core | `core.unit_conversion` | Implemented | Low | None | Convert common distance, weight, volume, and temperature units locally. |
 | Core | `core.visualize` | Implemented | Low | None | Create local charts, flowcharts, timelines, and tables from natural typed/dictated language or typed specs, with accessible text fallbacks. |
+| Documents | `documents.read` | Implemented/Optional formats | Low | `filesystem.content.read` | Extract, summarize, compare, find action items in, or answer questions from up to five explicitly selected TXT, Markdown, CSV, PDF, DOCX, XLSX, or PPTX files with source locators. |
+| Documents | `documents.content_search` | Implemented/Optional formats | Medium | `filesystem.content.read`, `filesystem.content.index` | Build, inspect, search, or clear a bounded persistent content index for one approved folder, with modification and deletion reconciliation. |
+| Vision | `vision.understand_image` | Implemented/Optional OCR | Low | `filesystem.content.read` | Read text, describe an image, explain a chart, or explain an error dialog from one explicitly selected local image; never captures the screen or performs input. |
 | Network | `cloud.ask` | Optional | Low | `network`, `process.launch` for Codex | Ask configured OpenAI, Anthropic, or local Codex CLI providers. |
 | Network | `web.fetch` | Optional | Low | `network` | Read text from a specific public HTTPS page. |
 | Network | `web.headless_read` | Optional | Low | `network` | Render a public HTTPS page in a fresh non-persistent headless browser and return bounded visible text/links or matching deal, product, article, listing, and result cards without opening a user window. |
@@ -37,13 +40,13 @@ the relevant setting, credential, local service, or device to be configured.
 | Network | `web.search` | Optional | Low | `network` | Search the public web through DuckDuckGo or Brave Search. |
 | Connections | `integration.google_calendar` | Extension Hub/Optional | Dynamic | `integration.read`, `integration.write`, `network` | Install the first-party Hub extension, connect Google with in-app encrypted OAuth, and list or manage calendars, events, availability, invitations, settings, and sharing rules. |
 | Connections | `integration.gmail` | Extension Hub/Optional | Dynamic | `integration.read`, `integration.write`, `messaging`, `network` | Install the first-party Hub extension, connect Google with in-app encrypted OAuth, and search or read messages and threads, manage drafts and mailbox state, and send explicitly approved email. |
-| Connections | `integration.google_drive` | Extension Hub/Optional | Medium | `integration.read`, `network` | Install the first-party Hub extension, connect Google with in-app encrypted OAuth, search Drive files and folders, list folder contents, and inspect bounded metadata for selected items. Content downloads and Drive changes are deferred. |
-| Connections | `integration.outlook_mail` | Extension Hub/Optional | Medium | `integration.read`, `network` | Install the first-party Hub extension, connect a Microsoft account with encrypted OAuth, search and inspect bounded Outlook Mail message metadata and previews. Sending, drafting, moving, and deleting are deferred. |
-| Connections | `integration.outlook_calendar` | Extension Hub/Optional | Medium | `integration.read`, `network` | Install the first-party Hub extension, connect a Microsoft account with encrypted OAuth, search and inspect bounded Outlook Calendar event metadata. Event changes and responses are deferred. |
-| Connections | `integration.onedrive` | Extension Hub/Optional | Medium | `integration.read`, `network` | Install the first-party Hub extension, connect a Microsoft account with encrypted OAuth, search OneDrive items, list children, and inspect bounded metadata. Content transfer and changes are deferred. |
-| Connections | `integration.slack` | Extension Hub/Optional | Medium | `integration.read`, `network` | Install the first-party Hub extension, connect an encrypted read-only Slack user token, search messages, discover conversations, and read bounded channel history or threads. Sends and file actions are deferred. |
-| Connections | `integration.notion` | Extension Hub/Optional | Medium | `integration.read`, `network` | Install the first-party Hub extension, connect an encrypted Notion read token, search shared pages/data sources, inspect metadata, and read bounded child blocks. Writes and broad ingestion are deferred. |
-| Connections | `integration.github` | Extension Hub/Optional | Medium | `integration.read`, `network` | Install the first-party Hub extension, connect an encrypted read-only GitHub token, search repositories/issues, inspect exact repositories/issues, find pull requests, and inspect the latest release. Writes and secrets access are deferred. |
+| Connections | `integration.google_drive` | Extension Hub/Optional | Dynamic | `integration.read`, `integration.write`, `filesystem.content.read`, `filesystem.write`, `network` | Search and inspect Drive; download one exact file to a new local path or upload one explicit local file without overwriting. Sharing, moves, and deletes remain excluded. |
+| Connections | `integration.outlook_mail` | Extension Hub/Optional | Dynamic | `integration.read`, `integration.write`, `messaging`, `network` | Search and inspect Outlook Mail, create one explicit draft, and send one exact existing draft after confirmation. Deletion and bulk changes remain excluded. |
+| Connections | `integration.outlook_calendar` | Extension Hub/Optional | Dynamic | `integration.read`, `integration.write`, `network` | Search and inspect Outlook Calendar; create, update, or delete one exact event after confirmation. Bulk changes and meeting responses remain excluded. |
+| Connections | `integration.onedrive` | Extension Hub/Optional | Dynamic | `integration.read`, `integration.write`, `filesystem.content.read`, `filesystem.write`, `network` | Search and inspect OneDrive; download one exact file to a new local path or upload one explicit local file without overwriting. Moves and deletes remain excluded. |
+| Connections | `integration.slack` | Extension Hub/Optional | Dynamic | `integration.read`, `messaging`, `network` | Search and read bounded Slack content and post one exact confirmed message to an exact channel or thread. Reactions, uploads, and broad ingestion remain excluded. |
+| Connections | `integration.notion` | Extension Hub/Optional | Dynamic | `integration.read`, `integration.write`, `network` | Search and read shared Notion content, create one page under an exact parent, or append bounded content to one exact page. Database writes and broad ingestion remain excluded. |
+| Connections | `integration.github` | Extension Hub/Optional | Dynamic | `integration.read`, `integration.write`, `network` | Search and inspect repositories/issues/releases, create one issue, or add one confirmed comment to an exact issue. Code, workflow, secret, and bulk mutations remain excluded. |
 | Media | `media.present` | Implemented/Optional remote | Low | `filesystem.read` or `network` | Present an exact approved local file or explicitly downloaded public HTTPS image, audio file, or video in the Assistant. |
 | Media | `media.viewer_control` | Implemented | Low | None | Control only the active in-app viewer: playback, seek, volume, rate, mute, fullscreen, stop, or close. |
 | Windows | `windows.application_window` | Implemented | High | `process.window` | Focus, minimize, maximize, close, move, or resize an approved application window. |
@@ -105,8 +108,10 @@ the relevant setting, credential, local service, or device to be configured.
   configurable.
 - Default-deny scoped permissions, action-bound confirmations, audit logging,
   emergency stop, rollback where supported, and file access allow/block policy.
-- Signed skill-package validation, isolated worker execution, update review for
-  new capabilities, macro composition, and offline lock enforcement.
+- Signed skill-package validation, execution-class enforcement, key revocation,
+  update review for new capabilities, macro composition, and offline lock
+  enforcement. Downloaded Python packages are blocked by default because the
+  available worker boundary is process isolation rather than an OS sandbox.
 - A local Extension Hub for searching a configurable HTTPS platform catalog,
   reviewing publisher/risk/permission metadata, and installing compatible
   packages only after digest, archive, trusted-signature, API, and manifest
@@ -129,27 +134,38 @@ the relevant setting, credential, local service, or device to be configured.
   Gmail-search queries, drafts, replies, sending, labels, read/unread, inbox,
   star, and trash state. Permanent deletion and attachments are excluded.
 - Optional Google Drive integration backed by the same encrypted Google account,
-  desktop OAuth 2.0 PKCE, bounded file/folder search, folder listing, metadata
-  inspection, selectable sensitive results, fixed-origin API access, and
-  read-only `integration.read` permissions. Content downloads, uploads, sharing,
-  moves, and deletes are deferred to a later scope review.
+  with bounded reads plus exact, non-overwriting download and upload operations.
+  Sharing, moves, deletes, and broad synchronization remain excluded.
 - Optional Microsoft Graph integrations with a shared, scope-aware desktop OAuth
-  boundary and separately managed read-only Outlook Mail, Outlook Calendar, and
-  OneDrive extensions. Results are bounded typed sensitive items and use fixed
-  Graph and Microsoft identity origins. Message/event changes, file content
-  transfer, and To Do actions are deferred to later scope reviews.
-- Optional Slack integration with encrypted read-only token storage, bounded
-  message search, conversation discovery, channel history, and thread reads.
-  Public OAuth callback-relay support, sends, DMs, uploads, and broad ingestion
-  are deferred.
-- Optional Notion integration with encrypted read-token storage, current API
-  version headers, shared-page/data-source search, page metadata, and bounded
-  child-block reads. Public OAuth, page writes, database queries, and broad
-  workspace ingestion are deferred.
-- Optional GitHub integration with encrypted read-only token storage, fixed API
-  version headers, repository/issue search, exact repository and issue reads,
-  pull-request discovery, and latest-release inspection. GitHub App onboarding,
-  comments, code, workflow, secret, and repository mutations are deferred.
+  boundary. Outlook supports explicit draft/send and exact calendar changes;
+  OneDrive supports exact, non-overwriting transfers. Bulk mailbox/calendar
+  changes, meeting responses, file moves/deletes, and To Do remain excluded.
+- Optional Slack integration with encrypted token storage, bounded reads, and one
+  exact confirmed channel or thread post. Public OAuth callback relay, reactions,
+  DMs, uploads, and broad ingestion remain excluded.
+- Optional Notion integration with encrypted token storage, bounded reads, exact
+  page creation, and exact bounded append. Public OAuth, database writes, and
+  broad workspace ingestion remain excluded.
+- Optional GitHub integration with encrypted token storage, bounded reads, exact
+  issue creation, and exact issue comments. Code pushes, workflow/secret changes,
+  and bulk repository mutations remain excluded.
+- Local bounded document extraction and content indexing for explicitly selected
+  files/folders. Index persistence is separate from conversation memory and can
+  be inspected or cleared without deleting source files.
+- Explicit local-image understanding for OCR, description, charts, and error
+  dialogs. It has no screen/camera capture, clipboard, input, or implicit
+  retention capability.
+- Typed event-triggered automations for exact file, process, device, calendar,
+  and public-HTTPS web observations. Built-in polling sources exist for file,
+  process, device, and web; calendar observations are supplied only by a
+  configured connector. Observations retain bounded metadata or fingerprints,
+  not document bodies, web bodies, or private device payloads.
+- Resumable ten-step onboarding, categorized recovery guidance, scalable text,
+  high contrast, reduced motion, keyboard-accessible controls, and inspect/copy
+  source controls for cited responses.
+- Versioned deterministic and production-planner evaluation corpora, correlated
+  privacy-safe stage metrics, architecture/property tests, coverage gates,
+  dependency auditing, CycloneDX SBOM generation, and exact release manifests.
 - Optional Playwright headless rendering in a fresh non-persistent context,
   with public-HTTPS-only navigation, bounded result-card extraction, read-only
   request methods, installed Edge/Chrome fallback, and no access to the user's
@@ -175,8 +191,9 @@ the relevant setting, credential, local service, or device to be configured.
 
 ## Not Yet Claimed Complete
 
-The codebase does not currently claim complete coverage for email, calendar,
-messaging accounts, office document editing, spreadsheet editing, slide deck
-generation, screen OCR, image generation/editing, location/travel, shopping, or
-financial workflows. The framework can be extended with skills for those areas,
-but they are not built-in implemented features in this repository.
+The codebase does not claim complete coverage for arbitrary email/calendar
+providers, office document editing, spreadsheet editing, slide-deck generation,
+live screen/camera OCR, image generation/editing, location/travel, shopping, or
+financial workflows. The explicit bounded slices above are implemented; broader
+provider and creative/transactional workflows require separate threat and
+acceptance reviews.

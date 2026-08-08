@@ -1,5 +1,12 @@
 # External Platform Extension Roadmap
 
+> **Status (August 6, 2026):** The bounded read slices described as initial
+> scope in this historical plan are complete, and exact Drive/OneDrive transfer,
+> Outlook draft/send and calendar changes, Slack post, Notion page changes, and
+> GitHub issue/comment slices have since been implemented. Current claims and
+> exclusions are authoritative in `FEATURES.md`, `USER_GUIDE.md`, and
+> `CAPABILITY_ACCEPTANCE_AND_THREAT_REVIEW.md`.
+
 This document turns the Extension Hub roadmap into an implementation sequence.
 It assumes Google Calendar and Gmail remain first-party managed extensions and
 that signed catalog packages continue to run without host networking or

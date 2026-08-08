@@ -40,14 +40,18 @@ def _setup_route(status: str) -> RouteResult | None:
     elif status == "disabled":
         message = "Outlook Mail is installed but disabled. Open Skills, select Outlook Mail, and choose Enable."
     else:
-        message = "Outlook Mail is not installed. Open Extension Hub and install Outlook Mail first."
+        message = (
+            "Outlook Mail is not installed. Open Extension Hub and install Outlook Mail first."
+        )
     return RouteResult(
-        Intent(name="conversation.answer", arguments={"text": message}, confidence=0.99, source="rule")
+        Intent(
+            name="conversation.answer", arguments={"text": message}, confidence=0.99, source="rule"
+        )
     )
 
 
 class OutlookMailHandler:
-    """Route explicit read-only Outlook Mail requests without an LLM."""
+    """Route explicit safe-path Outlook Mail requests without an LLM."""
 
     def route(self, context: RouteContext, router: DeterministicRouter) -> RouteResult | None:
         raw = re.sub(r"[.?!]+$", "", context.text.strip())

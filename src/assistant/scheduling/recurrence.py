@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from assistant.scheduling.contracts import (
+    EventTrigger,
     OneTimeTrigger,
     RecurrenceTrigger,
     ScheduledTrigger,
@@ -119,6 +120,8 @@ def next_occurrence(trigger: ScheduledTrigger, after: datetime) -> datetime | No
     if isinstance(trigger, OneTimeTrigger):
         run_at = _utc(trigger.run_at)
         return run_at if run_at > after_utc else None
+    if isinstance(trigger, EventTrigger):
+        return None
     if trigger.frequency in {"minutes", "hours"}:
         return _interval_occurrence(trigger, after_utc)
     return _next_calendar_occurrence(trigger, after_utc)

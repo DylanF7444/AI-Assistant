@@ -146,9 +146,7 @@ class OllamaProvider:
                 else None
             ),
             output_tokens=(
-                int(body["eval_count"])
-                if isinstance(body.get("eval_count"), int | float)
-                else None
+                int(body["eval_count"]) if isinstance(body.get("eval_count"), int | float) else None
             ),
         )
         try:

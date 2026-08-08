@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from assistant.bootstrap import build_container
 from assistant.logging import configure_logging
+from assistant.observability import InteractionMode, MetricDimensions, RequestPath
 from assistant.storage.database import Database, MetricsStore
 
 
@@ -35,10 +37,72 @@ def test_metrics_are_stored_without_private_content(tmp_path):
         duration_ms=12.5,
         value=0.9,
         outcome="core.timer",
+        dimensions=MetricDimensions(
+            interaction=InteractionMode.TYPED,
+            path=RequestPath.DETERMINISTIC,
+        ),
     )
     value = metrics.recent()[0]
     assert value["duration_ms"] == 12.5
+    assert value["dimensions"] == {
+        "interaction": "typed",
+        "path": "deterministic",
+    }
     assert "transcript" not in value
+
+
+def test_metrics_filter_and_reject_unbounded_dimensions(tmp_path):
+    database = Database(f"sqlite:///{tmp_path / 'data.db'}")
+    database.migrate()
+    metrics = MetricsStore(database)
+    metrics.record(
+        correlation_id="typed",
+        stage="request.total",
+        duration_ms=10,
+        dimensions={"interaction": "typed"},
+    )
+    metrics.record(
+        correlation_id="voice",
+        stage="request.total",
+        duration_ms=20,
+        dimensions={"interaction": "voice"},
+    )
+
+    assert [
+        item["correlation_id"] for item in metrics.query(dimensions={"interaction": "voice"})
+    ] == ["voice"]
+    with pytest.raises(ValueError, match="Unsupported metric dimension"):
+        metrics.record(
+            correlation_id="private",
+            stage="request.total",
+            dimensions={"transcript": "do not store this"},
+        )
+
+
+def test_stage_summary_keeps_latency_and_failure_counts_separate(tmp_path):
+    database = Database(f"sqlite:///{tmp_path / 'data.db'}")
+    database.migrate()
+    metrics = MetricsStore(database)
+    for outcome, duration in (("completed", 10), ("failed", 20), ("cancelled", 30)):
+        metrics.record(
+            correlation_id=outcome,
+            stage="execution",
+            duration_ms=duration,
+            outcome=outcome,
+            dimensions=MetricDimensions(interaction=InteractionMode.TYPED),
+        )
+
+    summary = metrics.stage_summary(
+        since=datetime.now(UTC) - timedelta(minutes=1),
+        stage="execution",
+        dimensions={"interaction": "typed"},
+    )
+
+    assert summary["count"] == 3
+    assert summary["p50"] == 20
+    assert summary["p95"] == 30
+    assert summary["failed"] == 2
+    assert summary["error_rate"] == pytest.approx(2 / 3)
 
 
 @pytest.mark.asyncio

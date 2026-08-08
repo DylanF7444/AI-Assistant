@@ -113,6 +113,7 @@ def _service(tmp_path: Path, entry: CatalogExtension, archive: bytes, public: by
     registry = SkillRegistry(
         tmp_path / "installed",
         trusted_signing_keys={"community-test": public},
+        allow_reviewed_worker_extensions=True,
     )
     database = Database(f"sqlite:///{(tmp_path / 'audit.db').as_posix()}")
     database.migrate()
@@ -142,6 +143,7 @@ async def test_extension_hub_browses_and_installs_a_verified_skill_disabled(tmp_
     restarted = SkillRegistry(
         registry.install_dir,
         trusted_signing_keys={"community-test": public},
+        allow_reviewed_worker_extensions=True,
     )
     assert restarted.load_all_installed() == {}
     assert restarted.inspect(entry.extension_id).manifest == manifest
@@ -182,6 +184,22 @@ async def test_extension_hub_rejects_a_download_with_the_wrong_digest(tmp_path: 
     await service.refresh()
 
     with pytest.raises(ValueError, match="digest"):
+        await service.install(entry.extension_id)
+
+    assert not service.is_installed(entry.extension_id)
+    assert audit.query(event_type="extension_installation")[0]["decision"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_extension_hub_blocks_downloaded_code_without_os_sandbox(tmp_path: Path):
+    archive, manifest, public = _signed_skill_archive(tmp_path)
+    entry = _catalog_entry(archive, manifest)
+    service, registry, audit = _service(tmp_path, entry, archive, public)
+    registry.allow_reviewed_worker_extensions = False
+    await service.refresh()
+
+    assert service.is_installable(entry) is False
+    with pytest.raises(PermissionError, match="OS-enforced hostile-code sandbox"):
         await service.install(entry.extension_id)
 
     assert not service.is_installed(entry.extension_id)

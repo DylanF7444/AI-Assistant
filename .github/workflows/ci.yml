@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality-and-tests:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: "1"
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install -e ".[test,dev,ui-test,security]"
+      - name: Check formatting
+        run: python -m ruff format --check .
+      - name: Check lint
+        run: python -m ruff check .
+      - name: Check selected core types
+        run: python -m mypy
+      - name: Check documentation consistency
+        run: python scripts/check_documentation_consistency.py
+      - name: Audit production dependency graph
+        run: python scripts/audit_dependencies.py
+      - name: Run deterministic intelligence evaluation
+        run: python scripts/run_evaluations.py --output .benchmark-data/evaluations
+      - name: Run regression tests
+        run: python -m pytest tests --ignore=tests/ui --cov=assistant --cov-branch --cov-report=
+      - name: Run learning tests
+        run: python -m pytest learning_tests -q --cov=assistant --cov-branch --cov-append --cov-report=
+      - name: Run UI tests
+        run: python -m pytest -m ui tests/ui -q --cov=assistant --cov-branch --cov-append --cov-report=
+      - name: Enforce coverage gates
+        run: |
+          python -m coverage json -o coverage.json
+          python scripts/check_coverage.py coverage.json
+
+  package-smoke:
+    needs: quality-and-tests
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install packaging dependencies
+        run: python -m pip install -e ".[desktop,audio,stt,wakeword,integrations,browser,documents,vision,build]"
+      - name: Build executable
+        run: python -m PyInstaller --clean --noconfirm packaging/local-assistant.spec
+      - name: Verify packaged media support
+        run: python scripts/verify_packaged_media.py dist/LocalAssistant.exe
+      - name: Generate release provenance
+        run: |
+          python scripts/generate_sbom.py --output dist/sbom.cdx.json
+          python scripts/generate_release_manifest.py --artifact dist/LocalAssistant.exe --artifact dist/sbom.cdx.json

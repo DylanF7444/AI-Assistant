@@ -7,8 +7,12 @@ normally require administrator rights. Optional offline model components can be
 selected when they are included beside the installer. First run reports CPU,
 GPU, memory, audio devices, and recommended model placement.
 
-Open Settings to choose microphone/output devices, push-to-talk and cancel
-hotkeys, response detail, speech mode, retention, and privacy options. Enable
+The first-run guide is a resumable ten-step setup for privacy, microphone,
+speech, model, permissions, extensions, accessibility, and diagnostics. A
+failed check is categorized and includes recovery guidance; reopening setup
+returns to the incomplete step. Open Settings to choose microphone/output
+devices, push-to-talk and cancel hotkeys, response detail, speech mode,
+retention, privacy, text scale, high contrast, and reduced motion. Enable
 Show request breakdown to include the classification, selected skill, arguments,
 and execution steps under each on-screen response. Register applications by
 friendly spoken name before asking the assistant to launch them; arbitrary
@@ -44,14 +48,14 @@ The full window presents Dashboard and Assistant as its two primary screens.
 The last selected primary screen is remembered when the window is hidden and
 restored. Use `Ctrl+1` for Dashboard and `Ctrl+2` for Assistant.
 
-The default Dashboard contains local Assistant status, request outcomes,
-end-to-end request latency, model latency, skill-execution latency, automation
-summary, local tasks, and recent activity cards. The Tasks card shows open and
+The default Dashboard contains local Assistant status, request outcomes, typed
+request latency, voice request latency, model latency, skill-execution latency,
+resource use, automation summary, local tasks, and recent activity cards. The Tasks card shows open and
 completed counts plus task titles and status. Select
 **Customize** to add, remove, hide, reorder, resize, rename, or change the
 presentation and refresh interval of a card. Changes are staged until **Save**;
 **Cancel** leaves the saved layout untouched, and **Reset to defaults** restores
-the eight local cards. The catalog also offers CPU, memory, storage, and battery
+the ten local cards. The catalog also offers CPU, memory, storage, and battery
 cards. These remain unavailable until the exact read-only `device.read` grant
 is approved from the card.
 
@@ -170,6 +174,25 @@ policy. The assistant does not run while the computer is powered off and does
 not wake it from sleep. If a skill, target, policy, schema, permission, risk, or
 machine identity changes, the occurrence stops and the schedule may require
 review rather than silently expanding its authority.
+
+### Event-triggered automations
+
+An action schedule may use one exact typed observation instead of a clock. The
+built-in sources can watch an approved folder for a created, modified, or
+deleted filename; an exact process name for start/stop; an exact local device
+instance ID for status changes; or one sanitized public HTTPS resource for a
+bounded text fingerprint change. A configured calendar connector may submit
+typed calendar observations. For example: `when a PDF is created under
+C:\Incoming, notify me that a PDF arrived`.
+
+The assistant shows both the monitor target and frozen action before enabling
+the schedule. Monitor grants use separate `automation.observe.*` capabilities;
+they do not grant permission to read document bodies, keep web response bodies,
+inspect process command lines, or collect private device payloads. Web targets
+discard credentials, query strings, and fragments before persistence. Event
+sources are polled only while the per-user app is running and remain subject to
+minimum intervals, deduplication, ordinary run bounds, offline lock, and the
+same execution and approval path as time-based schedules.
 
 ## Voice and local models
 
@@ -305,21 +328,23 @@ Disconnecting Google from any of these extension pages revokes the shared
 authorization and signs out Calendar, Gmail, and Drive together. Switching to a
 different Google account requires disconnecting the current shared account first.
 
-The first Drive slice requests read-only Drive access and supports searches such
-as “find my Drive for quarterly planning,” listing the files in the Drive root,
-listing a selected folder, and inspecting metadata for a selected result.
-Results are bounded and remain sensitive selectable items. Content downloads,
-uploads, moves, sharing changes, and deletes are intentionally not supported
-yet. The global offline lock blocks Drive API calls and OAuth refreshes.
+Drive supports searches such as “find my Drive for quarterly planning,” listing
+folders, and inspecting metadata. It can also download one exact Drive item to
+an exact new local path or upload one explicit local file to an exact Drive
+parent. Transfers are high risk, non-retryable, and never overwrite an existing
+local or remote file. Reads, remote writes, local-content reads, and local writes
+have separate exact-target permissions. Moves, sharing changes, deletes, and
+broad synchronization are not supported. The global offline lock blocks Drive
+API calls and OAuth refreshes.
 
 ### Microsoft Graph setup
 
 Outlook Mail, Outlook Calendar, and OneDrive are optional first-party Extension
 Hub components backed by one Microsoft Graph connection boundary. Install the
-desired entry from **Extension Hub**, review its `integration.read` and
-`network` capabilities, then connect the account from that extension's detail
-page. The selected extension requests only its own read scope, while the
-encrypted Microsoft authorization is shared by the three read-only extensions.
+desired entry from **Extension Hub**, review its declared capabilities, then
+connect the account from that extension's detail page. Each extension requests
+only the scopes needed for its read and optional exact write operations, while
+the encrypted Microsoft authorization is shared by the three extensions.
 
 Microsoft requires an application registration. Expand **Configure OAuth client
 credentials** in the connection dialog and enter a Microsoft Entra desktop/public
@@ -328,58 +353,59 @@ public desktop client; if the provider requires one, it is stored encrypted and
 reused for future token refreshes. Access and refresh tokens never enter
 extension package code, transcripts, or the language model.
 
-The first Graph slice supports requests such as “find my Outlook mail for
-quarterly planning,” “show my Outlook calendar,” “find planning in my Outlook
-calendar,” “find my OneDrive for budget,” and listing OneDrive root items.
-Message previews, calendar event details, and file metadata are bounded and
-remain sensitive selectable items. Sending or editing mail, changing calendar
-events, downloading or uploading file content, and Microsoft To Do are deferred
-to later scope reviews. The global offline lock blocks Graph API calls and OAuth
-refreshes.
+Graph supports bounded mail, calendar, and OneDrive reads. Outlook Mail can
+create one explicit draft and can send only one exact existing draft as a
+separate high-risk confirmed action. Outlook Calendar can create, update, or
+delete one exact event after showing the target. OneDrive can download one exact
+item to a new local path or upload one explicit local file without overwriting.
+Bulk mail/calendar changes, message deletion, meeting responses, OneDrive
+moves/deletes, and Microsoft To Do remain excluded. The global offline lock
+blocks Graph API calls and OAuth refreshes.
 
 ### Slack setup
 
 Slack is an optional first-party Extension Hub component. Install **Slack** from
-**Extension Hub**, review its read-only `integration.read` and `network`
-capabilities, then open **Connect Account** and enter a Slack user token with
-only the read scopes required by the operations you intend to use, such as
-`search:read` and the relevant conversation read scopes. The token is encrypted
+**Extension Hub**, review its `integration.read`, `messaging`, and `network`
+capabilities, then open **Connect Account** and enter a Slack token with only
+the read and posting scopes required by the operations you intend to use. The token is encrypted
 for the current Windows account and never enters extension package code,
 transcripts, or the language model.
 
-The first Slack slice can search messages, list accessible conversations, read a
-bounded channel history, and read a selected thread. Results are sensitive
-selectable items. Sending messages, automatic DMs, reactions, file uploads,
-webhooks, and broad background ingestion are not enabled. Public OAuth
+Slack can search messages, list accessible conversations, read a bounded channel
+history or selected thread, and post one exact message to an exact channel or
+thread after showing the text and target for confirmation. Automatic DMs,
+reactions, file uploads, webhooks, and broad background ingestion are not enabled. Public OAuth
 installation remains a follow-up after a reviewed HTTPS callback relay is
 available for the desktop app.
 
 ### Notion setup
 
 Install **Notion** from **Extension Hub**, then connect a Notion internal
-integration token or personal access token configured with read-only
-capabilities. Share the specific pages or data sources with the integration in
+integration token or personal access token configured with only the capabilities
+you intend to use. Share the specific pages or data sources with the integration in
 Notion; a token alone does not grant access to unshared pages. The encrypted
 token stays in the Windows secret vault.
 
-The first Notion slice searches shared pages and data sources, inspects an exact
-page or data-source ID, and reads bounded child blocks. Page creation, edits,
-database queries, public OAuth onboarding, and workspace-wide ingestion are
-deferred. The global offline lock blocks Notion API calls.
+Notion searches shared pages and data sources, inspects an exact ID, and reads
+bounded child blocks. It can create one page under an exact parent or append
+bounded content to one exact page after confirmation. General edits, database
+writes, public OAuth onboarding, and workspace-wide ingestion remain excluded.
+The global offline lock blocks Notion API calls.
 
 ### GitHub setup
 
 Install **GitHub** from **Extension Hub**, then connect a fine-grained personal
-access token with read-only Metadata and issue access for the repositories you
-intend to inspect. The token is encrypted for the current Windows account and
+access token with Metadata and the minimum issue access needed for the
+repositories and operations you intend to use. The token is encrypted for the current Windows account and
 is not included in settings exports or assistant context. A narrower GitHub App
 authorization flow is planned for a later release.
 
-The first GitHub slice searches repositories and issues, lists repositories for
-the authenticated account, inspects an exact repository or issue, finds pull
-requests, and checks a repository's latest release. Comments, code pushes,
-workflow changes, repository secrets, branch deletion, and other mutations are
-not supported. The global offline lock blocks GitHub API calls.
+GitHub searches repositories and issues, lists repositories for the account,
+inspects an exact repository or issue, finds pull requests, and checks releases.
+It can create one issue in an exact repository or add one confirmed comment to
+an exact issue. Code pushes, workflow or secret changes, branch deletion, and
+bulk repository mutations are not supported. The global offline lock blocks
+GitHub API calls.
 
 ## Commands, permissions, and confirmation
 
@@ -403,6 +429,10 @@ matching page items. Use `select 1`, `select the second one`, an item ID such as
 in assistant context rather than relying on the text previously displayed.
 File items continue to support commands such as `copy it to Desktop` or
 `delete it`, with exact-path permissions and confirmation.
+When a response includes citations, use **Inspect sources** to review sanitized
+source metadata and **Copy sources** to copy the bounded citation list. Local
+document citations use opaque document references and page/sheet/slide/line
+locators rather than exposing private document text in audit records.
 Named subfolders can be searched relative to a known folder, for example
 `find my resume in the Assistant folder on my Desktop`. Folder organization
 can use explicit extensions or the built-in image and text-file categories.
@@ -490,6 +520,27 @@ Visuals are generated from bounded typed data, require no network or file
 permission, and keep an accessible text description in the conversation and
 speech paths. Existing `show` and `play` media commands continue to use the
 media viewer. See `VISUAL_CAPABILITIES_IMPLEMENTATION_PLAN.md` for the roadmap.
+
+## Documents and image understanding
+
+Use one to five explicit local document paths to extract text, summarize,
+compare, find action items, or answer a question. Supported bounded formats are
+TXT, Markdown, CSV, PDF, DOCX, XLSX, and PPTX; optional libraries are required
+for PDF and Office formats. Results include source locators such as line, page,
+sheet, or slide. Encrypted, oversized, unsupported, or malformed files fail with
+an actionable category instead of falling back to an external application.
+
+Content search works only within one approved folder. Building an index asks
+separately for `filesystem.content.read` and `filesystem.content.index`, records
+content signatures so changed/deleted files reconcile on later runs, and never
+changes the source documents. Inspect or clear the index explicitly from the
+same skill; clearing it does not delete source files.
+
+For one explicit local image, ask to read its text, describe it accessibly,
+explain a chart, or explain an error dialog. OCR uses the optional local
+Tesseract executable. The image skill does not capture the screen or camera,
+read the clipboard, click, type, or retain the image implicitly. Live screen
+vision and image generation/editing are outside this release candidate.
 
 ## Microphone and privacy
 

@@ -23,6 +23,7 @@ class FasterWhisperProvider:
         *,
         partial_interval_seconds: float = 1.5,
         partial_min_audio_seconds: float = 1.0,
+        partial_overlap_seconds: float = 0.25,
     ) -> None:
         self.model_name = model_name
         self.requested_device = device
@@ -30,6 +31,7 @@ class FasterWhisperProvider:
         self._cancelled = asyncio.Event()
         self.partial_interval_seconds = partial_interval_seconds
         self.partial_min_audio_seconds = partial_min_audio_seconds
+        self.partial_overlap_seconds = max(0.0, partial_overlap_seconds)
 
     def _model_is_local(self) -> bool:
         return Path(self.model_name).expanduser().exists()
@@ -116,6 +118,11 @@ class FasterWhisperProvider:
             session.sample_rate * session.channels * 2 * self.partial_min_audio_seconds
         )
         last_partial_size = 0
+        partial_cursor = 0
+        partial_text = ""
+        overlap_bytes = int(
+            session.sample_rate * session.channels * 2 * self.partial_overlap_seconds
+        )
         try:
             while not complete.is_set():
                 with suppress(TimeoutError):
@@ -125,8 +132,24 @@ class FasterWhisperProvider:
                     and len(chunks) >= minimum_bytes
                     and len(chunks) > last_partial_size
                 ):
-                    partial = await self._decode(session, bytes(chunks))
-                    yield partial.model_copy(update={"is_final": False})
+                    window_start = max(0, partial_cursor - overlap_bytes)
+                    partial = await self._decode_partial(
+                        session,
+                        bytes(chunks[window_start:]),
+                    )
+                    partial_text = self._merge_partial_text(
+                        partial_text,
+                        partial.raw_text,
+                    )
+                    yield partial.model_copy(
+                        update={
+                            "raw_text": partial_text,
+                            "normalized_text": normalize_text(partial_text),
+                            "words": (),
+                            "is_final": False,
+                        }
+                    )
+                    partial_cursor = len(chunks)
                     last_partial_size = len(chunks)
             await producer
             if producer_error:
@@ -139,7 +162,48 @@ class FasterWhisperProvider:
                 producer.cancel()
                 await asyncio.gather(producer, return_exceptions=True)
 
+    @staticmethod
+    def _merge_partial_text(existing: str, incoming: str) -> str:
+        existing_words = existing.strip().split()
+        incoming_words = incoming.strip().split()
+        if not existing_words:
+            return " ".join(incoming_words)
+        if not incoming_words:
+            return " ".join(existing_words)
+        maximum = min(12, len(existing_words), len(incoming_words))
+        overlap = 0
+        for size in range(maximum, 0, -1):
+            left = [word.casefold().strip(".,!?;:") for word in existing_words[-size:]]
+            right = [word.casefold().strip(".,!?;:") for word in incoming_words[:size]]
+            if left == right:
+                overlap = size
+                break
+        return " ".join((*existing_words, *incoming_words[overlap:]))
+
+    async def _decode_partial(self, session: AudioSession, chunks: bytes) -> Transcript:
+        return await self._decode_profile(
+            session,
+            chunks,
+            beam_size=1,
+            word_timestamps=False,
+        )
+
     async def _decode(self, session: AudioSession, chunks: bytes) -> Transcript:
+        return await self._decode_profile(
+            session,
+            chunks,
+            beam_size=3,
+            word_timestamps=True,
+        )
+
+    async def _decode_profile(
+        self,
+        session: AudioSession,
+        chunks: bytes,
+        *,
+        beam_size: int,
+        word_timestamps: bool,
+    ) -> Transcript:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
             path = Path(handle.name)
         try:
@@ -151,7 +215,10 @@ class FasterWhisperProvider:
 
             def run():
                 return self._model.transcribe(
-                    str(path), beam_size=3, word_timestamps=True, vad_filter=True
+                    str(path),
+                    beam_size=beam_size,
+                    word_timestamps=word_timestamps,
+                    vad_filter=True,
                 )
 
             segments, info = await asyncio.to_thread(run)
@@ -179,6 +246,9 @@ class FasterWhisperProvider:
             )
         finally:
             path.unlink(missing_ok=True)
+
+    async def warmup(self) -> None:
+        await self._load()
 
     async def cancel(self) -> None:
         self._cancelled.set()

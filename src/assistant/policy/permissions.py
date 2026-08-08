@@ -210,6 +210,8 @@ class PermissionManager:
                 if policy and scope.capability in {
                     "filesystem.read",
                     "filesystem.write",
+                    "filesystem.content.read",
+                    "filesystem.content.index",
                 }:
                     for target in scope.targets:
                         policy_reason = policy.denial_reason(scope.capability, target)
@@ -350,6 +352,8 @@ class PermissionManager:
                     if policy and scope.capability in {
                         "filesystem.read",
                         "filesystem.write",
+                        "filesystem.content.read",
+                        "filesystem.content.index",
                     }:
                         for target in scope.targets:
                             policy_reason = policy.denial_reason(scope.capability, target)

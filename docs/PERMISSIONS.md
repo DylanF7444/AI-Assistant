@@ -4,6 +4,10 @@ Permissions are denied by default and granted to one stable skill ID.
 
 - `filesystem.read`: list, inspect, or search approved folders.
 - `filesystem.write`: create, copy, move, rename, or recycle approved files.
+- `filesystem.content.read`: read the contents of explicitly selected files or
+  files under one approved indexing root. This is separate from filename search.
+- `filesystem.content.index`: retain a bounded local content index for one exact
+  approved folder; it does not permit source-file changes.
 - `notification.create`: show a visible local desktop notification.
 - `process.launch`: launch only registered application paths.
 - `process.terminate`: stop an exact process after confirmation.
@@ -24,6 +28,18 @@ Permissions are denied by default and granted to one stable skill ID.
 - `system.network`: enable, disable, or toggle local radios such as Wi-Fi and
   Bluetooth.
 - `system.power`: lock, restart, or shut down the local device.
+- `integration.read`: read an exact approved account/provider target.
+- `integration.write`: create or change one exact approved provider target.
+- `automation.observe.file`: observe bounded filename/type/fingerprint changes
+  under one approved folder, without reading content.
+- `automation.observe.process`: observe start/stop for one exact process name,
+  retaining only process name and ID.
+- `automation.observe.device`: observe status/fingerprint changes for one exact
+  device instance ID, without retaining private device payloads.
+- `automation.observe.calendar`: accept typed event metadata from one configured
+  calendar connector and calendar target.
+- `automation.observe.web`: poll one sanitized public HTTPS target and retain
+  only a bounded text fingerprint; offline lock stops polling before network.
 
 Grant modes are one-time, current session, always, and deny. Targets can narrow
 grants to folders, applications, contacts, or devices. Medium, high, and
@@ -33,6 +49,21 @@ The file access policy is separate from user grants. A blacklist entry blocks
 matching filesystem access even when a permission grant exists. A whitelist
 limits matching filesystem access to configured paths. Policy blocks are
 reported as policy denials, not as permissions the user can grant around.
+
+## Documents, images, and provider writes
+
+`documents.read` and `vision.understand_image` request
+`filesystem.content.read` for exact paths. `documents.content_search` adds
+`filesystem.content.index` for its exact folder. Neither capability grants
+screen capture, clipboard access, general file writes, or external-app control.
+
+Provider writes are scoped independently of provider reads. Drive and OneDrive
+downloads also need `filesystem.write`; uploads need
+`filesystem.content.read`. Outlook draft creation, calendar changes, Notion
+page changes, and GitHub issue changes use `integration.write`. Sending an
+existing Outlook draft or a Slack message uses `messaging`. Every write has an
+exact target and preview; high-risk writes are non-retryable and require a fresh
+confirmation.
 
 ## In-app media
 

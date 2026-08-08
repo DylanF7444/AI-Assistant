@@ -11,6 +11,7 @@ from assistant.contracts import (
     PipelineEvent,
     PipelineState,
     RequestResultItem,
+    Response,
     ResponseType,
     ResultStatus,
     Transcript,
@@ -574,6 +575,35 @@ async def test_text_to_command_to_response(settings):
     assert response.response_type == ResponseType.SKILL
     assert "20" in response.display_text
     assert "Request breakdown:" not in response.display_text
+
+
+@pytest.mark.asyncio
+async def test_independent_command_conjunction_uses_deterministic_plan_without_model(settings):
+    container = build_container(settings)
+
+    decision = await container.orchestrator._interpret_planner_goal(
+        uuid4(),
+        "Tell me the date and list my tasks",
+        session_id="evaluation",
+    )
+
+    assert decision is not None
+    assert [step.intent.name for step in decision.steps] == [
+        "core.datetime",
+        "core.tasks",
+    ]
+    assert all(not step.depends_on for step in decision.steps)
+
+    shared_verb = await container.orchestrator._interpret_planner_goal(
+        uuid4(),
+        "List my memories and my playbooks",
+        session_id="evaluation",
+    )
+    assert shared_verb is not None
+    assert [step.intent.name for step in shared_verb.steps] == [
+        "core.memory",
+        "core.playbook",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1189,8 +1219,21 @@ async def test_voice_only_tts_speaks_voice_invocations_once(settings):
         raw_text="what time",
         normalized_text="what time",
     )
+    events = []
+    container.events.add_listener(events.append)
     await container.orchestrator.handle_transcript(transcript)
     assert len(tts.spoken) == 1
+    stages = {row["stage"] for row in container.metrics.query(limit=100)}
+    assert {
+        "response.first_visible",
+        "tts.first_audio",
+        "tts.synthesis",
+        "tts.playback",
+        "tts.complete",
+    }.issubset(stages)
+    response_ready = next(index for index, event in enumerate(events) if event.data.get("response"))
+    speaking = next(index for index, event in enumerate(events) if event.message == "speaking")
+    assert response_ready < speaking
     await container.orchestrator.cancel()
     assert tts.cancelled
 
@@ -1249,6 +1292,20 @@ async def test_listen_once_stays_listening_until_transcript_arrives(settings):
     assert "2" in response.display_text
     assert outcome.result is not None
     assert PipelineState.TRANSCRIBING in [event.state for event in events]
+    rows = container.metrics.query(limit=100)
+    voice_rows = [row for row in rows if row["dimensions"].get("interaction") == "voice"]
+    voice_stages = {row["stage"] for row in voice_rows}
+    assert {
+        "activation.received",
+        "ui.listening_visible",
+        "audio.first_block",
+        "audio.end_of_utterance",
+        "stt.final",
+        "routing",
+        "response.first_visible",
+        "request.total",
+    }.issubset(voice_stages)
+    assert len({row["correlation_id"] for row in voice_rows}) == 1
 
 
 @pytest.mark.asyncio
@@ -1566,9 +1623,7 @@ async def test_open_ended_question_uses_one_grounded_completion_and_records_late
         response_detail="normal",
     )
 
-    response, outcome = await container.orchestrator.handle_text(
-        "What's the capital of France?"
-    )
+    response, outcome = await container.orchestrator.handle_text("What's the capital of France?")
 
     assert response.display_text == "The capital of France is Paris."
     assert response.response_type == ResponseType.ANSWER
@@ -1582,6 +1637,38 @@ async def test_open_ended_question_uses_one_grounded_completion_and_records_late
         "planner.total",
         "request.total",
     }.issubset(stages)
+
+
+def test_grounded_response_cites_local_knowledge_without_exposing_source_path(settings):
+    container = build_container(settings)
+    response = container.orchestrator._with_reasoning_steps(
+        Response(display_text="The runbook says to restart the service."),
+        request_text="What does the runbook say?",
+        intent=Intent(
+            name="conversation.answer",
+            arguments={"text": "The runbook says to restart the service."},
+            confidence=1,
+            source="llm",
+        ),
+        outcome_label="answered",
+        retrieved=(
+            RetrievedContextItem(
+                namespace="knowledge",
+                source_id="42:3",
+                text="Private knowledge content",
+                metadata={
+                    "knowledge_base_id": 42,
+                    "name": "Operations runbook",
+                    "source_path": r"C:\private\runbook.txt",
+                },
+                score=0.88,
+            ),
+        ),
+    )
+
+    assert response.citations[0].local_reference == "knowledge:42"
+    assert response.citations[0].excerpt_locator == "chunk 3"
+    assert "C:\\private" not in response.model_dump_json()
 
 
 @pytest.mark.asyncio

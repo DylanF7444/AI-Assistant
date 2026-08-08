@@ -1,0 +1,29 @@
+{
+  "corpus_id": "assistant-speech-en",
+  "version": "1.0.0",
+  "status": "template",
+  "language": "en",
+  "license": "User-recorded evaluation audio; do not redistribute without speaker consent.",
+  "consent_record": "Record the date, speakers, permitted uses, retention, and deletion contact in the private acceptance log before setting status to ready.",
+  "sample_format": "pcm_s16le",
+  "sample_rate_hz": 16000,
+  "channels": 1,
+  "thresholds": {
+    "quiet-speech": 0.08,
+    "controlled-noise": 0.15
+  },
+  "cases": [
+    {"case_id": "clean.timer.1", "audio": "speech-v1/clean-timer-1.wav", "reference": "set a timer for five minutes", "condition": "clean", "speaker_id": "speaker-a"},
+    {"case_id": "clean.file.1", "audio": "speech-v1/clean-file-1.wav", "reference": "find the quarterly report in documents", "condition": "clean", "speaker_id": "speaker-b"},
+    {"case_id": "quiet.calendar.1", "audio": "speech-v1/quiet-calendar-1.wav", "reference": "what is on my calendar tomorrow", "condition": "quiet-speech", "speaker_id": "speaker-a"},
+    {"case_id": "quiet.volume.1", "audio": "speech-v1/quiet-volume-1.wav", "reference": "turn the volume down by ten percent", "condition": "quiet-speech", "speaker_id": "speaker-b"},
+    {"case_id": "noise.document.1", "audio": "speech-v1/noise-document-1.wav", "reference": "summarize the selected project brief", "condition": "controlled-noise", "speaker_id": "speaker-a"},
+    {"case_id": "noise.browser.1", "audio": "speech-v1/noise-browser-1.wav", "reference": "open the browser and search for local weather", "condition": "controlled-noise", "speaker_id": "speaker-b"},
+    {"case_id": "accent.reminder.1", "audio": "speech-v1/accent-reminder-1.wav", "reference": "remind me to call Rowan at three tomorrow", "condition": "accent", "speaker_id": "speaker-c"},
+    {"case_id": "accent.calculator.1", "audio": "speech-v1/accent-calculator-1.wav", "reference": "calculate seventeen times nineteen", "condition": "accent", "speaker_id": "speaker-d"},
+    {"case_id": "long.plan.1", "audio": "speech-v1/long-plan-1.wav", "reference": "check my downloads for reports compare the two newest documents and list the action items", "condition": "long-form", "speaker_id": "speaker-a"},
+    {"case_id": "echo.cancel.1", "audio": "speech-v1/echo-cancel-1.wav", "reference": "cancel the current request", "condition": "echo", "speaker_id": "speaker-b"},
+    {"case_id": "silence.room.1", "audio": "speech-v1/silence-room-1.wav", "reference": "", "condition": "silence", "expected_behavior": "silence", "speaker_id": "environment"},
+    {"case_id": "silence.keyboard.1", "audio": "speech-v1/silence-keyboard-1.wav", "reference": "", "condition": "silence", "expected_behavior": "silence", "speaker_id": "environment"}
+  ]
+}

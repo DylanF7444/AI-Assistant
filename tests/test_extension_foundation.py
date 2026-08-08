@@ -105,10 +105,10 @@ class _ConnectableScopedConnection(_ScopedConnection):
         super().__init__(granted_scopes)
         self.connect_calls = []
 
-    async def connect(self, client_id=None, *, client_secret=None, profile_id=None, required_scopes=()):
-        self.connect_calls.append(
-            (client_id, client_secret, profile_id, tuple(required_scopes))
-        )
+    async def connect(
+        self, client_id=None, *, client_secret=None, profile_id=None, required_scopes=()
+    ):
+        self.connect_calls.append((client_id, client_secret, profile_id, tuple(required_scopes)))
         return ConnectionStatus(
             connected=True,
             account="person@example.com",

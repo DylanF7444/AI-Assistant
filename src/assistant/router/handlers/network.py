@@ -103,9 +103,7 @@ class NetworkHandler:
             routed,
         ):
             target = match.group(1).strip()
-            if not _looks_like_file_request(target) and (
-                url := router._website_url(target)
-            ):
+            if not _looks_like_file_request(target) and (url := router._website_url(target)):
                 return RouteResult(
                     Intent(
                         name="windows.browser_navigate",

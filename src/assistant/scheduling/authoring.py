@@ -22,6 +22,7 @@ from assistant.policy.background import background_compatibility
 from assistant.scheduling.contracts import (
     AutonomyPolicy,
     DeliveryPolicy,
+    EventTrigger,
     FixedSkillAction,
     FrozenPlanAction,
     LogicWorkflowAction,
@@ -31,6 +32,7 @@ from assistant.scheduling.contracts import (
     ScheduleStatus,
     SkillSnapshot,
 )
+from assistant.scheduling.observations import trigger_permissions
 from assistant.scheduling.store import ScheduleStore, digest
 from assistant.skills.registry import SkillRegistry
 from assistant.storage.macros import MacroStore
@@ -81,6 +83,7 @@ class ScheduleAuthoringService:
             step_id="action",
             user_id=user_id,
         )
+        capabilities, targets = self._with_trigger_authority(trigger, capabilities, targets)
         now = self.store.clock.now()
         definition = ScheduleDefinition(
             schedule_id=schedule_id,
@@ -143,6 +146,7 @@ class ScheduleAuthoringService:
         if not calls:
             raise ValueError("Macro must contain at least one step")
         effective_risk = max(risks, key=_RISK_ORDER.get)
+        capabilities, targets = self._with_trigger_authority(trigger, capabilities, targets)
         now = self.store.clock.now()
         definition = ScheduleDefinition(
             schedule_id=schedule_id,
@@ -201,9 +205,7 @@ class ScheduleAuthoringService:
 
         check = prepare(workflow.check, "logic-check") if workflow.check is not None else None
         if workflow.action.kind == "skill":
-            prepared_action = LogicSkillAction(
-                call=prepare(workflow.action.call, "logic-action")
-            )
+            prepared_action = LogicSkillAction(call=prepare(workflow.action.call, "logic-action"))
         elif workflow.action.kind == "notification":
             prepared_action = LogicNotificationAction(
                 title=workflow.action.title,
@@ -247,6 +249,7 @@ class ScheduleAuthoringService:
             completion=workflow.completion,
         )
         effective_risk = max(risks, key=_RISK_ORDER.get, default=RiskLevel.LOW)
+        capabilities, targets = self._with_trigger_authority(trigger, capabilities, targets)
         now = self.store.clock.now()
         definition = ScheduleDefinition(
             schedule_id=schedule_id,
@@ -369,6 +372,16 @@ class ScheduleAuthoringService:
         capabilities = {permission.capability for permission in permissions}
         targets = {target for permission in permissions for target in permission.targets}
         return call, snapshot, capabilities, targets, risk
+
+    @staticmethod
+    def _with_trigger_authority(trigger, capabilities, targets):
+        capabilities = set(capabilities)
+        targets = set(targets)
+        if isinstance(trigger, EventTrigger):
+            permissions = trigger_permissions(trigger)
+            capabilities.update(permission.capability for permission in permissions)
+            targets.update(target for permission in permissions for target in permission.targets)
+        return capabilities, targets
 
     @staticmethod
     def _policy(

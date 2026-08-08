@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import time
 import wave
 from pathlib import Path
 
@@ -14,6 +16,7 @@ from assistant.tts.discovery import (
     piper_model_dialog_directory,
 )
 from assistant.tts.elevenlabs import ElevenLabsProvider
+from assistant.tts.piper import PiperProvider
 
 
 class _AudioResponse:
@@ -122,6 +125,64 @@ async def test_elevenlabs_offline_lock_blocks_network_and_health_redacts_key(tmp
     assert health["api_key_configured"] is True
     assert "never-print-this-key" not in str(health)
     assert opener.requests == []
+
+
+@pytest.mark.asyncio
+async def test_piper_sentence_chunks_publish_first_audio_before_all_playback(tmp_path):
+    provider = PiperProvider(tmp_path / "piper.exe", tmp_path / "voice.onnx")
+    synthesized = []
+    played = []
+
+    async def synthesize(text, output):
+        synthesized.append(text)
+        output.write_bytes(b"wave")
+
+    provider._synthesize = synthesize
+    provider._play = lambda path: played.append(path.read_bytes())
+    response = Response(
+        display_text="Long response",
+        speech_text="First sentence is ready. Second sentence follows.",
+    )
+
+    events = [event async for event in provider.speak(response)]
+
+    assert [event.state for event in events] == [PipelineState.SPEAKING]
+    assert synthesized == ["First sentence is ready.", "Second sentence follows."]
+    assert played == [b"wave", b"wave"]
+
+
+@pytest.mark.asyncio
+async def test_piper_short_phrase_cache_is_reused_and_bounded(tmp_path):
+    cache = tmp_path / "cache"
+    provider = PiperProvider(
+        tmp_path / "piper.exe",
+        tmp_path / "voice.onnx",
+        cache_dir=cache,
+        cache_max_bytes=8,
+        cache_retention_days=1,
+    )
+    syntheses = 0
+
+    async def synthesize(_text, output):
+        nonlocal syntheses
+        syntheses += 1
+        output.write_bytes(b"wave")
+
+    provider._synthesize = synthesize
+    provider._play = lambda _path: None
+    response = Response(display_text="Cached", speech_text="Cached")
+
+    for _ in range(2):
+        async for _event in provider.speak(response):
+            pass
+
+    assert syntheses == 1
+    stale = cache / "stale.wav"
+    stale.write_bytes(b"old")
+    old = time.time() - 2 * 86_400
+    os.utime(stale, (old, old))
+    provider._prune_cache()
+    assert not stale.exists()
 
 
 def test_piper_discovery_finds_paired_voice_files_in_common_model_roots(tmp_path):

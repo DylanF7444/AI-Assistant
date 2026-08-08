@@ -18,9 +18,7 @@ class DeterministicRouter:
         self,
         application_names: Callable[[], Iterable[str]] | Iterable[str] | None = None,
         *,
-        skill_status: Callable[
-            [str], Literal["enabled", "disabled", "disconnected", "unavailable"]
-        ]
+        skill_status: Callable[[str], Literal["enabled", "disabled", "disconnected", "unavailable"]]
         | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:

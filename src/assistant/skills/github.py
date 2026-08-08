@@ -15,7 +15,7 @@ from assistant.contracts import (
     SkillCall,
     SkillResult,
 )
-from assistant.integrations.github import API_ROOT, GitHubAdapter
+from assistant.integrations.github import GitHubAdapter
 from assistant.skills.base import Skill
 from assistant.skills.builtin import manifest
 from assistant.skills.microsoft_graph_common import short_id
@@ -33,6 +33,8 @@ class GitHubInput(BaseModel):
         "get_issue",
         "list_pull_requests",
         "latest_release",
+        "create_issue",
+        "add_comment",
     ]
     query: str | None = Field(default=None, min_length=1, max_length=500)
     owner: str | None = Field(default=None, min_length=1, max_length=100)
@@ -40,6 +42,8 @@ class GitHubInput(BaseModel):
     issue_number: int | None = Field(default=None, ge=1, le=10_000_000)
     max_results: int = Field(default=25, ge=1, le=50)
     page: int = Field(default=1, ge=1, le=100)
+    title: str | None = Field(default=None, min_length=1, max_length=500)
+    body: str | None = Field(default=None, min_length=1, max_length=65_536)
 
     @model_validator(mode="after")
     def _operation_has_required_fields(self) -> GitHubInput:
@@ -51,10 +55,20 @@ class GitHubInput(BaseModel):
             "get_issue",
             "list_pull_requests",
             "latest_release",
+            "create_issue",
+            "add_comment",
         } and (not self.owner or not self.repo):
             raise ValueError(f"{self.operation} requires owner and repo")
-        if self.operation == "get_issue" and self.issue_number is None:
-            raise ValueError("get_issue requires issue_number")
+        if self.operation in {"get_issue", "add_comment"} and self.issue_number is None:
+            raise ValueError(f"{self.operation} requires issue_number")
+        if self.operation == "create_issue" and (not self.title or not self.body):
+            raise ValueError("create_issue requires title and body")
+        if self.operation == "add_comment" and not self.body:
+            raise ValueError("add_comment requires body")
+        if self.operation != "create_issue" and self.title is not None:
+            raise ValueError("title is only valid for create_issue")
+        if self.operation not in {"create_issue", "add_comment"} and self.body is not None:
+            raise ValueError("body is only valid for issue writes")
         return self
 
 
@@ -75,8 +89,8 @@ class GitHubSkill(Skill):
             display_name="GitHub",
             description=(
                 "Search GitHub repositories and issues, inspect exact repositories and issues, "
-                "find pull requests, and inspect the latest release. Comments, code pushes, "
-                "workflow changes, secrets, and repository mutations are excluded."
+                "find pull requests, inspect releases, create one issue, or add one confirmed "
+                "comment. Code pushes, workflow changes, secrets, and bulk mutations are excluded."
             ),
             input_model=self.input_model,
             output_model=self.output_model,
@@ -93,21 +107,29 @@ class GitHubSkill(Skill):
                 ),
             ),
             risk=RiskLevel.MEDIUM,
-            safe_to_retry=True,
+            safe_to_retry=False,
             background_mode=BackgroundMode.CAPABILITY_GATED,
         ).model_copy(update={"entry_point": f"{__name__}:GitHubSkill"})
 
     def risk_for(self, call: SkillCall) -> RiskLevel:
-        self.validate(call.arguments)
-        return RiskLevel.LOW
+        return (
+            RiskLevel.HIGH
+            if self.validate(call.arguments).operation in {"create_issue", "add_comment"}
+            else RiskLevel.LOW
+        )
 
     def required_permissions(self, call: SkillCall):
         args = self.validate(call.arguments)
+        write = args.operation in {"create_issue", "add_comment"}
         return (
             PermissionScope(
-                capability="integration.read",
+                capability="integration.write" if write else "integration.read",
                 targets=(_permission_target(args),),
-                reason="Allow GitHub access for this exact read target.",
+                reason=(
+                    "Change this exact GitHub issue target."
+                    if write
+                    else "Allow GitHub access for this exact read target."
+                ),
             ),
             PermissionScope(
                 capability="network",
@@ -118,6 +140,12 @@ class GitHubSkill(Skill):
 
     async def preview(self, call: SkillCall) -> str:
         args = self.validate(call.arguments)
+        if args.operation == "create_issue":
+            return f"Create GitHub issue {args.title!r} in {args.owner}/{args.repo}"
+        if args.operation == "add_comment":
+            return (
+                f"Post a comment to {args.owner}/{args.repo} issue {args.issue_number}: {args.body}"
+            )
         return f"GitHub: {args.operation} on {_permission_target(args)}"
 
     async def health(self) -> dict[str, Any]:
@@ -176,14 +204,22 @@ class GitHubSkill(Skill):
             f"/repos/{urllib.parse.quote(args.owner or '', safe='')}"
             f"/{urllib.parse.quote(args.repo or '', safe='')}"
         )
+        if args.operation == "create_issue":
+            return await self.adapter.request(
+                "POST", f"{repo_path}/issues", body={"title": args.title, "body": args.body}
+            )
+        if args.operation == "add_comment":
+            return await self.adapter.request(
+                "POST",
+                f"{repo_path}/issues/{args.issue_number}/comments",
+                body={"body": args.body},
+            )
         if args.operation == "get_repository":
             return await self.adapter.request("GET", repo_path)
         if args.operation == "latest_release":
             return await self.adapter.request("GET", f"{repo_path}/releases/latest")
         if args.operation == "get_issue":
-            return await self.adapter.request(
-                "GET", f"{repo_path}/issues/{args.issue_number}"
-            )
+            return await self.adapter.request("GET", f"{repo_path}/issues/{args.issue_number}")
         if args.operation == "list_issues":
             query = f"repo:{args.owner}/{args.repo} is:issue"
         elif args.operation == "list_pull_requests":
@@ -217,6 +253,10 @@ def _permission_target(args: GitHubInput) -> str:
     if args.operation == "list_repositories":
         return "github:repositories:authenticated"
     repository = f"{args.owner}/{args.repo}"
+    if args.operation == "create_issue":
+        return f"github:create-issue:{repository}"
+    if args.operation == "add_comment":
+        return f"github:add-comment:{repository}:{args.issue_number}"
     if args.operation == "get_issue":
         return f"github:issue:{repository}:{args.issue_number}"
     return f"github:{args.operation}:{repository}"

@@ -156,9 +156,7 @@ def test_gmail_permissions_and_risk_are_operation_specific():
     assert skill.required_permissions(read)[0].targets == ("gmail:message:message-1",)
     assert skill.required_permissions(archive)[0].capability == "integration.write"
     assert skill.required_permissions(send)[0].capability == "messaging"
-    assert skill.required_permissions(send)[0].targets == (
-        "gmail:recipients:person@example.com",
-    )
+    assert skill.required_permissions(send)[0].targets == ("gmail:recipients:person@example.com",)
     assert skill.risk_for(read) == RiskLevel.LOW
     assert skill.risk_for(archive) == RiskLevel.MEDIUM
     assert skill.risk_for(send) == RiskLevel.HIGH
@@ -383,8 +381,10 @@ async def test_connection_service_completes_pkce_with_gmail_scope_and_separate_t
     def browser_open(url):
         query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
         authorization.update(query)
-        callback = query["redirect_uri"][0] + "?" + urllib.parse.urlencode(
-            {"state": query["state"][0], "code": "authorization-code"}
+        callback = (
+            query["redirect_uri"][0]
+            + "?"
+            + urllib.parse.urlencode({"state": query["state"][0], "code": "authorization-code"})
         )
         with urllib.request.urlopen(callback, timeout=5):
             pass

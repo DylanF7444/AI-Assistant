@@ -6,7 +6,6 @@ from assistant.contracts import Intent
 from assistant.router.types import RouteContext, RouteResult
 from assistant.visualization import parse_visual_request, visual_request_kind
 
-
 _DATA_ACQUISITION_CUES = re.compile(
     r"\b(?:current|latest|newest|recent|today|this\s+(?:week|month|quarter|year)|"
     r"top|bottom|highest|lowest|largest|smallest|most|least|best|worst|"

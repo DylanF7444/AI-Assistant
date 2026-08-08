@@ -23,6 +23,8 @@ from assistant.scheduling.contracts import (
     AutonomyPolicy,
     BackgroundAuthorization,
     DeliveryPolicy,
+    EventObservation,
+    EventTrigger,
     FixedSkillAction,
     FrozenPlanAction,
     LogicWorkflowAction,
@@ -36,6 +38,7 @@ from assistant.scheduling.contracts import (
     ScheduleStatus,
     SkillSnapshot,
 )
+from assistant.scheduling.observations import matches, observation_capability
 from assistant.scheduling.recurrence import next_occurrence
 from assistant.storage.database import (
     AuditStore,
@@ -69,6 +72,10 @@ def digest(value: Any) -> str:
 
 def occurrence_key(schedule_id: UUID, revision: int, scheduled_for: datetime) -> str:
     return f"schedule:{schedule_id}:{revision}:{aware_utc(scheduled_for).isoformat()}"
+
+
+def event_occurrence_key(schedule_id: UUID, revision: int, observation_id: str) -> str:
+    return f"schedule:{schedule_id}:{revision}:event:{observation_id}"
 
 
 class ScheduleStore:
@@ -432,6 +439,90 @@ class ScheduleStore:
         run = self.get_run(UUID(run_id))
         self._record_run_event("schedule_occurrence_created", run, "manual")
         return run
+
+    def observe(self, observation: EventObservation) -> tuple[ScheduleRun, ...]:
+        """Materialize matching typed events without interpreting their payload as prompts."""
+        occurred_at = aware_utc(observation.occurred_at)
+        now = aware_utc(self.clock.now())
+        if occurred_at > now + timedelta(minutes=5):
+            raise ValueError("Event observation time is too far in the future")
+        if occurred_at < now - timedelta(days=1):
+            return ()
+        created_ids: list[UUID] = []
+        with self.database.session() as session:
+            rows = list(
+                session.scalars(
+                    select(ScheduleRow).where(ScheduleRow.status == ScheduleStatus.ACTIVE.value)
+                )
+            )
+            for row in rows:
+                definition = self._definition(row)
+                trigger = definition.trigger
+                if not isinstance(trigger, EventTrigger) or not matches(trigger, observation):
+                    continue
+                capability = observation_capability(trigger.observation_type)
+                if (
+                    capability not in definition.autonomy_policy.allowed_capabilities
+                    or trigger.target not in definition.autonomy_policy.allowed_targets
+                ):
+                    continue
+                key = event_occurrence_key(
+                    definition.schedule_id,
+                    definition.revision,
+                    observation.observation_id,
+                )
+                if session.scalar(
+                    select(ScheduleRunRow).where(ScheduleRunRow.occurrence_key == key)
+                ):
+                    continue
+                latest = session.scalar(
+                    select(ScheduleRunRow)
+                    .where(
+                        ScheduleRunRow.schedule_id == row.id,
+                        ScheduleRunRow.schedule_revision == row.revision,
+                        ScheduleRunRow.occurrence_key.like(
+                            f"schedule:{row.id}:{row.revision}:event:%"
+                        ),
+                    )
+                    .order_by(ScheduleRunRow.scheduled_for.desc())
+                    .limit(1)
+                )
+                if (
+                    latest
+                    and (occurred_at - aware_utc(latest.scheduled_for)).total_seconds()
+                    < trigger.minimum_interval_seconds
+                ):
+                    continue
+                run_id = uuid4()
+                session.add(
+                    ScheduleRunRow(
+                        id=str(run_id),
+                        schedule_id=row.id,
+                        schedule_revision=row.revision,
+                        occurrence_key=key,
+                        scheduled_for=occurred_at,
+                        state=ScheduleRunState.PENDING.value,
+                        attempt=0,
+                        lateness_seconds=max(0.0, (now - occurred_at).total_seconds()),
+                        idempotency_key=key,
+                        action_digest=row.action_digest,
+                        created_at=now,
+                    )
+                )
+                created_ids.append(run_id)
+        if created_ids:
+            self._notify_changed()
+        runs = tuple(self.get_run(run_id) for run_id in created_ids)
+        for run in runs:
+            self._record_run_event(
+                "schedule_occurrence_created",
+                run,
+                "typed_event",
+                observation_type=observation.observation_type,
+                observation_event=observation.event,
+                observation_id=observation.observation_id,
+            )
+        return runs
 
     def snooze(self, schedule_id: UUID, delay_seconds: float) -> ScheduleDefinition:
         if delay_seconds <= 0 or delay_seconds > 31_536_000:
@@ -1125,6 +1216,8 @@ class ScheduleStore:
     def _initial_occurrence(self, definition: ScheduleDefinition, now: datetime) -> datetime | None:
         if isinstance(definition.trigger, OneTimeTrigger):
             return aware_utc(definition.trigger.run_at)
+        if isinstance(definition.trigger, EventTrigger):
+            return None
         return next_occurrence(definition.trigger, now)
 
     @staticmethod
@@ -1157,9 +1250,7 @@ class ScheduleStore:
         if isinstance(action, LogicWorkflowAction):
             workflow = action.workflow
             check = (
-                revised_call(workflow.check, "logic-check")
-                if workflow.check is not None
-                else None
+                revised_call(workflow.check, "logic-check") if workflow.check is not None else None
             )
             common_action = workflow.action
             if isinstance(common_action, LogicSkillAction):

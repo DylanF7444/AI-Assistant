@@ -110,9 +110,7 @@ class LogicPredicate(StrictModel):
     reference: str = Field(
         min_length=1,
         max_length=200,
-        pattern=(
-            r"^check\.(?:status|summary|items_count|data(?:\.[A-Za-z0-9_.-]+)?)$"
-        ),
+        pattern=(r"^check\.(?:status|summary|items_count|data(?:\.[A-Za-z0-9_.-]+)?)$"),
     )
     operator: Literal[
         "exists",
@@ -219,7 +217,9 @@ class LogicWorkflowDraft(StrictModel):
             and any(option.action is not None for option in self.selection.options)
             and self.action.kind != "selection_result"
         ):
-            raise ValueError("Choice-specific actions require selection_result as the common action")
+            raise ValueError(
+                "Choice-specific actions require selection_result as the common action"
+            )
         return self
 
 
@@ -245,7 +245,9 @@ class LogicWorkflow(StrictModel):
             and any(option.action is not None for option in self.selection.options)
             and self.action.kind != "selection_result"
         ):
-            raise ValueError("Choice-specific actions require selection_result as the common action")
+            raise ValueError(
+                "Choice-specific actions require selection_result as the common action"
+            )
         return self
 
 

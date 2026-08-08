@@ -66,9 +66,7 @@ def _call(arguments: dict, *, key: str = "logic-test") -> SkillCall:
 def _options() -> tuple[ChoiceOption, ...]:
     return (
         ChoiceOption(option_id="red", label="Red", value="red", metadata={"group": "warm"}),
-        ChoiceOption(
-            option_id="green", label="Green", value="green", metadata={"group": "cool"}
-        ),
+        ChoiceOption(option_id="green", label="Green", value="green", metadata={"group": "cool"}),
         ChoiceOption(option_id="blue", label="Blue", value="blue", metadata={"group": "cool"}),
     )
 
@@ -93,10 +91,7 @@ def test_seeded_selection_is_reproducible_and_respects_history_and_filters():
 def test_round_robin_and_least_recent_are_deterministic():
     round_robin = LogicSelection(options=_options(), strategy="round_robin")
     assert choose_option(round_robin, selection_key="x").option_id == "red"
-    assert (
-        choose_option(round_robin, selection_key="y", recent_ids=("red",)).option_id
-        == "green"
-    )
+    assert choose_option(round_robin, selection_key="y", recent_ids=("red",)).option_id == "green"
 
     least_recent = LogicSelection(options=_options(), strategy="least_recent", seed="stable")
     selected = choose_option(
@@ -116,13 +111,11 @@ def test_weighted_selection_is_deterministic_and_honors_relative_weights():
         seed="weighted-demo",
     )
     picks = [
-        choose_option(selection, selection_key=f"run-{index}").option_id
-        for index in range(400)
+        choose_option(selection, selection_key=f"run-{index}").option_id for index in range(400)
     ]
 
     assert picks == [
-        choose_option(selection, selection_key=f"run-{index}").option_id
-        for index in range(400)
+        choose_option(selection, selection_key=f"run-{index}").option_id for index in range(400)
     ]
     assert 270 <= picks.count("common") <= 330
 
@@ -158,12 +151,15 @@ def test_predicates_and_templates_use_only_typed_result_fields():
         ),
         result,
     )
-    assert render_template(
-        "Status: {check.status}; {check.summary}",
-        choice=None,
-        check=result,
-        max_length=500,
-    ) == "Status: completed; Rain is expected"
+    assert (
+        render_template(
+            "Status: {check.status}; {check.summary}",
+            choice=None,
+            check=result,
+            max_length=500,
+        )
+        == "Status: completed; Rain is expected"
+    )
     with pytest.raises(ValidationError, match="Unsupported notification template"):
         LogicNotificationDraft(title="Weather", message="{check.data.secret}")
 
@@ -627,9 +623,7 @@ async def test_dynamic_selection_rejects_sensitive_check_results(tmp_path):
 
     assert run.state == ScheduleRunState.FAILED
     assert run.result["error"]["code"] == "logic_selection_failed"
-    assert run.result["data"]["workflow"]["stop_reason"] == (
-        "Reached the maximum of 1 runs"
-    )
+    assert run.result["data"]["workflow"]["stop_reason"] == ("Reached the maximum of 1 runs")
     assert container.notification_center.history()[-1].severity == "error"
 
 
@@ -694,12 +688,15 @@ async def test_retries_keep_one_occurrence_count_and_use_bounded_backoff(tmp_pat
 
 
 def test_retry_policy_supports_fixed_and_bounded_exponential_delays():
-    assert RunPolicy(
-        max_attempts=3,
-        retry_delay_seconds=10,
-        retry_backoff="fixed",
-        max_retry_delay_seconds=10,
-    ).retry_backoff == "fixed"
+    assert (
+        RunPolicy(
+            max_attempts=3,
+            retry_delay_seconds=10,
+            retry_backoff="fixed",
+            max_retry_delay_seconds=10,
+        ).retry_backoff
+        == "fixed"
+    )
     with pytest.raises(ValidationError, match="cannot be shorter"):
         RunPolicy(retry_delay_seconds=30, max_retry_delay_seconds=10)
 

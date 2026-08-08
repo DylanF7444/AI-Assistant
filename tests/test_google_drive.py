@@ -13,8 +13,8 @@ from assistant.config import Settings
 from assistant.contracts import PermissionContext, RiskLevel, SkillCall
 from assistant.integrations.google_drive import (
     DEFAULT_GOOGLE_DRIVE_CLIENT_ID,
+    DRIVE_FILE_SCOPE,
     DRIVE_READ_SCOPE,
-    GoogleDriveAdapter,
     GoogleDriveConnectionService,
     GoogleDriveTokenManager,
 )
@@ -179,7 +179,9 @@ async def test_list_children_and_metadata_use_fixed_drive_paths():
 
 @pytest.mark.asyncio
 async def test_drive_token_manager_uses_separate_encrypted_names():
-    vault = MemoryVault({"google_drive_client_id": "client", "google_drive_refresh_token": "refresh"})
+    vault = MemoryVault(
+        {"google_drive_client_id": "client", "google_drive_refresh_token": "refresh"}
+    )
     requests = []
 
     def opener(request, timeout):
@@ -216,8 +218,10 @@ async def test_connection_service_requests_drive_scope_and_disconnects_separatel
     def browser_open(url):
         query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
         authorization.update(query)
-        callback = query["redirect_uri"][0] + "?" + urllib.parse.urlencode(
-            {"state": query["state"][0], "code": "authorization-code"}
+        callback = (
+            query["redirect_uri"][0]
+            + "?"
+            + urllib.parse.urlencode({"state": query["state"][0], "code": "authorization-code"})
         )
         with urllib.request.urlopen(callback, timeout=5):
             pass
@@ -258,6 +262,10 @@ async def test_google_drive_is_visible_installable_and_restartable_from_the_hub(
     connection = container.extension_hub.connection_service(entry.extension_id)
     connection.vault.set("google_drive_client_id", "desktop-client")
     connection.vault.set("google_drive_refresh_token", "refresh-token")
+    connection.vault.set(
+        "google_drive_granted_scopes",
+        json.dumps([DRIVE_READ_SCOPE, DRIVE_FILE_SCOPE]),
+    )
 
     assert manifest.skill_id == "integration.google_drive"
     assert container.registry.is_enabled("integration.google_drive") is False

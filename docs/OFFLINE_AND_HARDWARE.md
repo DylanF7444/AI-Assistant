@@ -33,3 +33,16 @@ Release builds publish checksums for installers and require signed model
 bundles. Deterministic and local-LLM figures are recorded in `benchmarks/`.
 Microphone, STT, and TTS release figures still require the controlled audio
 corpus and configured local voice described in `IMPLEMENTATION_STATUS.md`.
+
+The versioned speech-corpus contract and metadata template live under
+`benchmarks/corpora/speech/`. Validate the licensed assets before benchmarking:
+
+```powershell
+python scripts/benchmark_models.py --audio-corpus benchmarks/corpora/speech_v1.template.json --audio-assets-root C:\licensed-speech --validate-speech-corpus
+python scripts/benchmark_models.py --stt-model small.en --audio-corpus benchmarks/corpora/speech_v1.template.json --audio-assets-root C:\licensed-speech --output .benchmark-data/speech
+```
+
+The report records WER, real-time factor, conditions, model/device identity, and
+corpus version. Repository tests validate the contract but intentionally do not
+ship recorded voices or model files. Do not publish WER, first-partial,
+first-audio, echo, or barge-in claims from synthetic fixtures alone.

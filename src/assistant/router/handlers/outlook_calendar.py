@@ -42,12 +42,14 @@ def _setup_route(status: str) -> RouteResult | None:
     else:
         message = "Outlook Calendar is not installed. Open Extension Hub and install Outlook Calendar first."
     return RouteResult(
-        Intent(name="conversation.answer", arguments={"text": message}, confidence=0.99, source="rule")
+        Intent(
+            name="conversation.answer", arguments={"text": message}, confidence=0.99, source="rule"
+        )
     )
 
 
 class OutlookCalendarHandler:
-    """Route explicit read-only Outlook Calendar requests without an LLM."""
+    """Route explicit safe-path Outlook Calendar reads without an LLM."""
 
     def route(self, context: RouteContext, router: DeterministicRouter) -> RouteResult | None:
         raw = re.sub(r"[.?!]+$", "", context.text.strip())

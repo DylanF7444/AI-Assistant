@@ -81,9 +81,7 @@ def call(arguments):
     ],
 )
 def test_common_calendar_requests_route_without_the_llm(text, operation):
-    router = DeterministicRouter(
-        clock=lambda: datetime(2026, 7, 30, 20, 0, tzinfo=UTC)
-    )
+    router = DeterministicRouter(clock=lambda: datetime(2026, 7, 30, 20, 0, tzinfo=UTC))
 
     route = router.route(text)
 
@@ -95,9 +93,7 @@ def test_common_calendar_requests_route_without_the_llm(text, operation):
 
 
 def test_calendar_read_routes_use_bounded_relative_time_windows():
-    router = DeterministicRouter(
-        clock=lambda: datetime(2026, 7, 30, 20, 0, tzinfo=UTC)
-    )
+    router = DeterministicRouter(clock=lambda: datetime(2026, 7, 30, 20, 0, tzinfo=UTC))
 
     today = router.route("what is on my calendar today").intent.arguments
     tomorrow = router.route("show my appointments tomorrow").intent.arguments
@@ -119,9 +115,7 @@ def test_calendar_read_routes_use_bounded_relative_time_windows():
     ],
 )
 def test_calendar_request_explains_unavailable_extension_state(status, message):
-    route = DeterministicRouter(skill_status=lambda _skill_id: status).route(
-        "check my calendar"
-    )
+    route = DeterministicRouter(skill_status=lambda _skill_id: status).route("check my calendar")
 
     assert route.intent.name == "conversation.answer"
     assert message in route.intent.arguments["text"]
@@ -137,9 +131,7 @@ def test_calendar_synonyms_retrieve_the_calendar_skill_for_complex_requests():
         "move the selected meeting",
         "show my agenda",
     ):
-        assert retriever.relevant(text, limit=1)[0].skill_id == (
-            "integration.google_calendar"
-        )
+        assert retriever.relevant(text, limit=1)[0].skill_id == ("integration.google_calendar")
 
 
 class RecordingAdapter:
@@ -503,9 +495,7 @@ async def test_connection_service_remembers_client_secret_when_first_exchange_fa
     callback_page = {}
 
     def opener(request, timeout):
-        payload = json.dumps(
-            {"error": {"message": "client_secret is missing"}}
-        ).encode()
+        payload = json.dumps({"error": {"message": "client_secret is missing"}}).encode()
         raise urllib.error.HTTPError(
             request.full_url,
             401,
@@ -519,9 +509,7 @@ async def test_connection_service_remembers_client_secret_when_first_exchange_fa
         callback = (
             query["redirect_uri"][0]
             + "?"
-            + urllib.parse.urlencode(
-                {"state": query["state"][0], "code": "authorization-code"}
-            )
+            + urllib.parse.urlencode({"state": query["state"][0], "code": "authorization-code"})
         )
         try:
             urllib.request.urlopen(callback, timeout=5)
@@ -570,9 +558,7 @@ async def test_connection_callback_reports_token_exchange_failure_without_false_
         callback = (
             query["redirect_uri"][0]
             + "?"
-            + urllib.parse.urlencode(
-                {"state": query["state"][0], "code": "authorization-code"}
-            )
+            + urllib.parse.urlencode({"state": query["state"][0], "code": "authorization-code"})
         )
         try:
             urllib.request.urlopen(callback, timeout=5)
@@ -652,9 +638,7 @@ async def test_calendar_requests_prepare_the_extension_skill_without_a_planner(
         )
     )
     await container.extension_hub.install("integration.google_calendar")
-    connection = container.extension_hub.connection_service(
-        "integration.google_calendar"
-    )
+    connection = container.extension_hub.connection_service("integration.google_calendar")
     connection.vault.set("google_calendar_client_id", "desktop-client")
     connection.vault.set("google_calendar_refresh_token", "refresh-token")
     container.registry.enable("integration.google_calendar")
@@ -679,16 +663,12 @@ async def test_calendar_creation_clarification_completes_without_a_planner(tmp_p
         )
     )
     await container.extension_hub.install("integration.google_calendar")
-    connection = container.extension_hub.connection_service(
-        "integration.google_calendar"
-    )
+    connection = container.extension_hub.connection_service("integration.google_calendar")
     connection.vault.set("google_calendar_client_id", "desktop-client")
     connection.vault.set("google_calendar_refresh_token", "refresh-token")
     container.registry.enable("integration.google_calendar")
 
-    first_response, first_outcome = await container.orchestrator.handle_text(
-        "add to my calendar"
-    )
+    first_response, first_outcome = await container.orchestrator.handle_text("add to my calendar")
     second_response, second_outcome = await container.orchestrator.handle_text(
         "dentist tomorrow at 3"
     )
@@ -716,9 +696,7 @@ async def test_connected_calendar_extension_is_enabled_after_restart(tmp_path):
     )
     container = build_container(settings)
     await container.extension_hub.install("integration.google_calendar")
-    connection = container.extension_hub.connection_service(
-        "integration.google_calendar"
-    )
+    connection = container.extension_hub.connection_service("integration.google_calendar")
     connection.vault.set("google_calendar_client_id", "desktop-client")
     connection.vault.set("google_calendar_refresh_token", "refresh-token")
 

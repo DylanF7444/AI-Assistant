@@ -30,6 +30,13 @@ from sqlalchemy import (
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
+from assistant.observability import (
+    MetricDimensions,
+    MetricDimensionValue,
+    MetricStage,
+    normalize_metric_dimensions,
+)
+
 
 class Base(DeclarativeBase):
     pass
@@ -141,6 +148,7 @@ class MetricRow(Base):
     duration_ms: Mapped[float | None] = mapped_column(nullable=True)
     value: Mapped[float | None] = mapped_column(nullable=True)
     outcome: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    dimensions_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
 
 
 class DashboardMetricSampleRow(Base):
@@ -342,7 +350,7 @@ class BackgroundAuthorizationRow(Base):
 
 
 class Database:
-    CURRENT_SCHEMA_VERSION = 11
+    CURRENT_SCHEMA_VERSION = 12
 
     def __init__(self, url: str) -> None:
         self.url = url
@@ -421,6 +429,18 @@ class Database:
                 LogicChoiceHistoryRow.__table__.create(self.engine, checkfirst=True)
                 LogicWorkflowStateRow.__table__.create(self.engine, checkfirst=True)
                 LogicCheckpointRow.__table__.create(self.engine, checkfirst=True)
+            if version == 11:
+                columns = {
+                    column["name"]
+                    for column in inspect(self.engine).get_columns(MetricRow.__tablename__)
+                }
+                if "dimensions_json" not in columns:
+                    session.execute(
+                        text(
+                            "ALTER TABLE pipeline_metrics "
+                            "ADD COLUMN dimensions_json TEXT NOT NULL DEFAULT '{}'"
+                        )
+                    )
             version += 1
         session.get(SchemaVersionRow, 1).version = version  # type: ignore[union-attr]
 
@@ -733,20 +753,27 @@ class MetricsStore:
         self,
         *,
         correlation_id: str,
-        stage: str,
+        stage: str | MetricStage,
         duration_ms: float | None = None,
         value: float | None = None,
         outcome: str | None = None,
+        dimensions: MetricDimensions | dict[str, MetricDimensionValue] | None = None,
     ) -> None:
+        normalized_dimensions = normalize_metric_dimensions(dimensions)
         with self.database.session() as session:
             session.add(
                 MetricRow(
                     timestamp=now(),
                     correlation_id=correlation_id,
-                    stage=stage,
+                    stage=str(stage),
                     duration_ms=duration_ms,
                     value=value,
                     outcome=outcome,
+                    dimensions_json=json.dumps(
+                        normalized_dimensions,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
                 )
             )
 
@@ -761,6 +788,7 @@ class MetricsStore:
         since: datetime | None = None,
         until: datetime | None = None,
         stages: tuple[str, ...] = (),
+        dimensions: dict[str, MetricDimensionValue] | None = None,
         limit: int = 5000,
     ) -> list[dict[str, Any]]:
         bounded_limit = max(1, min(limit, 50_000))
@@ -773,7 +801,18 @@ class MetricsStore:
             if stages:
                 statement = statement.where(MetricRow.stage.in_(stages))
             rows = session.scalars(statement.order_by(MetricRow.id.desc()).limit(bounded_limit))
-            return [self._value(row) for row in rows]
+            values = [self._value(row) for row in rows]
+            normalized_dimensions = normalize_metric_dimensions(dimensions)
+            if normalized_dimensions:
+                values = [
+                    value
+                    for value in values
+                    if all(
+                        value["dimensions"].get(key) == expected
+                        for key, expected in normalized_dimensions.items()
+                    )
+                ]
+            return values
 
     def outcome_counts(
         self,
@@ -790,11 +829,17 @@ class MetricsStore:
         *,
         since: datetime,
         stage: str,
+        dimensions: dict[str, MetricDimensionValue] | None = None,
         limit: int = 5000,
     ) -> dict[str, float | int]:
         durations = sorted(
             float(row["duration_ms"])
-            for row in self.query(since=since, stages=(stage,), limit=limit)
+            for row in self.query(
+                since=since,
+                stages=(stage,),
+                dimensions=dimensions,
+                limit=limit,
+            )
             if row["duration_ms"] is not None
         )
         if not durations:
@@ -811,6 +856,39 @@ class MetricsStore:
             "p95": percentile(0.95),
         }
 
+    def stage_summary(
+        self,
+        *,
+        since: datetime,
+        stage: str,
+        dimensions: dict[str, MetricDimensionValue] | None = None,
+        limit: int = 5000,
+    ) -> dict[str, Any]:
+        rows = self.query(
+            since=since,
+            stages=(stage,),
+            dimensions=dimensions,
+            limit=limit,
+        )
+        durations = self.duration_summary(
+            since=since,
+            stage=stage,
+            dimensions=dimensions,
+            limit=limit,
+        )
+        outcomes = Counter(str(row["outcome"]) for row in rows if row["outcome"])
+        failed = sum(
+            count
+            for outcome, count in outcomes.items()
+            if outcome in {"error", "failed", "timed_out", "timeout", "cancelled"}
+        )
+        return {
+            **durations,
+            "outcomes": dict(sorted(outcomes.items())),
+            "failed": failed,
+            "error_rate": failed / len(rows) if rows else 0.0,
+        }
+
     def latest(self, *, stages: tuple[str, ...] = ()) -> dict[str, Any] | None:
         values = self.query(stages=stages, limit=1)
         return values[0] if values else None
@@ -824,6 +902,7 @@ class MetricsStore:
             "duration_ms": row.duration_ms,
             "value": row.value,
             "outcome": row.outcome,
+            "dimensions": json.loads(row.dimensions_json or "{}"),
         }
 
     def clear(self) -> None:

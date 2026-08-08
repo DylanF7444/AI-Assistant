@@ -32,6 +32,7 @@ from assistant.execution.evaluation import (
     CallEvaluator,
     PermissionGrantRequest,
 )
+from assistant.observability import InteractionMode, MetricDimensions, MetricStage, RequestPath
 from assistant.policy.confirmations import ConfirmationManager
 from assistant.policy.permissions import PermissionManager
 from assistant.skills.registry import SkillRegistry
@@ -267,11 +268,20 @@ class ExecutionEngine:
                 updates_foreground_status=(call.permission_context.invocation == "interactive"),
             )
         )
+        policy_started = time.perf_counter()
         evaluation = await self.evaluator.evaluate(
             call,
             consume_once=False,
             include_preview=True,
         )
+        if self.metrics is not None:
+            self.metrics.record(
+                correlation_id=str(call.correlation_id),
+                stage=MetricStage.POLICY_PREPARE,
+                duration_ms=(time.perf_counter() - policy_started) * 1000,
+                outcome="completed",
+                dimensions=MetricDimensions(path=RequestPath.EXECUTION),
+            )
         if evaluation.invalid_error:
             return self._invalid_outcome(evaluation)
         if evaluation.registration_requests:
@@ -298,12 +308,21 @@ class ExecutionEngine:
         Background approval uses this path so global interactive confirmation
         overrides can never turn a reviewed occurrence into immediate execution.
         """
+        policy_started = time.perf_counter()
         evaluation = await self.evaluator.evaluate(
             call,
             consume_once=False,
             include_preview=True,
             force_confirmation=True,
         )
+        if self.metrics is not None:
+            self.metrics.record(
+                correlation_id=str(call.correlation_id),
+                stage=MetricStage.POLICY_PREPARE,
+                duration_ms=(time.perf_counter() - policy_started) * 1000,
+                outcome="confirmation_requested",
+                dimensions=MetricDimensions(path=RequestPath.EXECUTION),
+            )
         if evaluation.invalid_error:
             return self._invalid_outcome(evaluation)
         if evaluation.registration_requests:
@@ -329,11 +348,20 @@ class ExecutionEngine:
         confirmations: list[ConfirmationRequest] = []
 
         for step in plan.steps:
+            policy_started = time.perf_counter()
             evaluation = await self.evaluator.evaluate(
                 step.call,
                 consume_once=False,
                 include_preview=True,
             )
+            if self.metrics is not None:
+                self.metrics.record(
+                    correlation_id=str(step.call.correlation_id),
+                    stage=MetricStage.POLICY_PREPARE,
+                    duration_ms=(time.perf_counter() - policy_started) * 1000,
+                    outcome="plan_step",
+                    dimensions=MetricDimensions(path=RequestPath.EXECUTION),
+                )
             if evaluation.invalid_error:
                 return self._invalid_outcome(evaluation, plan=True)
             if evaluation.policy_denied:
@@ -696,9 +724,17 @@ class ExecutionEngine:
         if self.metrics:
             self.metrics.record(
                 correlation_id=str(call.correlation_id),
-                stage="execution",
+                stage=MetricStage.EXECUTION,
                 duration_ms=duration_ms,
                 outcome=result.status.value,
+                dimensions=MetricDimensions(
+                    interaction=(
+                        InteractionMode.BACKGROUND
+                        if call.permission_context.invocation == "background"
+                        else None
+                    ),
+                    path=RequestPath.EXECUTION,
+                ),
             )
         logger.info(
             "Skill execution finished",

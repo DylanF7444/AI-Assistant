@@ -1,12 +1,18 @@
 from assistant.scheduling.clock import Clock, SystemClock
 from assistant.scheduling.contracts import (
     AutonomyPolicy,
+    CalendarObservation,
     DeliveryPolicy,
+    DeviceObservation,
+    EventObservation,
+    EventTrigger,
+    FileObservation,
     FixedSkillAction,
     FrozenPlanAction,
     LogicWorkflowAction,
     NotificationAction,
     OneTimeTrigger,
+    ProcessObservation,
     RecurrenceTrigger,
     RunPolicy,
     ScheduledAction,
@@ -15,6 +21,7 @@ from assistant.scheduling.contracts import (
     ScheduleRun,
     ScheduleRunState,
     ScheduleStatus,
+    WebObservation,
 )
 from assistant.scheduling.recurrence import next_occurrence, occurrences
 from assistant.scheduling.runtime import BackgroundRuntime
@@ -26,12 +33,18 @@ __all__ = [
     "BackgroundRuntime",
     "Clock",
     "DeliveryPolicy",
+    "DeviceObservation",
+    "EventObservation",
+    "EventTrigger",
+    "FileObservation",
     "FixedSkillAction",
     "FrozenPlanAction",
     "LogicWorkflowAction",
     "NotificationAction",
     "OneTimeTrigger",
     "RecurrenceTrigger",
+    "CalendarObservation",
+    "ProcessObservation",
     "RunPolicy",
     "ScheduleDefinition",
     "ScheduleRun",
@@ -42,6 +55,7 @@ __all__ = [
     "ScheduledAction",
     "ScheduledTrigger",
     "SystemClock",
+    "WebObservation",
     "next_occurrence",
     "occurrences",
 ]

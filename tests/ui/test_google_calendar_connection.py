@@ -108,9 +108,7 @@ def test_google_calendar_connection_dialog_supports_advanced_oauth_override(qtbo
     with qtbot.waitSignal(dialog.connection_changed, timeout=2000):
         qtbot.mouseClick(dialog.connect_button, Qt.MouseButton.LeftButton)
 
-    assert service.connect_calls == [
-        ("different-desktop-client", "optional-secret")
-    ]
+    assert service.connect_calls == [("different-desktop-client", "optional-secret")]
 
 
 @pytest.mark.ui

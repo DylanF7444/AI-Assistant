@@ -11,7 +11,6 @@ import urllib.error
 from collections import deque
 from collections.abc import Callable
 from contextlib import nullcontext
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -29,6 +28,7 @@ from assistant.context.snapshot import ContextSnapshot
 from assistant.contracts import (
     ActivityTrace,
     AudioSession,
+    CitationSourceType,
     ExecutionPlan,
     Intent,
     PermissionContext,
@@ -37,6 +37,7 @@ from assistant.contracts import (
     PlanStep,
     RequestResultItem,
     Response,
+    ResponseCitation,
     ResponseType,
     SkillCall,
     SkillResult,
@@ -61,12 +62,20 @@ from assistant.language.retrieval import (
     WorkflowTemplateSemanticIndexer,
     playbook_context_item,
 )
+from assistant.observability import (
+    InteractionMode,
+    MetricDimensions,
+    MetricStage,
+    RequestPath,
+    process_working_set_bytes,
+)
 from assistant.orchestration import (
     ConversationState,
     FileReferenceResolver,
     InteractionRecorder,
     PendingClarificationFollowUp,
     PlannerCoordinator,
+    ReplanningContinuation,
     contextual_result_selector,
     evaluate_voice_gate,
     select_result_item,
@@ -91,22 +100,6 @@ from assistant.windows.paths import (
 )
 
 logger = logging.getLogger("assistant.orchestrator")
-
-
-@dataclass(frozen=True)
-class _ReplanningContinuation:
-    correlation_id: UUID
-    text: str
-    current_intent: Intent
-    interpretation: Any
-    context: ContextSnapshot
-    retrieved: tuple[RetrievedContextItem, ...]
-    session_id: str
-    invoked_by_voice: bool
-    observations: tuple[dict[str, Any], ...]
-    step_summaries: tuple[str, ...]
-    iteration: int
-    max_iterations: int
 
 
 class AssistantOrchestrator:
@@ -162,13 +155,17 @@ class AssistantOrchestrator:
         self._active_correlation: UUID | None = None
         self._request_state_lock = threading.Lock()
         self._active_request_correlations: list[UUID] = []
+        self._voice_interaction_starts: dict[UUID, float] = {}
+        self._metric_request_starts: dict[UUID, float] = {}
+        self._response_visible_recorded: set[UUID] = set()
+        self._retrieval_refresh_lock = threading.Lock()
         self._active_stt: STTProvider | None = None
         self.state = ConversationState()
         self.interactions = InteractionRecorder(history, self.state)
         self.file_resolver = FileReferenceResolver(self._resolve_file_placeholders)
         self.planner_flow = PlannerCoordinator()
         self._pending_confirmation: ExecutionOutcome | None = None
-        self._replanning_continuations: dict[UUID, _ReplanningContinuation] = {}
+        self._replanning_continuations: dict[UUID, ReplanningContinuation] = {}
 
     @property
     def terminal_debug(self) -> bool:
@@ -245,6 +242,11 @@ class AssistantOrchestrator:
         with self._request_state_lock:
             return bool(self._active_request_correlations)
 
+    def discard_voice_interaction(self, correlation_id: UUID) -> None:
+        """Release timing state when passive audio was not an assistant request."""
+
+        self._voice_interaction_starts.pop(correlation_id, None)
+
     async def consume_persistent_voice_interrupt(self, text: str) -> bool:
         """Consume speech heard during a request, cancelling only on an explicit command."""
 
@@ -292,9 +294,7 @@ class AssistantOrchestrator:
             self._remember_result(
                 final_outcome.result,
                 source=(
-                    final_outcome.call.skill_id
-                    if final_outcome.call is not None
-                    else intent_name
+                    final_outcome.call.skill_id if final_outcome.call is not None else intent_name
                 ),
             )
         self._print_terminal_debug(
@@ -313,7 +313,12 @@ class AssistantOrchestrator:
             outcome=outcome_label,
             add_session_context=add_session_context,
         )
-        return await self._finish(response, final_outcome, invoked_by_voice=invoked_by_voice)
+        return await self._finish(
+            response,
+            final_outcome,
+            invoked_by_voice=invoked_by_voice,
+            correlation_id=correlation_id,
+        )
 
     def _print_terminal_debug(
         self,
@@ -399,15 +404,22 @@ class AssistantOrchestrator:
         print("\n".join(lines), file=sys.stderr, flush=True)
 
     async def _record_routing(
-        self, correlation_id: UUID, intent: Intent | None, duration_ms: float
+        self,
+        correlation_id: UUID,
+        intent: Intent | None,
+        duration_ms: float,
+        *,
+        interaction: InteractionMode,
+        path: RequestPath,
     ) -> None:
         if self.metrics:
             self.metrics.record(
                 correlation_id=str(correlation_id),
-                stage="routing",
+                stage=MetricStage.ROUTING,
                 duration_ms=duration_ms,
                 value=intent.confidence if intent else None,
                 outcome=intent.name if intent else "clarification",
+                dimensions=MetricDimensions(interaction=interaction, path=path),
             )
         self.engine.audit.record(
             correlation_id=str(correlation_id),
@@ -626,6 +638,8 @@ class AssistantOrchestrator:
         session_id: str,
     ) -> PlannerDecision | None:
         assert self.planner is not None
+        if composite := self._deterministic_composite_plan(text):
+            return composite
         explicit_playbook = self._explicit_playbook_reference(text)
         if explicit_playbook is not None:
             playbook, reference = explicit_playbook
@@ -668,10 +682,11 @@ class AssistantOrchestrator:
         if self.metrics is not None:
             self.metrics.record(
                 correlation_id=str(correlation_id),
-                stage="planner.retrieval",
+                stage=MetricStage.PLANNER_RETRIEVAL,
                 duration_ms=(time.perf_counter() - retrieval_started) * 1000,
                 value=len(retrieved),
                 outcome="completed",
+                dimensions=MetricDimensions(path=RequestPath.PLANNER),
             )
         if explicit_playbook is not None:
             playbook, _ = explicit_playbook
@@ -706,10 +721,11 @@ class AssistantOrchestrator:
         if self.metrics is not None:
             self.metrics.record(
                 correlation_id=str(correlation_id),
-                stage="planner.context",
+                stage=MetricStage.PLANNER_CONTEXT,
                 duration_ms=(time.perf_counter() - context_started) * 1000,
                 value=len(context.items),
                 outcome="completed",
+                dimensions=MetricDimensions(path=RequestPath.PLANNER),
             )
         plan_grounded = getattr(self.planner, "plan_grounded", None)
         if callable(plan_grounded):
@@ -732,9 +748,10 @@ class AssistantOrchestrator:
                 )
                 self.metrics.record(
                     correlation_id=str(correlation_id),
-                    stage="planner.grounded",
+                    stage=MetricStage.PLANNER_GROUNDED,
                     duration_ms=(time.perf_counter() - grounded_started) * 1000,
                     outcome=outcome,
+                    dimensions=MetricDimensions(path=RequestPath.PLANNER),
                 )
             return decision
         interpretation = await self.planner.interpret(
@@ -763,6 +780,56 @@ class AssistantOrchestrator:
                 allow_replanning=True,
             )
         return None
+
+    def _deterministic_composite_plan(self, text: str) -> PlannerDecision | None:
+        """Resolve independent command conjunctions without spending a model round trip."""
+
+        clauses = tuple(
+            clause.strip(" ,")
+            for clause in re.split(r"\s+(?:and|then)\s+", text, flags=re.IGNORECASE)
+            if clause.strip(" ,")
+        )
+        if not 2 <= len(clauses) <= 4:
+            return None
+        shared_verb = (
+            match.group(1)
+            if (match := re.match(r"\s*(list|show)\b", clauses[0], flags=re.IGNORECASE))
+            else None
+        )
+        intents: list[Intent] = []
+        for index, clause in enumerate(clauses):
+            if index and re.search(
+                r"\b(?:it|that|this|those|them|one|result|match|selected|found)\b",
+                clause,
+                flags=re.IGNORECASE,
+            ):
+                return None
+            routed_clause = (
+                f"{shared_verb} {clause}"
+                if index and shared_verb and re.match(r"(?:my|the)\b", clause, re.IGNORECASE)
+                else clause
+            )
+            route = self.router.route(routed_clause)
+            if route.needs_llm or route.clarification:
+                return None
+            routed_intents = route.intents or ((route.intent,) if route.intent is not None else ())
+            if not routed_intents or any(
+                intent.name.startswith(("planner.", "conversation.", "control."))
+                for intent in routed_intents
+            ):
+                return None
+            intents.extend(routed_intents)
+        if len(intents) < 2:
+            return None
+        return PlannerDecision(
+            steps=tuple(
+                PlannedIntentStep(
+                    step_id=f"deterministic-{index}",
+                    intent=intent,
+                )
+                for index, intent in enumerate(intents, start=1)
+            )
+        )
 
     def _explicit_playbook_reference(
         self,
@@ -811,14 +878,7 @@ class AssistantOrchestrator:
         if self.semantic_retriever is None:
             return ()
         try:
-            if self.skill_semantic_indexer is not None:
-                await self.skill_semantic_indexer.refresh(self.engine.registry)
-            if self.knowledge_semantic_indexer is not None and self.knowledge_bases is not None:
-                await self.knowledge_semantic_indexer.refresh(self.knowledge_bases)
-            if self.memory_semantic_indexer is not None and self.memory_store is not None:
-                await self.memory_semantic_indexer.refresh(self.memory_store)
-            if self.workflow_template_indexer is not None:
-                await self.workflow_template_indexer.refresh(self.engine.registry)
+            await self.refresh_retrieval_index()
             return await self.semantic_retriever.search(
                 text,
                 namespaces={
@@ -835,6 +895,24 @@ class AssistantOrchestrator:
             logger.warning("Semantic retrieval failed", exc_info=exc)
             return ()
 
+    async def refresh_retrieval_index(self) -> None:
+        """Refresh semantic namespaces, serializing startup and request-triggered work."""
+
+        acquired = await asyncio.to_thread(self._retrieval_refresh_lock.acquire)
+        if not acquired:
+            return
+        try:
+            if self.skill_semantic_indexer is not None:
+                await self.skill_semantic_indexer.refresh(self.engine.registry)
+            if self.knowledge_semantic_indexer is not None and self.knowledge_bases is not None:
+                await self.knowledge_semantic_indexer.refresh(self.knowledge_bases)
+            if self.memory_semantic_indexer is not None and self.memory_store is not None:
+                await self.memory_semantic_indexer.refresh(self.memory_store)
+            if self.workflow_template_indexer is not None:
+                await self.workflow_template_indexer.refresh(self.engine.registry)
+        finally:
+            self._retrieval_refresh_lock.release()
+
     def _with_reasoning_steps(
         self,
         response: Response,
@@ -847,6 +925,17 @@ class AssistantOrchestrator:
         context: ContextSnapshot | None = None,
         retrieved: tuple[Any, ...] = (),
     ) -> Response:
+        citations = self._citations_from_retrieved(retrieved)
+        if citations:
+            existing = {citation.source_id for citation in response.citations}
+            response = response.model_copy(
+                update={
+                    "citations": response.citations
+                    + tuple(
+                        citation for citation in citations if citation.source_id not in existing
+                    )
+                }
+            )
         if not self.show_reasoning_steps:
             return response
         lines = [
@@ -906,6 +995,36 @@ class AssistantOrchestrator:
         return response.model_copy(
             update={"display_text": response.display_text + "\n".join(lines)}
         )
+
+    @staticmethod
+    def _citations_from_retrieved(
+        retrieved: tuple[Any, ...],
+    ) -> tuple[ResponseCitation, ...]:
+        citations = []
+        seen = set()
+        for item in retrieved:
+            if getattr(item, "namespace", "") != "knowledge":
+                continue
+            source_id = str(getattr(item, "source_id", "")).strip()
+            metadata = getattr(item, "metadata", {})
+            if not source_id or source_id in seen or not isinstance(metadata, dict):
+                continue
+            seen.add(source_id)
+            knowledge_id = metadata.get("knowledge_base_id") or source_id.split(":", 1)[0]
+            title = str(metadata.get("name") or "Local knowledge")
+            chunk = source_id.rsplit(":", 1)[-1]
+            citations.append(
+                ResponseCitation(
+                    source_id=source_id,
+                    title=title,
+                    source_type=CitationSourceType.LOCAL_KNOWLEDGE,
+                    local_reference=f"knowledge:{knowledge_id}",
+                    excerpt_locator=(f"chunk {chunk}" if chunk.isdigit() else None),
+                    namespace="knowledge",
+                    score=float(getattr(item, "score", 0.0)),
+                )
+            )
+        return tuple(citations[:5])
 
     @staticmethod
     def _retrieved_debug_item(item: Any) -> dict[str, Any]:
@@ -1861,19 +1980,20 @@ class AssistantOrchestrator:
         *,
         session_id: str = "desktop",
         invoked_by_voice: bool = False,
+        correlation_id: UUID | None = None,
     ) -> tuple[Response, ExecutionOutcome]:
-        correlation_id = uuid4()
-        request_started = time.perf_counter()
+        correlation_id = correlation_id or uuid4()
+        request_started = self._voice_interaction_starts.pop(
+            correlation_id,
+            time.perf_counter(),
+        )
+        self._metric_request_starts[correlation_id] = request_started
         request_outcome = "error"
         with self._request_state_lock:
             self._active_request_correlations.append(correlation_id)
         provider = getattr(self.planner, "provider", None)
         metric_scope = getattr(provider, "metric_scope", None)
-        scope = (
-            metric_scope(str(correlation_id))
-            if callable(metric_scope)
-            else nullcontext()
-        )
+        scope = metric_scope(str(correlation_id)) if callable(metric_scope) else nullcontext()
         try:
             with scope:
                 result = await self._handle_text(
@@ -1891,13 +2011,44 @@ class AssistantOrchestrator:
             if self.metrics is not None:
                 self.metrics.record(
                     correlation_id=str(correlation_id),
-                    stage="request.total",
+                    stage=MetricStage.REQUEST_TOTAL,
                     duration_ms=(time.perf_counter() - request_started) * 1000,
                     outcome=request_outcome,
+                    dimensions=MetricDimensions(
+                        interaction=(
+                            InteractionMode.VOICE if invoked_by_voice else InteractionMode.TYPED
+                        )
+                    ),
+                )
+                working_set = process_working_set_bytes()
+                if working_set:
+                    self.metrics.record(
+                        correlation_id=str(correlation_id),
+                        stage=MetricStage.RESOURCE_MEMORY,
+                        value=float(working_set),
+                        outcome="sampled",
+                        dimensions=MetricDimensions(
+                            interaction=(
+                                InteractionMode.VOICE if invoked_by_voice else InteractionMode.TYPED
+                            )
+                        ),
+                    )
+                self.metrics.record(
+                    correlation_id=str(correlation_id),
+                    stage=MetricStage.RESOURCE_QUEUE_DEPTH,
+                    value=float(len(self._active_request_correlations)),
+                    outcome="sampled",
+                    dimensions=MetricDimensions(
+                        interaction=(
+                            InteractionMode.VOICE if invoked_by_voice else InteractionMode.TYPED
+                        )
+                    ),
                 )
             with self._request_state_lock:
                 if correlation_id in self._active_request_correlations:
                     self._active_request_correlations.remove(correlation_id)
+            self._metric_request_starts.pop(correlation_id, None)
+            self._response_visible_recorded.discard(correlation_id)
 
     async def _handle_text(
         self,
@@ -1936,7 +2087,13 @@ class AssistantOrchestrator:
         route = self.router.route(text)
         route_duration = (time.perf_counter() - route_started) * 1000
         intent = route.intent
-        await self._record_routing(correlation_id, intent, route_duration)
+        await self._record_routing(
+            correlation_id,
+            intent,
+            route_duration,
+            interaction=(InteractionMode.VOICE if invoked_by_voice else InteractionMode.TYPED),
+            path=(RequestPath.PLANNER if route.needs_llm else RequestPath.DETERMINISTIC),
+        )
         if route.clarification:
             self._set_pending_clarification(
                 original_text=text,
@@ -1985,9 +2142,15 @@ class AssistantOrchestrator:
                 )
                 self.metrics.record(
                     correlation_id=str(correlation_id),
-                    stage="planner.total",
+                    stage=MetricStage.PLANNER_TOTAL,
                     duration_ms=(time.perf_counter() - planner_started) * 1000,
                     outcome=planner_outcome,
+                    dimensions=MetricDimensions(
+                        interaction=(
+                            InteractionMode.VOICE if invoked_by_voice else InteractionMode.TYPED
+                        ),
+                        path=RequestPath.PLANNER,
+                    ),
                 )
             if planner_resolution.unavailable:
                 response = self._planner_unavailable_response()
@@ -2456,7 +2619,7 @@ class AssistantOrchestrator:
 
     async def _resume_replanning(
         self,
-        state: _ReplanningContinuation,
+        state: ReplanningContinuation,
         prepared_outcome: ExecutionOutcome,
     ) -> tuple[Response, ExecutionOutcome]:
         return await self._handle_replanning_intent(
@@ -2556,21 +2719,19 @@ class AssistantOrchestrator:
                     or outcome.permission_requests
                     or outcome.registration_requests
                 ):
-                    self._replanning_continuations[correlation_id] = (
-                        _ReplanningContinuation(
-                            correlation_id=correlation_id,
-                            text=text,
-                            current_intent=current_intent,
-                            interpretation=interpretation,
-                            context=context,
-                            retrieved=retrieved,
-                            session_id=session_id,
-                            invoked_by_voice=invoked_by_voice,
-                            observations=tuple(observations),
-                            step_summaries=tuple(step_summaries),
-                            iteration=iteration,
-                            max_iterations=max_iterations,
-                        )
+                    self._replanning_continuations[correlation_id] = ReplanningContinuation(
+                        correlation_id=correlation_id,
+                        text=text,
+                        current_intent=current_intent,
+                        interpretation=interpretation,
+                        context=context,
+                        retrieved=retrieved,
+                        session_id=session_id,
+                        invoked_by_voice=invoked_by_voice,
+                        observations=tuple(observations),
+                        step_summaries=tuple(step_summaries),
+                        iteration=iteration,
+                        max_iterations=max_iterations,
                     )
                 else:
                     self._replanning_continuations.pop(correlation_id, None)
@@ -2970,7 +3131,11 @@ class AssistantOrchestrator:
                 severity="warning",
                 updates_display=False,
             )
-            return await self._finish(response, ExecutionOutcome(), invoked_by_voice=True)
+            return await self._finish_voice_without_text_request(
+                transcript.session_id,
+                response,
+                outcome="no_speech",
+            )
         route = self.router.route(transcript.normalized_text)
         intent = route.intent
         voice_gate = evaluate_voice_gate(transcript, intent)
@@ -2993,12 +3158,46 @@ class AssistantOrchestrator:
                 severity="warning",
                 speak=True,
             )
-            return await self._finish(response, ExecutionOutcome(), invoked_by_voice=True)
+            return await self._finish_voice_without_text_request(
+                transcript.session_id,
+                response,
+                outcome="needs_clarification",
+            )
         return await self.handle_text(
             transcript.normalized_text,
             session_id=str(transcript.session_id),
             invoked_by_voice=True,
+            correlation_id=transcript.session_id,
         )
+
+    async def _finish_voice_without_text_request(
+        self,
+        correlation_id: UUID,
+        response: Response,
+        *,
+        outcome: str,
+    ) -> tuple[Response, ExecutionOutcome]:
+        started = self._voice_interaction_starts.pop(correlation_id, time.perf_counter())
+        self._metric_request_starts[correlation_id] = started
+        try:
+            result = await self._finish(
+                response,
+                ExecutionOutcome(),
+                invoked_by_voice=True,
+                correlation_id=correlation_id,
+            )
+            if self.metrics is not None:
+                self.metrics.record(
+                    correlation_id=str(correlation_id),
+                    stage=MetricStage.REQUEST_TOTAL,
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    outcome=outcome,
+                    dimensions=MetricDimensions(interaction=InteractionMode.VOICE),
+                )
+            return result
+        finally:
+            self._metric_request_starts.pop(correlation_id, None)
+            self._response_visible_recorded.discard(correlation_id)
 
     def _print_voice_gate_debug(
         self,
@@ -3056,21 +3255,114 @@ class AssistantOrchestrator:
         outcome: ExecutionOutcome,
         *,
         invoked_by_voice: bool,
+        correlation_id: UUID | None = None,
     ) -> tuple[Response, ExecutionOutcome]:
-        await self._speak_if_enabled(response, invoked_by_voice=invoked_by_voice)
+        if correlation_id is not None and correlation_id not in self._response_visible_recorded:
+            self._response_visible_recorded.add(correlation_id)
+            request_started = self._metric_request_starts.get(correlation_id)
+            if self.metrics is not None and request_started is not None:
+                self.metrics.record(
+                    correlation_id=str(correlation_id),
+                    stage=MetricStage.RESPONSE_FIRST_VISIBLE,
+                    duration_ms=(time.perf_counter() - request_started) * 1000,
+                    outcome=response.response_type.value,
+                    dimensions=MetricDimensions(
+                        interaction=(
+                            InteractionMode.VOICE if invoked_by_voice else InteractionMode.TYPED
+                        )
+                    ),
+                )
+            await self.events.publish(
+                PipelineEvent(
+                    correlation_id=correlation_id,
+                    state=(
+                        PipelineState.SPEAKING
+                        if response.speak and response.speech_text
+                        else PipelineState.IDLE
+                    ),
+                    message="Response ready",
+                    data={"response": response.model_dump(mode="json")},
+                    updates_foreground_status=False,
+                )
+            )
+        await self._speak_if_enabled(
+            response,
+            invoked_by_voice=invoked_by_voice,
+            correlation_id=correlation_id,
+        )
         return response, outcome
 
-    async def _speak_if_enabled(self, response: Response, *, invoked_by_voice: bool) -> None:
+    async def _speak_if_enabled(
+        self,
+        response: Response,
+        *,
+        invoked_by_voice: bool,
+        correlation_id: UUID | None = None,
+    ) -> None:
         if self.tts is None or self.speech_mode == "never":
             return
         if self.speech_mode == "voice_only" and not invoked_by_voice:
             return
+        started = time.perf_counter()
+        first_audio_recorded = False
+        first_audio_at: float | None = None
+        metric_dimensions = MetricDimensions(
+            interaction=InteractionMode.VOICE if invoked_by_voice else InteractionMode.TYPED,
+            path=RequestPath.SPEECH,
+            provider=self.tts.__class__.__name__,
+        )
         try:
             async for event in self.tts.speak(response):
+                if (
+                    not first_audio_recorded
+                    and self.metrics is not None
+                    and correlation_id is not None
+                ):
+                    first_audio_at = time.perf_counter()
+                    self.metrics.record(
+                        correlation_id=str(correlation_id),
+                        stage=MetricStage.TTS_FIRST_AUDIO,
+                        duration_ms=(first_audio_at - started) * 1000,
+                        outcome="completed",
+                        dimensions=metric_dimensions,
+                    )
+                    self.metrics.record(
+                        correlation_id=str(correlation_id),
+                        stage=MetricStage.TTS_SYNTHESIS,
+                        duration_ms=(first_audio_at - started) * 1000,
+                        outcome="completed",
+                        dimensions=metric_dimensions,
+                    )
+                    first_audio_recorded = True
                 await self.events.publish(event)
         except Exception:
             # Text is already available and remains the guaranteed fallback.
+            if self.metrics is not None and correlation_id is not None:
+                self.metrics.record(
+                    correlation_id=str(correlation_id),
+                    stage=MetricStage.TTS_COMPLETE,
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    outcome="failed",
+                    dimensions=metric_dimensions,
+                )
             return
+        if self.metrics is not None and correlation_id is not None:
+            completed_at = time.perf_counter()
+            if first_audio_at is not None:
+                self.metrics.record(
+                    correlation_id=str(correlation_id),
+                    stage=MetricStage.TTS_PLAYBACK,
+                    duration_ms=(completed_at - first_audio_at) * 1000,
+                    outcome="completed",
+                    dimensions=metric_dimensions,
+                )
+            self.metrics.record(
+                correlation_id=str(correlation_id),
+                stage=MetricStage.TTS_COMPLETE,
+                duration_ms=(completed_at - started) * 1000,
+                outcome="completed",
+                dimensions=metric_dimensions,
+            )
 
     async def transcribe_once(
         self,
@@ -3084,6 +3376,59 @@ class AssistantOrchestrator:
         self._active_stt = stt
         correlation_id = session.session_id
         self._active_correlation = correlation_id
+        transcription_started = time.perf_counter()
+        self._voice_interaction_starts = {
+            key: started
+            for key, started in self._voice_interaction_starts.items()
+            if transcription_started - started < 300
+        }
+        self._voice_interaction_starts[correlation_id] = transcription_started
+        first_partial_recorded = False
+        first_audio_recorded = False
+        end_of_utterance_at: float | None = None
+        metric_dimensions = MetricDimensions(
+            interaction=InteractionMode.VOICE,
+            path=RequestPath.SPEECH,
+            provider=stt.__class__.__name__,
+            warm=getattr(stt, "_model", None) is not None,
+        )
+        if self.metrics is not None:
+            self.metrics.record(
+                correlation_id=str(correlation_id),
+                stage=MetricStage.ACTIVATION_RECEIVED,
+                duration_ms=0,
+                outcome="completed",
+                dimensions=metric_dimensions,
+            )
+
+        async def measured_audio():
+            nonlocal first_audio_recorded, end_of_utterance_at
+            completed = False
+            try:
+                async for block in audio:
+                    if not first_audio_recorded:
+                        first_audio_recorded = True
+                        if self.metrics is not None:
+                            self.metrics.record(
+                                correlation_id=str(correlation_id),
+                                stage=MetricStage.AUDIO_FIRST_BLOCK,
+                                duration_ms=(time.perf_counter() - transcription_started) * 1000,
+                                outcome="completed",
+                                dimensions=metric_dimensions,
+                            )
+                    yield block
+                completed = True
+            finally:
+                end_of_utterance_at = time.perf_counter()
+                if self.metrics is not None:
+                    self.metrics.record(
+                        correlation_id=str(correlation_id),
+                        stage=MetricStage.AUDIO_END_OF_UTTERANCE,
+                        duration_ms=(end_of_utterance_at - transcription_started) * 1000,
+                        outcome="completed" if completed else "cancelled",
+                        dimensions=metric_dimensions,
+                    )
+
         if publish_events:
             await self.events.publish(
                 PipelineEvent(
@@ -3092,14 +3437,45 @@ class AssistantOrchestrator:
                     message="Listening",
                 )
             )
+            if self.metrics is not None:
+                self.metrics.record(
+                    correlation_id=str(correlation_id),
+                    stage=MetricStage.LISTENING_VISIBLE,
+                    duration_ms=(time.perf_counter() - transcription_started) * 1000,
+                    outcome="completed",
+                    dimensions=metric_dimensions,
+                )
         final = None
         last_non_empty = None
         try:
-            async for transcript in stt.transcribe(session, audio):
+            async for transcript in stt.transcribe(session, measured_audio()):
                 if transcript.normalized_text.strip():
                     last_non_empty = transcript
                 if transcript.is_final:
                     final = transcript
+                    if self.metrics is not None:
+                        self.metrics.record(
+                            correlation_id=str(correlation_id),
+                            stage=MetricStage.STT_FINAL,
+                            duration_ms=(
+                                time.perf_counter() - (end_of_utterance_at or transcription_started)
+                            )
+                            * 1000,
+                            value=transcript.confidence,
+                            outcome="completed",
+                            dimensions=metric_dimensions,
+                        )
+                elif not first_partial_recorded:
+                    first_partial_recorded = True
+                    if self.metrics is not None:
+                        self.metrics.record(
+                            correlation_id=str(correlation_id),
+                            stage=MetricStage.STT_FIRST_PARTIAL,
+                            duration_ms=(time.perf_counter() - transcription_started) * 1000,
+                            value=transcript.confidence,
+                            outcome="completed",
+                            dimensions=metric_dimensions,
+                        )
                 if on_transcript is not None:
                     on_transcript(transcript)
                 if publish_events:
@@ -3117,6 +3493,7 @@ class AssistantOrchestrator:
                         stage="stt_confidence",
                         value=transcript.confidence,
                         outcome="final" if transcript.is_final else "partial",
+                        dimensions=metric_dimensions,
                     )
         except asyncio.CancelledError:
             raise
@@ -3132,7 +3509,10 @@ class AssistantOrchestrator:
             raise RuntimeError(f"Speech recognition is unavailable: {exc}") from exc
         finally:
             self._active_stt = None
-        return final or last_non_empty
+        result = final or last_non_empty
+        if result is None:
+            self._voice_interaction_starts.pop(correlation_id, None)
+        return result
 
     async def listen_once(self, stt: STTProvider, audio) -> tuple[Response, ExecutionOutcome]:
         try:

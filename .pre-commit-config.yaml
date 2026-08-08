@@ -1,0 +1,18 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-format-check
+        name: Ruff format check
+        entry: python -m ruff format --check .
+        language: system
+        pass_filenames: false
+      - id: ruff-check
+        name: Ruff lint check
+        entry: python -m ruff check .
+        language: system
+        pass_filenames: false
+      - id: documentation-consistency
+        name: Documentation consistency
+        entry: python scripts/check_documentation_consistency.py
+        language: system
+        pass_filenames: false

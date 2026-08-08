@@ -132,3 +132,49 @@ def test_response_mapping_preserves_and_presents_request_result_items():
 
     assert response.items == (item,)
     assert response.display_text == "Found one task.\n1. Review release notes — Open"
+
+
+def test_response_mapping_adds_sanitized_web_citations_from_result_items():
+    item = RequestResultItem(
+        item_id="result-1",
+        title="Primary source",
+        value="summary",
+        kind="web_result",
+        metadata={
+            "url": "https://example.com/report?token=secret#private",
+            "source": "Example Research",
+            "namespace": "web",
+        },
+    )
+
+    response = response_from_result(
+        SkillResult(
+            status=ResultStatus.COMPLETED,
+            summary="Found one source.",
+            items=(item,),
+        )
+    )
+
+    assert len(response.citations) == 1
+    assert response.citations[0].url == "https://example.com/report"
+    assert "token" not in response.model_dump_json()
+
+
+def test_sensitive_results_do_not_expose_item_citations():
+    item = RequestResultItem(
+        item_id="private-1",
+        title="Private",
+        value="private",
+        metadata={"url": "https://example.com/private"},
+    )
+
+    response = response_from_result(
+        SkillResult(
+            status=ResultStatus.COMPLETED,
+            summary="Private result.",
+            items=(item,),
+            sensitive=True,
+        )
+    )
+
+    assert response.citations == ()

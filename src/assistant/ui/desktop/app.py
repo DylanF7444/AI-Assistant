@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 import sys
 import time
@@ -18,12 +19,14 @@ from assistant.contracts import (
     PermissionContext,
     PipelineEvent,
     PipelineState,
+    Response,
     ResponseType,
     RiskLevel,
     SkillCall,
 )
 from assistant.diagnostics import hardware_report, model_recommendations
 from assistant.models import ModelManifest
+from assistant.onboarding import OnboardingStore, SetupStep, outcome_guidance, recovery_issues
 from assistant.policy.background import background_mode_summary
 from assistant.policy.capabilities import available_capabilities
 from assistant.policy.permissions import GrantType
@@ -47,6 +50,42 @@ from assistant.windows.adapters import LocalWindowsDeviceAdapter
 from assistant.windows.singleton import acquire_single_instance
 
 _WINDOWS_APP_USER_MODEL_ID = "LocalAssistant.Desktop"
+
+
+def _accessible_stylesheet(
+    stylesheet: str,
+    *,
+    text_scale: float,
+    high_contrast: bool,
+) -> str:
+    """Scale point sizes and optionally add a high-contrast color override."""
+
+    def scale(match: re.Match[str]) -> str:
+        points = float(match.group(1)) * text_scale
+        rendered = f"{points:.2f}".rstrip("0").rstrip(".")
+        return f"font-size: {rendered}pt"
+
+    scaled = re.sub(r"font-size:\s*([0-9]+(?:\.[0-9]+)?)pt", scale, stylesheet)
+    if not high_contrast:
+        return scaled
+    return (
+        scaled
+        + """
+        QMainWindow, QWidget, QDialog, QMessageBox { background: #000000; color: #ffffff; }
+        QLabel, QCheckBox, QRadioButton { color: #ffffff; }
+        QTextEdit, QLineEdit, QComboBox, QListWidget, QTableWidget {
+            background: #000000; color: #ffffff; border: 2px solid #ffffff;
+        }
+        QTextEdit:focus, QLineEdit:focus, QComboBox:focus, QListWidget:focus,
+        QPushButton:focus, QCheckBox:focus { border: 3px solid #00ffff; }
+        QPushButton { background: #000000; color: #ffffff; border: 2px solid #ffffff; }
+        QPushButton:disabled { color: #a0a0a0; border-color: #777777; }
+        QTabBar::tab { color: #ffffff; }
+        QTabBar::tab:selected { background: #002b36; color: #ffffff; border-left: 4px solid #00ffff; }
+        QProgressBar::chunk { background: #00ffff; }
+        """
+    )
+
 
 _DEMO_STRING_VALUES = {
     "application": "notepad",
@@ -158,12 +197,40 @@ def run_desktop(container: Container) -> int:
     instance_mutex = acquire_single_instance()
     controller = DesktopController(container)
     capability_details = {
+        "automation.observe.calendar": (
+            "Monitor calendar events",
+            "Keep an exact calendar event trigger active.",
+        ),
+        "automation.observe.device": (
+            "Monitor a device",
+            "Keep an exact device or entity state trigger active.",
+        ),
+        "automation.observe.file": (
+            "Monitor a folder",
+            "Keep an exact approved file or folder trigger active.",
+        ),
+        "automation.observe.process": (
+            "Monitor an application",
+            "Keep an exact application process trigger active.",
+        ),
+        "automation.observe.web": (
+            "Monitor a web page",
+            "Keep an exact bounded web-page change trigger active.",
+        ),
         "clipboard.read": ("Read clipboard", "Read the current clipboard contents."),
         "clipboard.write": ("Write clipboard", "Replace the current clipboard contents."),
         "device.control": ("Control devices", "Change or disable connected devices."),
         "device.read": ("Read device information", "Inspect device status and details."),
         "filesystem.read": ("Read files", "Open files or folders for reading."),
         "filesystem.write": ("Change files", "Create, edit, move, rename, or delete files."),
+        "filesystem.content.read": (
+            "Read document contents",
+            "Extract text from explicitly selected documents or approved folders.",
+        ),
+        "filesystem.content.index": (
+            "Index document contents",
+            "Retain a searchable local content index for an explicitly approved folder.",
+        ),
         "input.control": ("Control mouse and keyboard", "Type, click, or automate input."),
         "integration.read": (
             "Read integration data",
@@ -305,6 +372,7 @@ def run_desktop(container: Container) -> int:
         NotificationBanner,
         NotificationDrawer,
     )
+    from assistant.ui.desktop.onboarding_dialog import OnboardingDialog
     from assistant.ui.desktop.result_window import ResultWindow
     from assistant.ui.desktop.workers import (
         AsyncWorker,
@@ -719,7 +787,20 @@ def run_desktop(container: Container) -> int:
             if container.wakeword:
                 self._start_wakeword()
             self._start_passive_voice()
+            QTimer.singleShot(0, self._start_retrieval_warmup)
             QTimer.singleShot(0, self._first_run)
+
+        def _start_retrieval_warmup(self) -> None:
+            worker = AsyncWorker(container.orchestrator.refresh_retrieval_index())
+            worker.failed.connect(
+                lambda error: self.statusBar().showMessage(
+                    f"Search index warmup was deferred: {error}",
+                    3000,
+                )
+            )
+            worker.finished.connect(lambda: self._discard_worker(worker))
+            self._workers.append(worker)
+            worker.start()
 
         def _application_settings_payload(self, settings: Any) -> dict[str, Any]:
             return settings.model_dump(
@@ -2088,9 +2169,11 @@ def run_desktop(container: Container) -> int:
             self.listen_button.clicked.connect(self.listen)
             self.run_button = QPushButton("Run request  >")
             self.run_button.setObjectName("primaryButton")
+            self.run_button.setAccessibleName("Run typed request")
             self.run_button.clicked.connect(self.run_command)
             self.cancel_button = QPushButton("Stop")
             self.cancel_button.setObjectName("dangerButton")
+            self.cancel_button.setAccessibleName("Emergency stop current request")
             self.cancel_button.clicked.connect(self.cancel)
             self.cancel_button.setEnabled(False)
             controls.addWidget(self.listen_button)
@@ -2131,8 +2214,21 @@ def run_desktop(container: Container) -> int:
             self.response_type = QLabel("READY")
             self.response_type.setObjectName("responseBadge")
             self.response_type.setAccessibleName("Assistant response type")
+            self.inspect_sources_button = QPushButton("Inspect sources")
+            self.inspect_sources_button.setObjectName("secondaryButton")
+            self.inspect_sources_button.setAccessibleName("Inspect response sources")
+            self.inspect_sources_button.setEnabled(False)
+            self.inspect_sources_button.clicked.connect(self._inspect_sources)
+            self.copy_sources_button = QPushButton("Copy sources")
+            self.copy_sources_button.setObjectName("secondaryButton")
+            self.copy_sources_button.setAccessibleName("Copy response sources")
+            self.copy_sources_button.setEnabled(False)
+            self.copy_sources_button.clicked.connect(self._copy_sources)
+            self._last_sources_text = ""
             response_header.addWidget(response_label)
             response_header.addStretch()
+            response_header.addWidget(self.inspect_sources_button)
+            response_header.addWidget(self.copy_sources_button)
             response_header.addWidget(self.response_type)
             compose_layout.addLayout(response_header)
             compose_layout.addWidget(self.response)
@@ -2278,7 +2374,14 @@ def run_desktop(container: Container) -> int:
                     self.pipeline_progress.setValue(round(progress * 100))
                     self.compact_panel.pipeline_progress.setRange(0, 100)
                     self.compact_panel.pipeline_progress.setValue(round(progress * 100))
-                self._status_timer.start()
+                if container.settings.ui_reduced_motion:
+                    self.pipeline_progress.setRange(0, 100)
+                    self.pipeline_progress.setValue(round((progress or 0.0) * 100))
+                    self.compact_panel.pipeline_progress.setRange(0, 100)
+                    self.compact_panel.pipeline_progress.setValue(round((progress or 0.0) * 100))
+                    self._status_timer.stop()
+                else:
+                    self._status_timer.start()
             else:
                 self._status_timer.stop()
                 self.elapsed_status.setText("")
@@ -2454,6 +2557,14 @@ def run_desktop(container: Container) -> int:
             worker.start()
 
         def _handle_pipeline_event(self, event: PipelineEvent) -> None:
+            if response_data := event.data.get("response"):
+                try:
+                    ready_response = Response.model_validate(response_data)
+                except (TypeError, ValueError):
+                    ready_response = None
+                if ready_response is not None:
+                    self._display_response(ready_response)
+                    self._last_event_response = ready_response
             if event.trace is not None:
                 self._append_trace_activity(event.trace)
                 if event.trace.invocation == "background":
@@ -3780,6 +3891,23 @@ def run_desktop(container: Container) -> int:
             self.setting_detail = QComboBox()
             self.setting_detail.addItems(["short", "normal", "detailed"])
             self.setting_detail.setCurrentText(container.settings.response_detail)
+            self.setting_text_scale = QComboBox()
+            for label, value in (
+                ("100%", 1.0),
+                ("125%", 1.25),
+                ("150%", 1.5),
+                ("175%", 1.75),
+            ):
+                self.setting_text_scale.addItem(label, value)
+            selected = self.setting_text_scale.findData(container.settings.ui_text_scale)
+            self.setting_text_scale.setCurrentIndex(max(0, selected))
+            self.setting_text_scale.setAccessibleName("Interface text size")
+            self.setting_high_contrast = QCheckBox()
+            self.setting_high_contrast.setChecked(container.settings.ui_high_contrast)
+            self.setting_high_contrast.setAccessibleName("Use high contrast colors")
+            self.setting_reduced_motion = QCheckBox()
+            self.setting_reduced_motion.setChecked(container.settings.ui_reduced_motion)
+            self.setting_reduced_motion.setAccessibleName("Reduce interface motion")
             self.setting_show_reasoning = QCheckBox()
             self.setting_show_reasoning.setChecked(container.settings.show_reasoning_steps)
             self.setting_terminal_debug = QCheckBox()
@@ -3886,6 +4014,9 @@ def run_desktop(container: Container) -> int:
             form.addRow("Noise suppression", self.setting_noise)
             form.addRow("Automatic gain control", self.setting_gain)
             form.addRow("Response detail", self.setting_detail)
+            form.addRow("Interface text size", self.setting_text_scale)
+            form.addRow("High contrast", self.setting_high_contrast)
+            form.addRow("Reduce motion", self.setting_reduced_motion)
             form.addRow("Show request breakdown", self.setting_show_reasoning)
             form.addRow("Terminal debug output", self.setting_terminal_debug)
             form.addRow("Hide sensitive display results", self.setting_hide_sensitive)
@@ -4107,6 +4238,9 @@ def run_desktop(container: Container) -> int:
                     "noise_suppression": self.setting_noise.isChecked(),
                     "automatic_gain_control": self.setting_gain.isChecked(),
                     "response_detail": self.setting_detail.currentText(),
+                    "ui_text_scale": self.setting_text_scale.currentData(),
+                    "ui_high_contrast": self.setting_high_contrast.isChecked(),
+                    "ui_reduced_motion": self.setting_reduced_motion.isChecked(),
                     "show_reasoning_steps": self.setting_show_reasoning.isChecked(),
                     "terminal_debug": self.setting_terminal_debug.isChecked(),
                     "hide_sensitive_display": self.setting_hide_sensitive.isChecked(),
@@ -4177,6 +4311,7 @@ def run_desktop(container: Container) -> int:
             container.orchestrator.show_reasoning_steps = validated.show_reasoning_steps
             container.orchestrator.terminal_debug = validated.terminal_debug
             container.orchestrator.hide_sensitive_display = validated.hide_sensitive_display
+            self._apply_accessibility_settings(validated)
             container.engine.confirmation_overrides = dict(validated.confirmation_overrides)
             container.audio_capture.noise_suppression = validated.noise_suppression
             container.audio_capture.automatic_gain_control = validated.automatic_gain_control
@@ -4208,8 +4343,12 @@ def run_desktop(container: Container) -> int:
             refresh.clicked.connect(self._refresh_diagnostics)
             benchmark = QPushButton("Benchmark Deterministic Command")
             benchmark.clicked.connect(self._benchmark)
+            setup = QPushButton("Resume Guided Setup")
+            setup.setAccessibleName("Resume guided setup")
+            setup.clicked.connect(lambda: self._first_run(force=True))
             controls.addWidget(refresh)
             controls.addWidget(benchmark)
+            controls.addWidget(setup)
             controls.addStretch()
             layout.addWidget(self.diagnostic_text)
             layout.addLayout(controls)
@@ -4229,6 +4368,11 @@ def run_desktop(container: Container) -> int:
                 if item["stage"] == "execution" and item["duration_ms"] is not None
             ]
             multimedia = report["multimedia"]
+            issues = recovery_issues(
+                report,
+                database_integrity=container.database.integrity_check(),
+                requested_stt_device=container.settings.stt_device,
+            )
             self.diagnostic_text.setPlainText(
                 "\n".join(
                     [
@@ -4272,6 +4416,15 @@ def run_desktop(container: Container) -> int:
                         f"Refresh errors: {dashboard.get('error', 0)}",
                         f"History errors: {dashboard.get('history_error', 0)}",
                         f"Numeric history samples: {dashboard.get('history_samples', 0)}",
+                        "",
+                        "Recovery",
+                        *(
+                            [
+                                f"[{issue.severity.upper()}] {issue.title}: {issue.action}"
+                                for issue in issues
+                            ]
+                            or ["No known recovery actions are required."]
+                        ),
                     ]
                 )
             )
@@ -5026,23 +5179,37 @@ def run_desktop(container: Container) -> int:
                 SettingsStore(container.database).set(f"model_location.{component}", path)
                 QMessageBox.information(self, "Model Location Saved", f"{component}: {path}")
 
-        def _first_run(self) -> None:
-            store = SettingsStore(container.database)
-            if store.get("first_run_complete", False):
+        def _first_run(self, *, force: bool = False) -> None:
+            settings_store = SettingsStore(container.database)
+            onboarding_store = OnboardingStore(settings_store)
+            if settings_store.get("first_run_complete", False) and not force:
                 return
+            if force:
+                onboarding_store.reset()
             report = hardware_report()
             recommendations = model_recommendations(report)
-            QMessageBox.information(
-                self,
-                "Welcome to Local Assistant",
-                "Hardware detection is complete.\n\n"
-                f"GPU: {report['gpu'] or 'Not detected'}\n"
-                f"Recommended STT: {recommendations['stt']}\n"
-                f"Recommended LLM: {recommendations['llm']}\n"
-                f"Recommended TTS: {recommendations['tts']}\n\n"
-                "Use the Models tab to install signed local model files.",
+
+            def open_tab(label: str) -> None:
+                self._switch_window_mode("full")
+                self.tabs.setCurrentIndex(TAB_LABELS.index(label))
+
+            self._onboarding_dialog = OnboardingDialog(
+                onboarding_store,
+                hardware=report,
+                recommendations=recommendations,
+                actions={
+                    SetupStep.MODELS: lambda: open_tab("Models"),
+                    SetupStep.AUDIO: lambda: open_tab("Settings"),
+                    SetupStep.ACTIVATION: lambda: open_tab("Settings"),
+                    SetupStep.PERMISSIONS: lambda: open_tab("Permissions"),
+                    SetupStep.TYPED_TEST: lambda: self._run_text_command("calculate 17 times 19"),
+                    SetupStep.VOICE_TEST: self.listen,
+                    SetupStep.SAFETY: self.cancel,
+                    SetupStep.FINISH: lambda: open_tab("Diagnostics"),
+                },
+                parent=self,
             )
-            store.set("first_run_complete", True)
+            self._onboarding_dialog.open()
 
         def _benchmark(self) -> None:
             async def run():
@@ -5091,7 +5258,9 @@ def run_desktop(container: Container) -> int:
 
         def _show_result(self, payload: Any) -> None:
             response, outcome = payload
-            self._display_response(response)
+            if getattr(self, "_last_event_response", None) != response:
+                self._display_response(response)
+            self._last_event_response = None
             if outcome.call is not None and outcome.call.skill_id == "core.memory":
                 self._reload_memories_if_visible()
             if outcome.registration_requests:
@@ -5240,9 +5409,7 @@ def run_desktop(container: Container) -> int:
                 else container.engine.prepare(outcome.call)
             )
             worker.complete.connect(
-                self._show_result
-                if resumes_plan
-                else continuation or self._show_continued_outcome
+                self._show_result if resumes_plan else continuation or self._show_continued_outcome
             )
             worker.failed.connect(
                 self._show_skill_demo_error if continuation is not None else self._show_error
@@ -5298,9 +5465,7 @@ def run_desktop(container: Container) -> int:
                 else container.engine.prepare(outcome.call)
             )
             worker.complete.connect(
-                self._show_result
-                if resumes_plan
-                else continuation or self._show_continued_outcome
+                self._show_result if resumes_plan else continuation or self._show_continued_outcome
             )
             worker.failed.connect(
                 self._show_skill_demo_error if continuation is not None else self._show_error
@@ -5449,8 +5614,18 @@ def run_desktop(container: Container) -> int:
                 )
             if not response.updates_display:
                 return
-            self.response.setPlainText(response.display_text)
-            self.compact_panel.set_response(response.display_text)
+            display_text = response.display_text
+            sources = []
+            if response.citations:
+                for index, citation in enumerate(response.citations, 1):
+                    reference = citation.url or citation.local_reference or citation.source_id
+                    sources.append(f"[{index}] {citation.title} — {reference}")
+                display_text += "\n\nSources:\n" + "\n".join(sources)
+            self._last_sources_text = "\n".join(sources)
+            self.inspect_sources_button.setEnabled(bool(sources))
+            self.copy_sources_button.setEnabled(bool(sources))
+            self.response.setPlainText(display_text)
+            self.compact_panel.set_response(display_text)
             error = response.response_type == ResponseType.ERROR or response.severity == "error"
             self._print_to_terminal(response.display_text, error=error)
             self._set_response_type(response.response_type)
@@ -5483,15 +5658,48 @@ def run_desktop(container: Container) -> int:
             self.response_type.setText(label)
             self.compact_panel.set_response_type(label)
 
+        def _inspect_sources(self) -> None:
+            if not self._last_sources_text:
+                self.statusBar().showMessage("This response has no inspectable sources.", 3000)
+                return
+            box = QMessageBox(self)
+            box.setWindowTitle("Response Sources")
+            box.setIcon(QMessageBox.Icon.Information)
+            box.setText("Sources used for the current response")
+            box.setDetailedText(self._last_sources_text)
+            box.setAccessibleName("Response source inspector")
+            box.exec()
+
+        def _copy_sources(self) -> None:
+            if not self._last_sources_text:
+                self.statusBar().showMessage("This response has no sources to copy.", 3000)
+                return
+            QApplication.clipboard().setText(self._last_sources_text)
+            self.statusBar().showMessage("Sources copied to the clipboard.", 3000)
+
+        def _apply_accessibility_settings(self, settings: Any) -> None:
+            app.setStyleSheet(
+                _accessible_stylesheet(
+                    base_stylesheet,
+                    text_scale=settings.ui_text_scale,
+                    high_contrast=settings.ui_high_contrast,
+                )
+            )
+            if settings.ui_reduced_motion:
+                self._status_timer.stop()
+            elif self._pipeline_is_busy():
+                self._status_timer.start()
+
         def _show_error(self, error: str) -> None:
             self._print_to_terminal(f"Assistant error: {error}", error=True)
-            message = f"Assistant error: {error}"
+            title, action = outcome_guidance(error)
+            message = f"{title}.\n\n{error}\n\nNext step: {action}"
             self.response.setPlainText(message)
             self.compact_panel.set_response(message)
             self._set_response_type(ResponseType.ERROR)
             self._set_pipeline_state(PipelineState.ERROR, error)
             if self.isVisible():
-                QMessageBox.critical(self, "Assistant Error", error)
+                QMessageBox.critical(self, title, f"{error}\n\n{action}")
 
         def _show_cancelled(self) -> None:
             if self._passive_voice_worker and self._passive_voice_worker.isRunning():
@@ -5585,8 +5793,7 @@ def run_desktop(container: Container) -> int:
     app.setWindowIcon(app_icon)
     app.setQuitOnLastWindowClosed(False)
     app.setStyle("Fusion")
-    app.setStyleSheet(
-        """
+    base_stylesheet = """
         * {
             font-family: "Segoe UI";
             font-size: 10pt;
@@ -6057,6 +6264,12 @@ def run_desktop(container: Container) -> int:
             background: #101b2c;
         }
         """
+    app.setStyleSheet(
+        _accessible_stylesheet(
+            base_stylesheet,
+            text_scale=container.settings.ui_text_scale,
+            high_contrast=container.settings.ui_high_contrast,
+        )
     )
     window = MainWindow()
     window.setWindowIcon(app_icon)

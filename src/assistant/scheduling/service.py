@@ -3,12 +3,22 @@ from __future__ import annotations
 import asyncio
 import threading
 from datetime import datetime
+from typing import Protocol
 from uuid import UUID, uuid4
 
 from assistant.scheduling.clock import Clock, SystemClock
-from assistant.scheduling.contracts import ScheduleRunState, ScheduleStatus
+from assistant.scheduling.contracts import (
+    EventObservation,
+    ScheduleRun,
+    ScheduleRunState,
+    ScheduleStatus,
+)
 from assistant.scheduling.runner import BackgroundRunner
 from assistant.scheduling.store import ScheduleStore, aware_utc
+
+
+class EventSource(Protocol):
+    async def poll(self) -> int: ...
 
 
 class SchedulerService:
@@ -23,6 +33,7 @@ class SchedulerService:
         lease_seconds: int = 30,
         max_runs_per_wake: int = 100,
         max_concurrency: int = 1,
+        event_sources: tuple[EventSource, ...] = (),
     ) -> None:
         self.store = store
         self.runner = runner
@@ -32,6 +43,7 @@ class SchedulerService:
         self.lease_seconds = lease_seconds
         self.max_runs_per_wake = max_runs_per_wake
         self.max_concurrency = max(1, max_concurrency)
+        self.event_sources = event_sources
         self.lease_owner: UUID = uuid4()
         self._wake: asyncio.Event | None = None
         self._stop: asyncio.Event | None = None
@@ -71,6 +83,8 @@ class SchedulerService:
         if not self.enabled or self.paused:
             return 0
         now = aware_utc(self.clock.now())
+        for source in self.event_sources:
+            await source.poll()
         self.runner.expire_pending_approvals()
         self.store.materialize_due(now)
         completed = 0
@@ -97,6 +111,12 @@ class SchedulerService:
         if loop is None or event is None:
             return
         loop.call_soon_threadsafe(event.set)
+
+    def observe(self, observation: EventObservation) -> tuple[ScheduleRun, ...]:
+        runs = self.store.observe(observation)
+        if runs:
+            self.wake()
+        return runs
 
     def request_stop(self) -> None:
         loop = self._loop

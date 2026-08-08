@@ -76,9 +76,17 @@ def make_package(tmp_path: Path):
     return package, public
 
 
+def reviewed_registry(tmp_path: Path, public: bytes) -> SkillRegistry:
+    return SkillRegistry(
+        tmp_path / "installed",
+        trusted_signing_keys={"test-key": public},
+        allow_reviewed_worker_extensions=True,
+    )
+
+
 def test_signed_package_verification_and_tamper_detection(tmp_path):
     package, public = make_package(tmp_path)
-    registry = SkillRegistry(tmp_path / "installed", trusted_signing_keys={"test-key": public})
+    registry = reviewed_registry(tmp_path, public)
     assert registry.validate_package(package).skill_id == "test.isolated"
     (package / "plugin.py").write_text(SKILL_SOURCE + "\n# changed", encoding="utf-8")
     with pytest.raises(ValueError, match="signature"):
@@ -88,7 +96,7 @@ def test_signed_package_verification_and_tamper_detection(tmp_path):
 def test_unsigned_package_is_rejected(tmp_path):
     package, public = make_package(tmp_path)
     (package / "signature.json").unlink()
-    registry = SkillRegistry(tmp_path / "installed", trusted_signing_keys={"test-key": public})
+    registry = reviewed_registry(tmp_path, public)
     with pytest.raises(ValueError, match="unsigned"):
         registry.validate_package(package)
 
@@ -96,7 +104,7 @@ def test_unsigned_package_is_rejected(tmp_path):
 @pytest.mark.asyncio
 async def test_installed_skill_executes_in_isolated_worker(tmp_path):
     package, public = make_package(tmp_path)
-    registry = SkillRegistry(tmp_path / "installed", trusted_signing_keys={"test-key": public})
+    registry = reviewed_registry(tmp_path, public)
     registry.install(package)
     skill = registry.load_installed("test.isolated", timeout_seconds=5)
     call = SkillCall(
@@ -112,7 +120,7 @@ async def test_installed_skill_executes_in_isolated_worker(tmp_path):
 @pytest.mark.asyncio
 async def test_isolated_skill_timeout_terminates_worker(tmp_path):
     package, public = make_package(tmp_path)
-    registry = SkillRegistry(tmp_path / "installed", trusted_signing_keys={"test-key": public})
+    registry = reviewed_registry(tmp_path, public)
     registry.install(package)
     skill = registry.load_installed("test.isolated", timeout_seconds=0.1)
     call = SkillCall(
@@ -128,7 +136,7 @@ async def test_isolated_skill_timeout_terminates_worker(tmp_path):
 @pytest.mark.asyncio
 async def test_isolated_skill_worker_blocks_outbound_network(tmp_path):
     package, public = make_package(tmp_path)
-    registry = SkillRegistry(tmp_path / "installed", trusted_signing_keys={"test-key": public})
+    registry = reviewed_registry(tmp_path, public)
     registry.install(package)
     skill = registry.load_installed("test.isolated", timeout_seconds=5)
     call = SkillCall(
@@ -144,7 +152,7 @@ async def test_isolated_skill_worker_blocks_outbound_network(tmp_path):
 @pytest.mark.asyncio
 async def test_isolated_skill_worker_does_not_inherit_parent_secrets(tmp_path, monkeypatch):
     package, public = make_package(tmp_path)
-    registry = SkillRegistry(tmp_path / "installed", trusted_signing_keys={"test-key": public})
+    registry = reviewed_registry(tmp_path, public)
     registry.install(package)
     skill = registry.load_installed("test.isolated", timeout_seconds=5)
     monkeypatch.setenv("ASSISTANT_TEST_SECRET", "must-not-cross-worker-boundary")
@@ -162,7 +170,7 @@ async def test_isolated_skill_worker_does_not_inherit_parent_secrets(tmp_path, m
 
 def test_skill_update_requires_review_for_added_capabilities(tmp_path):
     package, public = make_package(tmp_path)
-    registry = SkillRegistry(tmp_path / "installed", trusted_signing_keys={"test-key": public})
+    registry = reviewed_registry(tmp_path, public)
     registry.install(package)
     update = tmp_path / "update"
     __import__("shutil").copytree(package, update)
@@ -198,7 +206,7 @@ def test_skill_update_requires_review_for_added_capabilities(tmp_path):
 
 def test_frozen_build_relaunches_the_application_in_worker_mode(tmp_path, monkeypatch):
     package, public = make_package(tmp_path)
-    registry = SkillRegistry(tmp_path / "installed", trusted_signing_keys={"test-key": public})
+    registry = reviewed_registry(tmp_path, public)
     registry.install(package)
     skill = registry.load_installed("test.isolated")
     monkeypatch.setattr("assistant.skills.subprocess.sys.frozen", True, raising=False)
@@ -207,3 +215,29 @@ def test_frozen_build_relaunches_the_application_in_worker_mode(tmp_path, monkey
 
     assert command[:2] == (__import__("sys").executable, "--isolated-skill-worker")
     assert command[-2:] == (str(skill.package_dir), skill.manifest.entry_point)
+
+
+def test_downloaded_python_extension_is_blocked_without_os_sandbox_opt_in(tmp_path):
+    package, public = make_package(tmp_path)
+    registry = SkillRegistry(
+        tmp_path / "installed",
+        trusted_signing_keys={"test-key": public},
+    )
+
+    with pytest.raises(PermissionError, match="OS-enforced hostile-code sandbox"):
+        registry.install(package)
+
+    assert not (tmp_path / "installed" / "test.isolated").exists()
+
+
+def test_revoked_signing_key_blocks_package_and_installed_restart(tmp_path):
+    package, public = make_package(tmp_path)
+    registry = SkillRegistry(
+        tmp_path / "installed",
+        trusted_signing_keys={"test-key": public},
+        revoked_signing_key_ids={"test-key"},
+        allow_reviewed_worker_extensions=True,
+    )
+
+    with pytest.raises(ValueError, match="revoked"):
+        registry.install(package)

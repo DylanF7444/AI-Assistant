@@ -4,9 +4,11 @@ For a contributor walkthrough covering first-party managed integrations,
 signed catalog packages, connection services, registration, tests, and release
 checks, see `docs/ADDING_EXTENSIONS.md`.
 
-The desktop **Extension Hub** browses a configured HTTPS catalog and installs
+The desktop **Extension Hub** browses a configured HTTPS catalog and reviews
 compatible signed skill packages. Configure the catalog URL in **Settings**,
 disable the global offline lock, restart the application, and open the hub.
+Downloaded Python extensions are not installable in the shipping configuration:
+the available worker is process-isolated but is not an OS security sandbox.
 
 Discovery does not grant authority. The catalog can describe a package, but it
 cannot add a trusted signing key, enable a skill, or grant permissions. A newly
@@ -51,9 +53,11 @@ JSON. Catalog schema `1.0` has this form:
 }
 ```
 
-This build displays every valid entry but installs only `skill` extensions
-targeting core API `1.0`. Unsupported types and versions remain visible and
-have a disabled install control.
+This build displays every valid entry. Entries targeting core API `1.0` are
+classified as reviewed-worker candidates, but their install control remains
+disabled unless the advanced `allow_reviewed_worker_extensions` development
+setting is explicitly enabled. Unsupported APIs and native extension classes
+remain blocked regardless of that setting.
 
 ## Package requirements
 
@@ -75,25 +79,30 @@ Installation verifies, in order:
 4. Core API compatibility and manifest schema.
 5. Exact agreement between catalog and manifest identity, version, display
    metadata, permissions, and risk.
-6. Successful loading into the isolated skill worker boundary.
+6. Execution-class policy: core and managed extensions may load in process;
+   reviewed Python packages require explicit worker opt-in; native packages are
+   blocked.
+7. Successful loading into the process-isolated worker when that class has been
+   explicitly enabled.
 
 Any failure removes the staged or partially installed package and records a
 local audit event. Package signer keys come from the build's
-`trusted_skill_keys` configuration. Keys supplied by catalog content are never
-trusted. Publisher-key additions and revocations therefore require a trusted
-application configuration or build update.
+`trusted_skill_keys` configuration and must not appear in
+`revoked_skill_key_ids`. Keys supplied by catalog content are never trusted.
+Publisher-key additions and revocations therefore require a trusted application
+configuration or build update.
 
 The platform does not receive permission grants, execution history, local
 files, or credentials from the hub. Installed skill execution continues through
 the normal local schema, permission, confirmation, audit, timeout, and offline
 controls described in `docs/SKILLS.md` and `docs/PERMISSIONS.md`.
 
-Catalog packages currently execute with outbound networking forced off and do
-not inherit application secrets. Use the first-party managed path for an API or
-account integration that needs host networking or encrypted credentials. The
-worker process and Windows resource bounds are defense in depth, not a complete
-security boundary for arbitrary hostile native code; catalog publishers must
-remain explicitly trusted and reviewed.
+When reviewed-worker execution is explicitly enabled, catalog packages run with
+outbound networking forced off and do not inherit application secrets. Use the
+first-party managed path for an API or account integration that needs host
+networking or encrypted credentials. Worker and Windows resource bounds are
+defense in depth, not a containment claim. A public marketplace needs an
+OS-enforced sandbox before downloaded execution can be enabled by default.
 
 ## First-party managed extensions
 
@@ -101,7 +110,9 @@ The Hub can also list optional first-party integrations shipped with the
 application. These entries remain installable when no external catalog is
 configured. Installing one persists its reviewed manifest and makes the shipped
 host implementation available disabled; it does not execute downloaded package
-code. Community packages continue to use the isolated worker boundary.
+code. Reviewed community Python packages may use the process-isolated worker
+only when its advanced development opt-in is enabled; they are blocked in the
+shipping configuration.
 
 First-party account connections are configured from the extension's Hub detail
 page. OAuth tokens remain in the host Windows-encrypted secret vault and are

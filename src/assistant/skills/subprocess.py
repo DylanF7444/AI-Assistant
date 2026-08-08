@@ -141,6 +141,8 @@ class IsolatedSkill(Skill):
     async def health(self) -> dict[str, Any]:
         return {
             "healthy": self.package_dir.is_dir(),
-            "isolated": True,
+            "process_isolated": True,
+            "os_sandboxed": False,
+            "execution_class": "reviewed_worker",
             "skill_id": self.manifest.skill_id,
         }

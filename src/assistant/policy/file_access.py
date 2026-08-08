@@ -35,7 +35,11 @@ class FileAccessPolicy:
         }
 
     def denial_reason(self, capability: str, target: str) -> str | None:
-        if capability == "filesystem.read":
+        if capability in {
+            "filesystem.read",
+            "filesystem.content.read",
+            "filesystem.content.index",
+        }:
             whitelist = self.read_whitelist
             blacklist = self.read_blacklist
             access = "read"

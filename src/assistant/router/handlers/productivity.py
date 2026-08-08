@@ -153,10 +153,13 @@ def _route_daily_web_action(
 ) -> RouteResult | None:
     if re.search(rf"\b{_DAILY_CADENCE}\b", routed) is None:
         return None
-    if re.search(
-        r"\b(?:show|give|get|find|send|display|check|monitor|watch|alert)\b",
-        routed,
-    ) is None:
+    if (
+        re.search(
+            r"\b(?:show|give|get|find|send|display|check|monitor|watch|alert)\b",
+            routed,
+        )
+        is None
+    ):
         return None
     time_match = re.search(rf"\bat\s+(?P<time>{_CLOCK_VALUE})\b", routed)
     if time_match is None:
@@ -248,11 +251,7 @@ class ProductivityHandler:
             rf"(?P<cadence>{_REMINDER_CADENCE}) at (?P<time>.+)",
         )
         recurring_match = next(
-            (
-                match
-                for pattern in recurring_patterns
-                if (match := re.fullmatch(pattern, routed))
-            ),
+            (match for pattern in recurring_patterns if (match := re.fullmatch(pattern, routed))),
             None,
         )
         if recurring_match:
@@ -336,11 +335,7 @@ class ProductivityHandler:
             r"to (?P<title>.+)",
         )
         relative_match = next(
-            (
-                match
-                for pattern in relative_patterns
-                if (match := re.fullmatch(pattern, routed))
-            ),
+            (match for pattern in relative_patterns if (match := re.fullmatch(pattern, routed))),
             None,
         )
         if relative_match:
@@ -427,11 +422,7 @@ class ProductivityHandler:
             r"(?:a )?timer for (?P<amount>.+?) (?P<unit>seconds?|minutes?|hours?)",
         )
         timer_match = next(
-            (
-                match
-                for pattern in timer_patterns
-                if (match := re.fullmatch(pattern, routed))
-            ),
+            (match for pattern in timer_patterns if (match := re.fullmatch(pattern, routed))),
             None,
         )
         if timer_match:
@@ -574,11 +565,7 @@ class ProductivityHandler:
             r"mark (?:task|to-?do) (\d+) (?:as )?(?:complete|completed|done))",
             routed,
         ):
-            operation = (
-                "delete"
-                if routed.startswith(("delete ", "remove "))
-                else "complete"
-            )
+            operation = "delete" if routed.startswith(("delete ", "remove ")) else "complete"
             item_id = int(match.group(1) or match.group(2))
             return RouteResult(
                 Intent(
@@ -1006,7 +993,9 @@ class ProductivityHandler:
         routed = context.routed
         if routed in {
             "list playbooks",
+            "list my playbooks",
             "show playbooks",
+            "show my playbooks",
             "what are my playbooks",
             "what playbooks do i have",
         }:

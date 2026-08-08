@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import mimetypes
 import urllib.parse
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -29,25 +31,34 @@ from assistant.skills.microsoft_graph_common import (
     resources_from_payload,
     short_id,
 )
+from assistant.windows.paths import resolve_user_path
 
-DRIVE_FIELDS = "id,name,createdDateTime,lastModifiedDateTime,size,file,folder,webUrl,parentReference"
+DRIVE_FIELDS = (
+    "id,name,createdDateTime,lastModifiedDateTime,size,file,folder,webUrl,parentReference"
+)
 
 
 class OneDriveInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    operation: Literal["search", "list_children", "get_metadata"]
+    operation: Literal["search", "list_children", "get_metadata", "download", "upload"]
     query: str | None = Field(default=None, min_length=1, max_length=500)
     file_id: str = Field(default="root", min_length=1, max_length=1024)
     max_results: int = Field(default=25, ge=1, le=100)
     page_token: str | None = Field(default=None, max_length=2048)
+    local_path: str | None = Field(default=None, min_length=1, max_length=32_768)
+    name: str | None = Field(default=None, min_length=1, max_length=500)
 
     @model_validator(mode="after")
     def _operation_has_required_fields(self) -> OneDriveInput:
         if self.operation == "search" and not self.query:
             raise ValueError("search requires query")
-        if self.operation == "get_metadata" and not self.file_id:
-            raise ValueError("get_metadata requires file_id")
+        if self.operation in {"get_metadata", "download"} and not self.file_id:
+            raise ValueError(f"{self.operation} requires file_id")
+        if self.operation in {"download", "upload"} and not self.local_path:
+            raise ValueError(f"{self.operation} requires local_path")
+        if self.operation != "upload" and self.name is not None:
+            raise ValueError("name is only valid for upload")
         return self
 
 
@@ -68,8 +79,8 @@ class OneDriveSkill(Skill):
             display_name="OneDrive",
             description=(
                 "Search OneDrive files and folders, list folder children, and inspect file "
-                "metadata through Microsoft Graph. Content downloads and changes are excluded "
-                "from this first slice."
+                "metadata, download an exact file to an exact new local path, or upload one "
+                "explicit local file. Existing local and remote files are never overwritten."
             ),
             input_model=self.input_model,
             output_model=self.output_model,
@@ -86,31 +97,64 @@ class OneDriveSkill(Skill):
                 ),
             ),
             risk=RiskLevel.MEDIUM,
-            safe_to_retry=True,
+            safe_to_retry=False,
             background_mode=BackgroundMode.CAPABILITY_GATED,
         ).model_copy(update={"entry_point": f"{__name__}:OneDriveSkill"})
 
     def risk_for(self, call: SkillCall) -> RiskLevel:
-        self.validate(call.arguments)
-        return RiskLevel.LOW
+        return (
+            RiskLevel.HIGH
+            if self.validate(call.arguments).operation in {"download", "upload"}
+            else RiskLevel.LOW
+        )
 
     def required_permissions(self, call: SkillCall):
         args = self.validate(call.arguments)
-        return (
+        scopes = []
+        if args.operation == "download":
+            scopes.append(
+                PermissionScope(
+                    capability="filesystem.write",
+                    targets=(str(resolve_user_path(args.local_path or "")),),
+                    reason="Create this exact local file from the selected OneDrive item.",
+                )
+            )
+        elif args.operation == "upload":
+            scopes.append(
+                PermissionScope(
+                    capability="filesystem.content.read",
+                    targets=(str(resolve_user_path(args.local_path or "")),),
+                    reason="Read this exact local file for upload.",
+                )
+            )
+        scopes.append(
             PermissionScope(
-                capability="integration.read",
+                capability="integration.write"
+                if args.operation == "upload"
+                else "integration.read",
                 targets=(_permission_target(args),),
-                reason="Allow OneDrive metadata access for this exact read target.",
-            ),
+                reason=(
+                    "Upload one file to this exact OneDrive target."
+                    if args.operation == "upload"
+                    else "Allow OneDrive access for this exact target."
+                ),
+            )
+        )
+        scopes.append(
             PermissionScope(
                 capability="network",
                 targets=(GRAPH_API_ROOT.split("/v1.0")[0], AUTHORITY_ROOT),
                 reason="Connect to Microsoft Graph and refresh its OAuth token.",
-            ),
+            )
         )
+        return tuple(scopes)
 
     async def preview(self, call: SkillCall) -> str:
         args = self.validate(call.arguments)
+        if args.operation == "download":
+            return f"Download OneDrive file {args.file_id} to new local file {args.local_path}"
+        if args.operation == "upload":
+            return f"Upload local file {args.local_path} to OneDrive folder {args.file_id}"
         return f"OneDrive: {args.operation} on {_permission_target(args)}"
 
     async def health(self) -> dict[str, Any]:
@@ -148,11 +192,39 @@ class OneDriveSkill(Skill):
         )
 
     async def _execute(self, args: OneDriveInput) -> dict[str, Any]:
+        if args.operation == "download":
+            metadata = await self.adapter.request(
+                "GET",
+                f"/me/drive/items/{quote_id(args.file_id)}",
+                query={"$select": "id,name,size,@microsoft.graph.downloadUrl"},
+            )
+            download_url = metadata.get("@microsoft.graph.downloadUrl")
+            if not isinstance(download_url, str):
+                raise ValueError("OneDrive did not return a bounded download URL")
+            payload = await self.adapter.download_url(download_url, max_bytes=25 * 1024 * 1024)
+            destination = resolve_user_path(args.local_path or "").resolve()
+            await asyncio.to_thread(_write_new_file, destination, payload)
+            return {**metadata, "localPath": str(destination), "size": len(payload)}
+        if args.operation == "upload":
+            source = resolve_user_path(args.local_path or "").resolve()
+            payload = await asyncio.to_thread(_read_bounded_file, source)
+            remote_name = args.name or source.name
+            parent = "root" if args.file_id == "root" else f"items/{quote_id(args.file_id)}"
+            encoded_name = urllib.parse.quote(remote_name, safe="")
+            return await self.adapter.upload_bytes(
+                f"/me/drive/{parent}:/{encoded_name}:/content",
+                payload,
+                content_type=mimetypes.guess_type(remote_name)[0] or "application/octet-stream",
+            )
         if args.operation == "search":
             term = urllib.parse.quote(odata_literal(args.query or ""), safe="")
             path = f"/me/drive/root/search(q='{term}')"
         elif args.operation == "get_metadata":
-            path = "/me/drive/root" if args.file_id == "root" else f"/me/drive/items/{quote_id(args.file_id)}"
+            path = (
+                "/me/drive/root"
+                if args.file_id == "root"
+                else f"/me/drive/items/{quote_id(args.file_id)}"
+            )
         elif args.file_id == "root":
             path = "/me/drive/root/children"
         else:
@@ -169,6 +241,10 @@ class OneDriveSkill(Skill):
 
 
 def _permission_target(args: OneDriveInput) -> str:
+    if args.operation == "download":
+        return f"onedrive:download:{args.file_id}"
+    if args.operation == "upload":
+        return f"onedrive:upload:{args.file_id}:{args.name or Path(args.local_path or '').name}"
     if args.operation == "search":
         return f"onedrive:query:{args.query[:200] if args.query else '*'}"
     return f"onedrive:file:{args.file_id}"
@@ -202,3 +278,18 @@ def _display(operation: str, resources: list[dict[str, Any]]) -> str:
         detail = _item_description(item)
         lines.append(f"- {name}" + (f"\n  {detail}" if detail else ""))
     return "\n".join([heading, *lines])
+
+
+def _read_bounded_file(path: Path) -> bytes:
+    if not path.is_file():
+        raise ValueError(f"Upload source does not exist: {path}")
+    if path.stat().st_size > 4 * 1024 * 1024:
+        raise ValueError("OneDrive simple upload source exceeds the 4 MB safety limit")
+    return path.read_bytes()
+
+
+def _write_new_file(path: Path, payload: bytes) -> None:
+    if not path.parent.is_dir():
+        raise ValueError(f"Download destination folder does not exist: {path.parent}")
+    with path.open("xb") as handle:
+        handle.write(payload)

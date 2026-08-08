@@ -71,7 +71,13 @@ def manifest(
 
 
 def _category_for_skill(skill_id: str) -> str:
-    if skill_id in {"windows.file_search", "windows.file_operation"}:
+    if skill_id in {
+        "windows.file_search",
+        "windows.file_operation",
+        "documents.read",
+        "documents.content_search",
+        "vision.understand_image",
+    }:
         return "Files & Folders"
     if skill_id.startswith("windows."):
         return "Windows"

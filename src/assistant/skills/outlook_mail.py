@@ -18,7 +18,6 @@ from assistant.integrations.microsoft_graph import (
     AUTHORITY_ROOT,
     GRAPH_API_ROOT,
     MicrosoftGraphAdapter,
-    TOKEN_URL,
     odata_literal,
     quote_id,
 )
@@ -30,21 +29,28 @@ from assistant.skills.microsoft_graph_common import (
     short_id,
 )
 
-MAIL_FIELDS = (
-    "id,subject,from,receivedDateTime,bodyPreview,isRead,hasAttachments,webLink"
-)
+MAIL_FIELDS = "id,subject,from,receivedDateTime,bodyPreview,isRead,hasAttachments,webLink"
 
 
 class OutlookMailInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    operation: Literal["search_messages", "list_messages", "get_message"]
+    operation: Literal[
+        "search_messages",
+        "list_messages",
+        "get_message",
+        "create_draft",
+        "send_draft",
+    ]
     query: str | None = Field(default=None, min_length=1, max_length=500)
     message_id: str | None = Field(default=None, min_length=1, max_length=1024)
     folder_id: str = Field(default="inbox", min_length=1, max_length=256)
     max_results: int = Field(default=25, ge=1, le=50)
     page_token: str | None = Field(default=None, max_length=2048)
     unread_only: bool = False
+    recipients: list[str] = Field(default_factory=list, max_length=20)
+    subject: str | None = Field(default=None, min_length=1, max_length=500)
+    body: str | None = Field(default=None, min_length=1, max_length=50_000)
 
     @model_validator(mode="after")
     def _operation_has_required_fields(self) -> OutlookMailInput:
@@ -52,6 +58,17 @@ class OutlookMailInput(BaseModel):
             raise ValueError("search_messages requires query")
         if self.operation == "get_message" and not self.message_id:
             raise ValueError("get_message requires message_id")
+        if self.operation == "create_draft":
+            if not self.recipients or not self.subject or not self.body:
+                raise ValueError("create_draft requires recipients, subject, and body")
+            if any("@" not in recipient or len(recipient) > 320 for recipient in self.recipients):
+                raise ValueError("recipients must contain bounded email addresses")
+        if self.operation == "send_draft" and not self.message_id:
+            raise ValueError("send_draft requires message_id")
+        if self.operation != "create_draft" and (
+            self.recipients or self.subject is not None or self.body is not None
+        ):
+            raise ValueError("recipients, subject, and body are only valid for create_draft")
         return self
 
 
@@ -72,8 +89,8 @@ class OutlookMailSkill(Skill):
             display_name="Outlook Mail",
             description=(
                 "Search and inspect Microsoft Outlook messages through Microsoft Graph. "
-                "This first slice is read-only; sending, drafting, moving, and deleting "
-                "messages are intentionally excluded."
+                "Create an explicit draft and send one exact existing draft after confirmation. "
+                "Message deletion and bulk changes remain excluded."
             ),
             input_model=self.input_model,
             output_model=self.output_model,
@@ -90,21 +107,38 @@ class OutlookMailSkill(Skill):
                 ),
             ),
             risk=RiskLevel.MEDIUM,
-            safe_to_retry=True,
+            safe_to_retry=False,
             background_mode=BackgroundMode.CAPABILITY_GATED,
         ).model_copy(update={"entry_point": f"{__name__}:OutlookMailSkill"})
 
     def risk_for(self, call: SkillCall) -> RiskLevel:
-        self.validate(call.arguments)
+        operation = self.validate(call.arguments).operation
+        if operation == "send_draft":
+            return RiskLevel.HIGH
+        if operation == "create_draft":
+            return RiskLevel.MEDIUM
         return RiskLevel.LOW
 
     def required_permissions(self, call: SkillCall):
         args = self.validate(call.arguments)
+        capability = (
+            "messaging"
+            if args.operation == "send_draft"
+            else "integration.write"
+            if args.operation == "create_draft"
+            else "integration.read"
+        )
         return (
             PermissionScope(
-                capability="integration.read",
+                capability=capability,
                 targets=(_permission_target(args),),
-                reason="Allow Outlook Mail access for this exact read target.",
+                reason=(
+                    "Send this exact Outlook draft."
+                    if args.operation == "send_draft"
+                    else "Create this exact Outlook draft."
+                    if args.operation == "create_draft"
+                    else "Allow Outlook Mail access for this exact read target."
+                ),
             ),
             PermissionScope(
                 capability="network",
@@ -115,6 +149,13 @@ class OutlookMailSkill(Skill):
 
     async def preview(self, call: SkillCall) -> str:
         args = self.validate(call.arguments)
+        if args.operation == "create_draft":
+            return (
+                f"Create an Outlook draft to {', '.join(args.recipients)} with subject "
+                f"{args.subject!r}; do not send it"
+            )
+        if args.operation == "send_draft":
+            return f"Send the exact Outlook draft {args.message_id}"
         return f"Outlook Mail: {args.operation} on {_permission_target(args)}"
 
     async def health(self) -> dict[str, Any]:
@@ -123,7 +164,9 @@ class OutlookMailSkill(Skill):
     async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult:
         args = self.validate(call.arguments)
         if cancel_event.is_set():
-            return SkillResult(status=ResultStatus.CANCELLED, summary="Outlook Mail action cancelled.")
+            return SkillResult(
+                status=ResultStatus.CANCELLED, summary="Outlook Mail action cancelled."
+            )
         payload = await self._execute(args)
         messages = resources_from_payload(payload)
         output = OutlookMailOutput(
@@ -152,6 +195,23 @@ class OutlookMailSkill(Skill):
         )
 
     async def _execute(self, args: OutlookMailInput) -> dict[str, Any]:
+        if args.operation == "create_draft":
+            return await self.adapter.request(
+                "POST",
+                "/me/messages",
+                body={
+                    "subject": args.subject,
+                    "body": {"contentType": "Text", "content": args.body},
+                    "toRecipients": [
+                        {"emailAddress": {"address": recipient}} for recipient in args.recipients
+                    ],
+                },
+            )
+        if args.operation == "send_draft":
+            await self.adapter.request(
+                "POST", f"/me/messages/{quote_id(args.message_id or '')}/send"
+            )
+            return {"id": args.message_id, "sent": True, "subject": "Draft sent"}
         if args.operation == "get_message":
             return await self.adapter.request(
                 "GET",
@@ -183,6 +243,11 @@ def _query_filter(query: str | None, *, unread_only: bool = False) -> str | None
 
 
 def _permission_target(args: OutlookMailInput) -> str:
+    if args.operation == "create_draft":
+        recipients = ",".join(sorted(recipient.casefold() for recipient in args.recipients))
+        return f"outlook:draft:{recipients}"
+    if args.operation == "send_draft":
+        return f"outlook:send-draft:{args.message_id}"
     if args.operation == "get_message":
         return f"outlook:message:{args.message_id}"
     query = args.query[:200] if args.query else ("unread" if args.unread_only else "*")
@@ -204,7 +269,11 @@ def _message_description(item: dict[str, Any]) -> str | None:
 
 def _summary(operation: str, count: int) -> str:
     if count:
-        return f"I found {count} Outlook message(s)." if operation != "get_message" else "I found the Outlook message."
+        return (
+            f"I found {count} Outlook message(s)."
+            if operation != "get_message"
+            else "I found the Outlook message."
+        )
     return "I couldn't find any Outlook messages."
 
 

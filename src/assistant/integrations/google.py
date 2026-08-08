@@ -318,9 +318,7 @@ class GoogleConnectionService:
         if resolved_client_secret:
             self.vault.set(OAUTH_CLIENT_ID_NAME, resolved_client_id)
             self.vault.set(OAUTH_CLIENT_SECRET_NAME, resolved_client_secret)
-        scopes = normalize_scopes(
-            (*GOOGLE_ACCOUNT_SCOPES, *tokens.granted_scopes(), *required)
-        )
+        scopes = normalize_scopes((*GOOGLE_ACCOUNT_SCOPES, *tokens.granted_scopes(), *required))
         return await asyncio.to_thread(
             self._connect,
             resolved_client_id,
@@ -457,11 +455,7 @@ class GoogleConnectionService:
             raise GoogleError(401, "Google did not return the required OAuth tokens.")
         account = self._primary_account(access_token)
         existing_account = tokens.account()
-        if (
-            existing_account
-            and account
-            and existing_account.casefold() != account.casefold()
-        ):
+        if existing_account and account and existing_account.casefold() != account.casefold():
             raise GoogleError(
                 409,
                 "The Google account changed. Disconnect the current account before switching.",

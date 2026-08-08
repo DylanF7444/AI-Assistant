@@ -2,12 +2,15 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.coverage
+.coverage.*
+coverage.json
 .benchmark-data/
 .venv/
 build/
 *.log
 
-# Keep the verified release executable intentionally; ignore other build output.
+# Release artifacts are generated locally and recorded by manifest/checksums.
 dist/*
 
 
@@ -18,4 +21,3 @@ dist/*
 *.db-wal
 models/
 diagnostics*.zip
-

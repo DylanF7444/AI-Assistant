@@ -38,16 +38,20 @@ def _setup_route(status: str) -> RouteResult | None:
             "select OneDrive, choose Connect Account, then sign in with Microsoft."
         )
     elif status == "disabled":
-        message = "OneDrive is installed but disabled. Open Skills, select OneDrive, and choose Enable."
+        message = (
+            "OneDrive is installed but disabled. Open Skills, select OneDrive, and choose Enable."
+        )
     else:
         message = "OneDrive is not installed. Open Extension Hub and install OneDrive first."
     return RouteResult(
-        Intent(name="conversation.answer", arguments={"text": message}, confidence=0.99, source="rule")
+        Intent(
+            name="conversation.answer", arguments={"text": message}, confidence=0.99, source="rule"
+        )
     )
 
 
 class OneDriveHandler:
-    """Route explicit read-only OneDrive discovery requests without an LLM."""
+    """Route explicit deterministic OneDrive discovery requests without an LLM."""
 
     def route(self, context: RouteContext, router: DeterministicRouter) -> RouteResult | None:
         raw = re.sub(r"[.?!]+$", "", context.text.strip())

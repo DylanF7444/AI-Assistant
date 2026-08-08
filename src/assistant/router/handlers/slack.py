@@ -30,7 +30,7 @@ def _setup_route(status: str) -> RouteResult | None:
     if status == "disconnected":
         message = (
             "Slack is installed but no token is connected. Open Extension Hub, select Slack, "
-            "choose Connect Account, and enter a read-only Slack user token."
+            "choose Connect Account, and enter a Slack token with the reviewed scopes."
         )
     elif status == "disabled":
         message = "Slack is installed but disabled. Open Skills, select Slack, and choose Enable."
@@ -39,12 +39,14 @@ def _setup_route(status: str) -> RouteResult | None:
     else:
         message = "Slack is not installed. Open Extension Hub and install Slack first."
     return RouteResult(
-        Intent(name="conversation.answer", arguments={"text": message}, confidence=0.99, source="rule")
+        Intent(
+            name="conversation.answer", arguments={"text": message}, confidence=0.99, source="rule"
+        )
     )
 
 
 class SlackHandler:
-    """Route explicit read-only Slack requests without an LLM."""
+    """Route explicit deterministic Slack reads without an LLM."""
 
     def route(self, context: RouteContext, router: DeterministicRouter) -> RouteResult | None:
         raw = re.sub(r"[.?!]+$", "", context.text.strip())
@@ -64,8 +66,12 @@ class SlackHandler:
                 query = match.group(1).strip(" \"'")
                 if query:
                     return _intent("search_messages", query=query, max_results=25)
-        if re.fullmatch(r"(?:show|list|check)\s+(?:my\s+)?slack\s+(?:channels?|conversations?)", routed):
+        if re.fullmatch(
+            r"(?:show|list|check)\s+(?:my\s+)?slack\s+(?:channels?|conversations?)", routed
+        ):
             return _intent("list_conversations", max_results=25)
         if re.fullmatch(r"(?:show|list|check)\s+(?:my\s+)?slack", routed):
-            return RouteResult(None, clarification="Should I search Slack messages or list Slack conversations?")
+            return RouteResult(
+                None, clarification="Should I search Slack messages or list Slack conversations?"
+            )
         return None

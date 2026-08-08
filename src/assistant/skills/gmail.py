@@ -150,9 +150,7 @@ class GmailInput(BaseModel):
             raise ValueError("reply_message requires body")
         if self.operation in {"modify_message", "modify_thread"}:
             if not (self.add_label_ids or self.remove_label_ids):
-                raise ValueError(
-                    f"{self.operation} requires add_label_ids or remove_label_ids"
-                )
+                raise ValueError(f"{self.operation} requires add_label_ids or remove_label_ids")
             overlap = set(self.add_label_ids) & set(self.remove_label_ids)
             if overlap:
                 raise ValueError("The same label cannot be added and removed")
@@ -233,9 +231,7 @@ class GmailSkill(Skill):
         else:
             primary = PermissionScope(
                 capability=(
-                    "integration.read"
-                    if args.operation in READ_OPERATIONS
-                    else "integration.write"
+                    "integration.read" if args.operation in READ_OPERATIONS else "integration.write"
                 ),
                 targets=(_permission_target(args),),
                 reason=f"Allow Gmail operation {args.operation} on this exact target.",
@@ -251,7 +247,9 @@ class GmailSkill(Skill):
 
     async def preview(self, call: SkillCall) -> str:
         args = self.validate(call.arguments)
-        target = _send_target(args) if args.operation in SEND_OPERATIONS else _permission_target(args)
+        target = (
+            _send_target(args) if args.operation in SEND_OPERATIONS else _permission_target(args)
+        )
         return f"Gmail: {args.operation} on {target}"
 
     async def health(self) -> dict[str, Any]:
@@ -327,9 +325,7 @@ class GmailSkill(Skill):
                     "pageToken": args.page_token,
                 },
             )
-            payload["threads"] = await self._hydrate_threads(
-                payload.get("threads"), cancel_event
-            )
+            payload["threads"] = await self._hydrate_threads(payload.get("threads"), cancel_event)
             return payload
         if operation == "get_thread":
             payload = await self.adapter.request(
@@ -424,14 +420,10 @@ class GmailSkill(Skill):
             )
         if operation in {"trash_message", "untrash_message"}:
             action = "trash" if operation == "trash_message" else "untrash"
-            return await self.adapter.request(
-                "POST", f"{root}/messages/{message_id}/{action}"
-            )
+            return await self.adapter.request("POST", f"{root}/messages/{message_id}/{action}")
         if operation in {"trash_thread", "untrash_thread"}:
             action = "trash" if operation == "trash_thread" else "untrash"
-            return await self.adapter.request(
-                "POST", f"{root}/threads/{thread_id}/{action}"
-            )
+            return await self.adapter.request("POST", f"{root}/threads/{thread_id}/{action}")
         raise ValueError(f"Unsupported Gmail operation: {operation}")
 
     def _sender_address(self) -> str:
@@ -610,11 +602,7 @@ def _normalize_message(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_thread(payload: dict[str, Any]) -> dict[str, Any]:
-    normalized = {
-        key: payload[key]
-        for key in ("id", "historyId", "snippet")
-        if key in payload
-    }
+    normalized = {key: payload[key] for key in ("id", "historyId", "snippet") if key in payload}
     messages = payload.get("messages")
     if isinstance(messages, list):
         normalized["messages"] = [
@@ -715,7 +703,9 @@ def _result_item(item: dict[str, Any], index: int) -> RequestResultItem:
             message = last
     headers = message.get("headers", {}) if isinstance(message, dict) else {}
     subject = headers.get("subject") if isinstance(headers, dict) else None
-    title = str(subject or item.get("name") or item.get("emailAddress") or item.get("id") or "Gmail item")
+    title = str(
+        subject or item.get("name") or item.get("emailAddress") or item.get("id") or "Gmail item"
+    )
     description = _message_description(message if isinstance(message, dict) else item)
     return RequestResultItem(
         item_id=f"gmail-{index}-{_short_id(item)}",
@@ -760,11 +750,17 @@ def _display(operation: str, resources: list[dict[str, Any]]) -> str:
     if operation == "create_draft":
         return "The email draft was saved in Gmail."
     if not resources:
-        return "No matching Gmail items were found." if operation.startswith("list_") else f"Gmail {operation} completed."
+        return (
+            "No matching Gmail items were found."
+            if operation.startswith("list_")
+            else f"Gmail {operation} completed."
+        )
     lines: list[str] = []
     for item in resources[:50]:
         result = _result_item(item, len(lines) + 1)
-        lines.append(f"- {result.title}" + (f"\n  {result.description}" if result.description else ""))
+        lines.append(
+            f"- {result.title}" + (f"\n  {result.description}" if result.description else "")
+        )
     return "\n".join(lines)
 
 

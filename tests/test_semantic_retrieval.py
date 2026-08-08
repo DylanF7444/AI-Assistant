@@ -42,7 +42,11 @@ class FakeEmbeddingProvider:
 
 
 class KeywordEmbeddingProvider:
+    def __init__(self):
+        self.calls = []
+
     async def embed(self, texts):
+        self.calls.append(tuple(texts))
         vectors = []
         for text in texts:
             folded = text.casefold()
@@ -209,6 +213,47 @@ async def test_skill_semantic_indexer_indexes_enabled_skills_and_examples(tmp_pa
         ("skill", "windows.application_window"),
         ("skill_example", "windows.application_window"),
     }
+
+
+@pytest.mark.asyncio
+async def test_skill_index_signature_survives_indexer_restart_without_reembedding(tmp_path):
+    database = Database(f"sqlite:///{tmp_path / 'data.db'}")
+    database.migrate()
+    registry = SkillRegistry(require_signatures=False)
+    registry.register(CalculatorSkill())
+    index = VectorIndex(database)
+    provider = KeywordEmbeddingProvider()
+
+    await SkillSemanticIndexer(index, provider, examples=()).refresh(registry)
+    first_call_count = len(provider.calls)
+    await SkillSemanticIndexer(index, provider, examples=()).refresh(registry)
+
+    assert first_call_count == 1
+    assert len(provider.calls) == first_call_count
+    assert index.stored_signature("skills")
+
+
+@pytest.mark.asyncio
+async def test_semantic_retriever_drops_namespace_specific_low_scores(tmp_path):
+    database = Database(f"sqlite:///{tmp_path / 'data.db'}")
+    database.migrate()
+    index = VectorIndex(database)
+    index.upsert(
+        namespace="knowledge",
+        source_id="unrelated",
+        text="Unrelated content",
+        metadata={},
+        embedding=[0.0, 1.0],
+        embedding_model="test",
+    )
+    provider = FakeEmbeddingProvider({"question": [1.0, 0.0]})
+
+    results = await SemanticRetriever(index, provider).search(
+        "question",
+        namespaces={"knowledge"},
+    )
+
+    assert results == ()
 
 
 @pytest.mark.asyncio

@@ -103,11 +103,7 @@ class SessionContextProvider:
             self.selected_result_item()
             if self.selected_result_item is not None
             else next(
-                (
-                    item
-                    for item in generic_items
-                    if item.kind == "file" and item.value == selected
-                ),
+                (item for item in generic_items if item.kind == "file" and item.value == selected),
                 None,
             )
         )
@@ -223,9 +219,7 @@ def _recent_result_context(
                     "reference": f"item {index}",
                     "item_id": item.item_id[:80],
                     "kind": item.kind[:50],
-                    "title": (
-                        "[sensitive item]" if item.sensitive else item.title[:limit]
-                    ),
+                    "title": ("[sensitive item]" if item.sensitive else item.title[:limit]),
                 }
                 for index, item in enumerate(items[:20], 1)
             ],
@@ -889,10 +883,7 @@ async def collect_context_snapshot(
             if item.sensitivity == "sensitive" and not budget.include_sensitive:
                 continue
             value_size = budget.value_size(item.value)
-            if (
-                value_size > budget.max_item_value_chars
-                and item.key != "results.selected"
-            ):
+            if value_size > budget.max_item_value_chars and item.key != "results.selected":
                 item = item.model_copy(
                     update={
                         "value": str(item.value)[: budget.max_item_value_chars],

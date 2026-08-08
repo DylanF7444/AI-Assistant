@@ -15,7 +15,7 @@ This is a Python 3.12 project using a `src/` layout. Core application code lives
 
 ## Coding Style & Naming Conventions
 
-Follow idiomatic Python with 4-space indentation, type-focused interfaces, and clear module boundaries. Keep imports explicit and prefer existing package patterns over new abstractions. Use `snake_case` for modules, functions, variables, and test names; use `PascalCase` for classes and Pydantic models. There is no formatter or linter configured in `pyproject.toml`, so keep changes locally consistent with surrounding code.
+Follow idiomatic Python with 4-space indentation, type-focused interfaces, and clear module boundaries. Keep imports explicit and prefer existing package patterns over new abstractions. Use `snake_case` for modules, functions, variables, and test names; use `PascalCase` for classes and Pydantic models. Ruff formatting and lint rules are configured in `pyproject.toml`; run both checks before submitting changes.
 
 ## Testing Guidelines
 

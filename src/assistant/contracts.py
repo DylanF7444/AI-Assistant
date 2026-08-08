@@ -529,6 +529,57 @@ class ConfirmationRequest(StrictModel):
     requires_typed_token: bool = False
 
 
+class CitationSourceType(StrEnum):
+    WEB = "web"
+    LOCAL_KNOWLEDGE = "local_knowledge"
+    LOCAL_DOCUMENT = "local_document"
+    SKILL_RESULT = "skill_result"
+
+
+class ResponseCitation(StrictModel):
+    source_id: str = Field(min_length=1, max_length=200)
+    title: str = Field(min_length=1, max_length=500)
+    source_type: CitationSourceType
+    url: str | None = Field(default=None, max_length=2_000)
+    local_reference: str | None = Field(default=None, min_length=1, max_length=500)
+    item_id: str | None = Field(default=None, min_length=1, max_length=100)
+    excerpt_locator: str | None = Field(default=None, min_length=1, max_length=300)
+    namespace: str | None = Field(default=None, min_length=1, max_length=80)
+    score: float | None = Field(default=None, ge=-1, le=1)
+    sensitive: bool = False
+    accessed_at: datetime = Field(default_factory=utcnow)
+
+    @model_validator(mode="after")
+    def _source_reference_is_safe(self) -> ResponseCitation:
+        if self.source_type == CitationSourceType.WEB:
+            if self.url is None:
+                raise ValueError("Web citations require a URL")
+            parsed = urlparse(self.url)
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError(
+                    "Citation URLs must be sanitized HTTPS URLs without credentials, query, or fragment"
+                )
+        elif self.url is not None:
+            raise ValueError("Only web citations may contain a URL")
+        if (
+            self.source_type
+            in {
+                CitationSourceType.LOCAL_KNOWLEDGE,
+                CitationSourceType.LOCAL_DOCUMENT,
+            }
+            and not self.local_reference
+        ):
+            raise ValueError("Local citations require an opaque local reference")
+        return self
+
+
 class Response(StrictModel):
     display_text: str
     speech_text: str | None = None
@@ -541,6 +592,7 @@ class Response(StrictModel):
     visual_artifact: VisualArtifact | None = None
     items: tuple[RequestResultItem, ...] = ()
     selected_item_id: str | None = None
+    citations: tuple[ResponseCitation, ...] = ()
 
     @model_validator(mode="after")
     def _selected_item_is_in_response_items(self) -> Response:
@@ -548,6 +600,9 @@ class Response(StrictModel):
             item.item_id for item in self.items
         }:
             raise ValueError("selected_item_id must identify one of the response items")
+        source_ids = [citation.source_id for citation in self.citations]
+        if len(source_ids) != len(set(source_ids)):
+            raise ValueError("response citation source IDs must be unique")
         return self
 
 

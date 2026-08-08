@@ -121,6 +121,8 @@ class PassiveVoiceWorker(QThread):
                 settings.voice_activation_keyword,
             )
         if request is None and not clap_detected:
+            if transcript is not None:
+                self.container.orchestrator.discard_voice_interaction(transcript.session_id)
             return
         if request:
             result = await self.container.orchestrator.handle_text(
@@ -129,6 +131,7 @@ class PassiveVoiceWorker(QThread):
                     str(transcript.session_id) if transcript is not None else "voice-activation"
                 ),
                 invoked_by_voice=True,
+                correlation_id=transcript.session_id if transcript is not None else None,
             )
             self.request_transcript.emit(request)
             self.complete.emit(result)

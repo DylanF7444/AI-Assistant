@@ -8,17 +8,19 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field, model_validator
 
-from assistant.contracts import ResultStatus, RiskLevel, SkillCall, SkillResult
+from assistant.contracts import PermissionScope, ResultStatus, RiskLevel, SkillCall, SkillResult
 from assistant.logic.contracts import LogicWorkflowDraft
 from assistant.scheduling.authoring import ScheduleAuthoringService
 from assistant.scheduling.contracts import (
     DeliveryPolicy,
+    EventTrigger,
     OneTimeTrigger,
     RecurrenceTrigger,
     RunPolicy,
     ScheduledTrigger,
     ScheduleStatus,
 )
+from assistant.scheduling.observations import trigger_permissions
 from assistant.scheduling.store import ScheduleStore
 from assistant.skills.base import Skill
 from assistant.skills.builtin import manifest
@@ -32,6 +34,13 @@ class RecurrenceInput(BaseModel):
     day_of_month: int | None = Field(default=None, ge=1, le=31)
     timezone: str | None = None
     end_at: datetime | None = None
+
+
+class EventTriggerInput(BaseModel):
+    observation_type: Literal["file", "calendar", "process", "device", "web"]
+    target: str = Field(min_length=1, max_length=2_000)
+    events: tuple[str, ...] = Field(min_length=1, max_length=10)
+    minimum_interval_seconds: int = Field(default=30, ge=1, le=86_400)
 
 
 class ScheduleManagementInput(BaseModel):
@@ -55,6 +64,7 @@ class ScheduleManagementInput(BaseModel):
     name: str | None = None
     message: str | None = None
     recurrence: RecurrenceInput | None = None
+    event: EventTriggerInput | None = None
     run_at: datetime | None = None
     delay_seconds: float | None = Field(default=None, gt=0, le=31_536_000)
     skill_id: str | None = None
@@ -78,7 +88,7 @@ class ScheduleManagementInput(BaseModel):
             or not self.skill_id
             or sum(
                 value is not None
-                for value in (self.recurrence, self.run_at, self.delay_seconds)
+                for value in (self.recurrence, self.run_at, self.delay_seconds, self.event)
             )
             != 1
         ):
@@ -90,7 +100,7 @@ class ScheduleManagementInput(BaseModel):
             or not self.macro_name
             or sum(
                 value is not None
-                for value in (self.recurrence, self.run_at, self.delay_seconds)
+                for value in (self.recurrence, self.run_at, self.delay_seconds, self.event)
             )
             != 1
         ):
@@ -102,7 +112,7 @@ class ScheduleManagementInput(BaseModel):
             or self.workflow is None
             or sum(
                 value is not None
-                for value in (self.recurrence, self.run_at, self.delay_seconds)
+                for value in (self.recurrence, self.run_at, self.delay_seconds, self.event)
             )
             != 1
         ):
@@ -158,10 +168,28 @@ class ScheduleSkill(Skill):
             description=(
                 "Create recurring reminders and list, inspect, pause, resume, update, "
                 "delete, snooze, or run configured schedules. It can author bounded guarded "
-                "workflows with conditions, deterministic selection, retries, and stop limits."
+                "workflows with conditions, deterministic selection, retries, stop limits, and "
+                "typed file, calendar, process, device, or web-change triggers."
             ),
             input_model=self.input_model,
             output_model=self.output_model,
+        )
+
+    def required_permissions(self, call: SkillCall) -> tuple[PermissionScope, ...]:
+        args = self.validate(call.arguments)
+        if args.event is None or args.operation not in {
+            "create_action",
+            "create_macro",
+            "create_logic",
+        }:
+            return ()
+        return trigger_permissions(
+            EventTrigger(
+                observation_type=args.event.observation_type,
+                target=args.event.target,
+                events=args.event.events,
+                minimum_interval_seconds=args.event.minimum_interval_seconds,
+            )
         )
 
     async def preview(self, call: SkillCall) -> str:
@@ -362,6 +390,13 @@ class ScheduleSkill(Skill):
         )
 
     def _trigger_value(self, args: ScheduleManagementInput) -> ScheduledTrigger:
+        if args.event is not None:
+            return EventTrigger(
+                observation_type=args.event.observation_type,
+                target=args.event.target,
+                events=args.event.events,
+                minimum_interval_seconds=args.event.minimum_interval_seconds,
+            )
         if args.run_at is not None:
             return OneTimeTrigger(run_at=args.run_at)
         if args.delay_seconds is not None:

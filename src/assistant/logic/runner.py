@@ -151,8 +151,7 @@ class LogicWorkflowRunner:
             schedule_id=schedule.schedule_id,
             revision=schedule.revision,
             completion=workflow.completion,
-            succeeded=outcome.result.status == ResultStatus.COMPLETED
-            and outcome.action_executed,
+            succeeded=outcome.result.status == ResultStatus.COMPLETED and outcome.action_executed,
             condition_met=outcome.condition_met,
             choice_id=outcome.choice_id,
             observed_at=self.clock.now(),

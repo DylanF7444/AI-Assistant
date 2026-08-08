@@ -45,18 +45,32 @@ async def test_default_dashboard_aggregates_privacy_bounded_local_metrics(settin
         stage="request.total",
         duration_ms=100,
         outcome="answer",
+        dimensions={"interaction": "typed"},
     )
     container.metrics.record(
         correlation_id="failed",
         stage="request.total",
         duration_ms=300,
         outcome="error",
+        dimensions={"interaction": "voice"},
     )
     container.metrics.record(
         correlation_id="completed",
         stage="model.total",
         duration_ms=40,
         outcome="planner.grounded",
+    )
+    container.metrics.record(
+        correlation_id="resource",
+        stage="resource.memory",
+        value=128 * 1024 * 1024,
+        outcome="sampled",
+    )
+    container.metrics.record(
+        correlation_id="resource",
+        stage="resource.queue_depth",
+        value=2,
+        outcome="sampled",
     )
     container.metrics.record(
         correlation_id="failed",
@@ -73,9 +87,11 @@ async def test_default_dashboard_aggregates_privacy_bounded_local_metrics(settin
     assert [card.metric_id for card in layout.cards] == [
         "assistant.status",
         "assistant.request_outcomes",
-        "assistant.request_latency",
+        "assistant.typed_request_latency",
+        "assistant.voice_request_latency",
         "assistant.model_latency",
         "assistant.execution_latency",
+        "assistant.resource_usage",
         "automations.summary",
         "tasks.summary",
         "assistant.recent_activity",
@@ -83,12 +99,16 @@ async def test_default_dashboard_aggregates_privacy_bounded_local_metrics(settin
     assert SettingsStore(container.database).get(DashboardLayoutStore.KEY) is not None
     assert by_metric["assistant.status"].value == "Thinking"
     assert by_metric["assistant.request_outcomes"].value == 2
-    assert by_metric["assistant.request_latency"].value == 200
-    assert "p95 300.0 ms" in by_metric["assistant.request_latency"].summary
+    assert by_metric["assistant.typed_request_latency"].value == 100
+    assert "p95 100.0 ms" in by_metric["assistant.typed_request_latency"].summary
+    assert by_metric["assistant.voice_request_latency"].value == 300
+    assert "p95 300.0 ms" in by_metric["assistant.voice_request_latency"].summary
     assert by_metric["assistant.model_latency"].value == 50
     assert "p95 60.0 ms" in by_metric["assistant.model_latency"].summary
     assert by_metric["assistant.execution_latency"].value == 50
     assert "p95 80.0 ms" in by_metric["assistant.execution_latency"].summary
+    assert by_metric["assistant.resource_usage"].value == 128
+    assert "2 active requests" in by_metric["assistant.resource_usage"].summary
     assert by_metric["automations.summary"].state == MetricState.READY
     assert by_metric["tasks.summary"].state == MetricState.EMPTY
     assert by_metric["assistant.recent_activity"].value == "Failed"

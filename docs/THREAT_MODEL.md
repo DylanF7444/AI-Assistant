@@ -19,10 +19,12 @@ transcripts, permissions, and the integrity of audit records.
   cannot grant authority or weaken policy. Playbooks are not interpreted by the
   unattended scheduler.
 - Malicious skills: new skills default disabled/no permissions. Manifests,
-  duplicate IDs, API versions, schemas, timeouts, and capability expansion are
-  reviewed. Packages require trusted Ed25519 signatures and execute in a
-  subprocess with timeout, memory, process-count, CPU, and outbound-network
-  limits.
+  duplicate IDs, API versions, schemas, timeouts, capability expansion, archive
+  bounds, path traversal, symlinks, signer metadata, and revoked signer IDs are
+  reviewed. Core and first-party managed code may run in process. Downloaded
+  Python packages are blocked by default; a reviewed-worker opt-in is available
+  only for controlled development because process/Job limits are not an OS
+  security sandbox. Native downloaded extensions remain blocked.
 - Confused confirmation: confirmation stores the exact call digest,
   correlation ID, targets, risk, and expiration. It is consumed once.
 - Filesystem escape: permissions compare resolved targets against approved
@@ -74,6 +76,23 @@ transcripts, permissions, and the integrity of audit records.
 - Restored data: background authorizations are tied to a non-secret digest of
   the local machine identity. A database restored elsewhere moves affected
   schedules to pending review.
+- Document and image disclosure: content extraction requires the separate
+  exact-target `filesystem.content.read` grant. Folder indexing requires a
+  second retention grant, is bounded, detects modified/deleted files, and can be
+  cleared independently. Citations use opaque references and sanitized
+  locators. Visual understanding accepts one explicit file and has no screen,
+  camera, clipboard, or input path.
+- Consequential provider writes: each write operation uses a narrow schema,
+  exact target, fixed provider origin, operation-specific permission, preview,
+  confirmation, and non-retryable execution. Transfers refuse overwrite;
+  Outlook sends only an existing draft; unsupported bulk/destructive operations
+  are absent from the schema.
+- Event-monitor abuse: observation types have separate exact-target scopes and
+  minimum polling intervals. Sources retain bounded filename/process/device/
+  calendar metadata or hashes, not document/web bodies or process command
+  lines. Public-HTTPS checks reject credentials and private targets, discard
+  query/fragment before persistence, obey offline lock, and cannot execute an
+  action outside the frozen schedule authorization.
 
 ## Non-guarantees
 

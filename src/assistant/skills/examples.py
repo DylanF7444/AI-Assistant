@@ -60,6 +60,89 @@ DEFAULT_SKILL_EXAMPLES: tuple[SkillExample, ...] = (
         arguments={"operation": "list_calendars", "max_results": 50},
     ),
     SkillExample(
+        utterance=(
+            r"Upload C:\Reports\final.pdf to Google Drive folder 1AbC and name it final.pdf"
+        ),
+        skill_id="integration.google_drive",
+        arguments={
+            "operation": "upload",
+            "local_path": r"C:\Reports\final.pdf",
+            "parent_id": "1AbC",
+            "name": "final.pdf",
+        },
+        notes="Uploads name one explicit local source and exact Drive parent; overwrite is excluded.",
+    ),
+    SkillExample(
+        utterance="Create an Outlook draft to alex@example.com about the launch review",
+        skill_id="integration.outlook_mail",
+        arguments={
+            "operation": "create_draft",
+            "recipients": ["alex@example.com"],
+            "subject": "Launch review",
+            "body": "Please review the launch plan.",
+        },
+        notes="Creating a draft never implies sending it; sending is a separate confirmed action.",
+    ),
+    SkillExample(
+        utterance="Send Outlook draft AAMk123",
+        skill_id="integration.outlook_mail",
+        arguments={"operation": "send_draft", "message_id": "AAMk123"},
+        notes="Only an exact existing draft ID can be sent, after a high-risk confirmation.",
+    ),
+    SkillExample(
+        utterance="Post deployment is complete to Slack channel C012345",
+        skill_id="integration.slack",
+        arguments={
+            "operation": "post_message",
+            "channel_id": "C012345",
+            "text": "Deployment is complete",
+        },
+        notes="Slack writes require an exact channel ID and show the exact message before sending.",
+    ),
+    SkillExample(
+        utterance="Create a Notion page called Launch Notes under page abc123",
+        skill_id="integration.notion",
+        arguments={
+            "operation": "create_page",
+            "resource_id": "abc123",
+            "title": "Launch Notes",
+            "content": "Launch notes",
+        },
+        notes="Notion creation is limited to one exact parent and bounded initial content.",
+    ),
+    SkillExample(
+        utterance="Create a GitHub issue in acme/widgets titled Startup crash",
+        skill_id="integration.github",
+        arguments={
+            "operation": "create_issue",
+            "owner": "acme",
+            "repo": "widgets",
+            "title": "Startup crash",
+            "body": "The application crashes during startup.",
+        },
+        notes="Issue creation targets one explicit repository and is confirmed before mutation.",
+    ),
+    SkillExample(
+        utterance=(
+            r"When a PDF is created under C:\Incoming, run windows.notification with "
+            "title New PDF and message A PDF arrived"
+        ),
+        skill_id="automation.schedule",
+        arguments={
+            "operation": "create_action",
+            "name": "New PDF notification",
+            "skill_id": "windows.notification",
+            "arguments": {"title": "New PDF", "message": "A PDF arrived"},
+            "event": {
+                "observation_type": "file",
+                "target": r"C:\Incoming",
+                "events": ["created"],
+                "minimum_interval_seconds": 30,
+            },
+        },
+        notes="Event schedules freeze one typed action and require exact monitor and action scopes.",
+    ),
+    SkillExample(
         utterance="Give me a briefing on the latest news about AI and the economy",
         skill_id="web.news_search",
         arguments={
@@ -160,6 +243,39 @@ DEFAULT_SKILL_EXAMPLES: tuple[SkillExample, ...] = (
         notes="Requires a target folder and a preview before moving files.",
         requires_clarification=True,
         clarification="Which folder should I organize?",
+    ),
+    SkillExample(
+        utterance="summarize this local PDF",
+        skill_id="documents.read",
+        arguments={"operation": "summarize", "paths": ["the selected file"]},
+        notes="Reading a document body is separately permissioned from filename search.",
+    ),
+    SkillExample(
+        utterance="index document contents in my project folder",
+        skill_id="documents.content_search",
+        arguments={"operation": "index", "root": "the selected project folder"},
+        notes="Persistent content indexing requires an explicit root and distinct retention grant.",
+    ),
+    SkillExample(
+        utterance="search my indexed project documents for launch risks",
+        skill_id="documents.content_search",
+        arguments={
+            "operation": "search",
+            "root": "the selected project folder",
+            "query": "launch risks",
+        },
+    ),
+    SkillExample(
+        utterance="read the text in this screenshot",
+        skill_id="vision.understand_image",
+        arguments={"operation": "ocr", "path": "the selected screenshot"},
+        notes="Visual analysis only reads an explicitly selected image; it never captures a screen.",
+    ),
+    SkillExample(
+        utterance="explain this error dialog",
+        skill_id="vision.understand_image",
+        arguments={"operation": "explain_error", "path": "the selected screenshot"},
+        notes="Guidance is descriptive and cannot click, type, or expand input-control authority.",
     ),
     SkillExample(
         utterance="put Brave on my second monitor",

@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from assistant.storage.database import Database, VectorItemRow, now
+from assistant.storage.database import Database, SettingsStore, VectorItemRow, now
 
 
 @dataclass(frozen=True)
@@ -75,6 +75,64 @@ class VectorIndex:
     def delete_namespace(self, namespace: str) -> None:
         with self.database.session() as session:
             session.query(VectorItemRow).filter(VectorItemRow.namespace == namespace).delete()
+
+    def delete_sources(self, namespace: str, source_ids: set[str]) -> int:
+        if not source_ids:
+            return 0
+        with self.database.session() as session:
+            return (
+                session.query(VectorItemRow)
+                .filter(
+                    VectorItemRow.namespace == namespace,
+                    VectorItemRow.source_id.in_(sorted(source_ids)),
+                )
+                .delete(synchronize_session=False)
+            )
+
+    def items_where(self, namespace: str, **metadata: Any) -> tuple[VectorSearchResult, ...]:
+        with self.database.session() as session:
+            rows = list(
+                session.scalars(select(VectorItemRow).where(VectorItemRow.namespace == namespace))
+            )
+        return tuple(
+            VectorSearchResult(
+                namespace=row.namespace,
+                source_id=row.source_id,
+                text=row.text,
+                metadata=json.loads(row.metadata_json or "{}"),
+                score=1.0,
+            )
+            for row in rows
+            if all(
+                json.loads(row.metadata_json or "{}").get(key) == value
+                for key, value in metadata.items()
+            )
+        )
+
+    def delete_where(self, namespace: str, **metadata: Any) -> int:
+        records = self.items_where(namespace, **metadata)
+        return self.delete_sources(namespace, {record.source_id for record in records})
+
+    def stored_signature(self, group: str) -> str | None:
+        value = SettingsStore(self.database).get(f"vector_index.signature.{group}")
+        return value if isinstance(value, str) else None
+
+    def store_signature(self, group: str, signature: str) -> None:
+        SettingsStore(self.database).set(f"vector_index.signature.{group}", signature)
+
+    def namespace_count(self, namespaces: set[str]) -> int:
+        if not namespaces:
+            return 0
+        with self.database.session() as session:
+            return len(
+                list(
+                    session.scalars(
+                        select(VectorItemRow.id).where(
+                            VectorItemRow.namespace.in_(sorted(namespaces))
+                        )
+                    )
+                )
+            )
 
     def search(
         self,

@@ -28,14 +28,18 @@ def _setup_route(status: str) -> RouteResult | None:
     if status == "enabled":
         return None
     if status == "disconnected":
-        message = "Notion is installed but no token is connected. Open Extension Hub, select Notion, and connect a read-only token."
+        message = "Notion is installed but no token is connected. Open Extension Hub, select Notion, and connect a token with the reviewed page scopes."
     elif status == "disabled":
         message = "Notion is installed but disabled. Open Skills, select Notion, and choose Enable."
     elif status == "reauthorization_required":
         message = "Notion needs a new token or additional page access. Open Extension Hub and manage Notion."
     else:
         message = "Notion is not installed. Open Extension Hub and install Notion first."
-    return RouteResult(Intent(name="conversation.answer", arguments={"text": message}, confidence=0.99, source="rule"))
+    return RouteResult(
+        Intent(
+            name="conversation.answer", arguments={"text": message}, confidence=0.99, source="rule"
+        )
+    )
 
 
 class NotionHandler:
@@ -57,5 +61,7 @@ class NotionHandler:
                 if query:
                     return _intent("search", query=query, page_size=25)
         if re.fullmatch(r"(?:search|find|show|list)\s+(?:my\s+)?notion", routed):
-            return RouteResult(None, clarification="What page or data source should I search for in Notion?")
+            return RouteResult(
+                None, clarification="What page or data source should I search for in Notion?"
+            )
         return None

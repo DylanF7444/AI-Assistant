@@ -28,14 +28,18 @@ def _setup_route(status: str) -> RouteResult | None:
     if status == "enabled":
         return None
     if status == "disconnected":
-        message = "GitHub is installed but no token is connected. Open Extension Hub, select GitHub, and connect a read-only token."
+        message = "GitHub is installed but no token is connected. Open Extension Hub, select GitHub, and connect a fine-grained token with the reviewed repository scopes."
     elif status == "disabled":
         message = "GitHub is installed but disabled. Open Skills, select GitHub, and choose Enable."
     elif status == "reauthorization_required":
         message = "GitHub needs a new token or additional repository access. Open Extension Hub and manage GitHub."
     else:
         message = "GitHub is not installed. Open Extension Hub and install GitHub first."
-    return RouteResult(Intent(name="conversation.answer", arguments={"text": message}, confidence=0.99, source="rule"))
+    return RouteResult(
+        Intent(
+            name="conversation.answer", arguments={"text": message}, confidence=0.99, source="rule"
+        )
+    )
 
 
 class GitHubHandler:
@@ -63,7 +67,11 @@ class GitHubHandler:
             raw,
             flags=re.IGNORECASE,
         ):
-            return _intent("list_issues", owner=match.group("owner"), repo=match.group("repo"), max_results=25)
+            return _intent(
+                "list_issues", owner=match.group("owner"), repo=match.group("repo"), max_results=25
+            )
         if re.fullmatch(r"(?:search|find|show|list)\s+(?:my\s+)?github", routed):
-            return RouteResult(None, clarification="Should I search GitHub repositories or list your repositories?")
+            return RouteResult(
+                None, clarification="Should I search GitHub repositories or list your repositories?"
+            )
         return None

@@ -21,6 +21,7 @@ from assistant.dashboard.contracts import (
     ProviderConnection,
     ProviderHealth,
 )
+from assistant.observability import InteractionMode
 from assistant.scheduling.service import SchedulerService
 from assistant.storage.database import Database, ItemRow, MetricsStore
 
@@ -42,9 +43,11 @@ def default_dashboard_layout() -> DashboardLayout:
     metrics = (
         ("assistant.status", MetricPresentation.STATUS),
         ("assistant.request_outcomes", MetricPresentation.NUMBER),
-        ("assistant.request_latency", MetricPresentation.DURATION),
+        ("assistant.typed_request_latency", MetricPresentation.DURATION),
+        ("assistant.voice_request_latency", MetricPresentation.DURATION),
         ("assistant.model_latency", MetricPresentation.DURATION),
         ("assistant.execution_latency", MetricPresentation.DURATION),
+        ("assistant.resource_usage", MetricPresentation.NUMBER),
         ("automations.summary", MetricPresentation.NUMBER),
         ("tasks.summary", MetricPresentation.NUMBER),
         ("assistant.recent_activity", MetricPresentation.STATUS),
@@ -106,7 +109,31 @@ class AssistantMetricsProvider:
                 metric_id="assistant.request_latency",
                 provider_id=self.provider_id,
                 display_name="Request latency",
-                description="End-to-end request duration from the last 24 hours.",
+                description="Combined post-transcript request duration from the last 24 hours.",
+                source_label="Local Assistant",
+                value_kind=MetricValueKind.DURATION,
+                unit="ms",
+                supported_presentations=(MetricPresentation.DURATION,),
+                default_presentation=MetricPresentation.DURATION,
+                supports_history=True,
+            ),
+            MetricDefinition(
+                metric_id="assistant.typed_request_latency",
+                provider_id=self.provider_id,
+                display_name="Typed request latency",
+                description="Typed request duration from the last 24 hours.",
+                source_label="Local Assistant",
+                value_kind=MetricValueKind.DURATION,
+                unit="ms",
+                supported_presentations=(MetricPresentation.DURATION,),
+                default_presentation=MetricPresentation.DURATION,
+                supports_history=True,
+            ),
+            MetricDefinition(
+                metric_id="assistant.voice_request_latency",
+                provider_id=self.provider_id,
+                display_name="Voice request latency",
+                description="Post-transcript voice request and playback duration.",
                 source_label="Local Assistant",
                 value_kind=MetricValueKind.DURATION,
                 unit="ms",
@@ -136,6 +163,18 @@ class AssistantMetricsProvider:
                 unit="ms",
                 supported_presentations=(MetricPresentation.DURATION,),
                 default_presentation=MetricPresentation.DURATION,
+                supports_history=True,
+            ),
+            MetricDefinition(
+                metric_id="assistant.resource_usage",
+                provider_id=self.provider_id,
+                display_name="Assistant resources",
+                description="Latest process memory and active request queue samples.",
+                source_label="Local Assistant",
+                value_kind=MetricValueKind.NUMBER,
+                unit="MB",
+                supported_presentations=(MetricPresentation.NUMBER,),
+                default_presentation=MetricPresentation.NUMBER,
                 supports_history=True,
             ),
             MetricDefinition(
@@ -191,6 +230,20 @@ class AssistantMetricsProvider:
                 stage="request.total",
                 empty_summary="No request samples in the last 24 hours.",
             )
+        if request.metric_id == "assistant.typed_request_latency":
+            return self._latency(
+                request,
+                stage="request.total",
+                empty_summary="No typed request samples in the last 24 hours.",
+                interaction=InteractionMode.TYPED,
+            )
+        if request.metric_id == "assistant.voice_request_latency":
+            return self._latency(
+                request,
+                stage="request.total",
+                empty_summary="No voice request samples in the last 24 hours.",
+                interaction=InteractionMode.VOICE,
+            )
         if request.metric_id == "assistant.model_latency":
             return self._latency(
                 request,
@@ -199,6 +252,8 @@ class AssistantMetricsProvider:
             )
         if request.metric_id == "assistant.execution_latency":
             return self._execution_latency(request)
+        if request.metric_id == "assistant.resource_usage":
+            return self._resource_usage(request)
         if request.metric_id == "assistant.recent_activity":
             return self._recent_activity(request)
         raise KeyError(request.metric_id)
@@ -255,14 +310,46 @@ class AssistantMetricsProvider:
             empty_summary="No execution samples in the last 24 hours.",
         )
 
+    def _resource_usage(self, request: MetricRequest) -> MetricSnapshot:
+        memory = self.metrics.latest(stages=("resource.memory",))
+        queue = self.metrics.latest(stages=("resource.queue_depth",))
+        if memory is None:
+            return MetricSnapshot(
+                metric_id=request.metric_id,
+                collected_at=datetime.now(UTC),
+                state=MetricState.EMPTY,
+                value=None,
+                unit="MB",
+                summary="No resource samples yet.",
+            )
+        memory_mb = float(memory["value"] or 0) / (1024 * 1024)
+        queue_depth = int(float(queue["value"] or 0)) if queue is not None else 0
+        return MetricSnapshot(
+            metric_id=request.metric_id,
+            collected_at=datetime.now(UTC),
+            state=MetricState.READY,
+            value=round(memory_mb, 1),
+            unit="MB",
+            summary=f"{memory_mb:.1f} MB working set  •  {queue_depth} active requests",
+            details=(
+                MetricDetail(label="Working set", value=f"{memory_mb:.1f} MB"),
+                MetricDetail(label="Active requests", value=str(queue_depth)),
+            ),
+        )
+
     def _latency(
         self,
         request: MetricRequest,
         *,
         stage: str,
         empty_summary: str,
+        interaction: InteractionMode | None = None,
     ) -> MetricSnapshot:
-        summary = self.metrics.duration_summary(since=request.since, stage=stage)
+        summary = self.metrics.stage_summary(
+            since=request.since,
+            stage=stage,
+            dimensions={"interaction": interaction} if interaction is not None else None,
+        )
         if not summary["count"]:
             return MetricSnapshot(
                 metric_id=request.metric_id,
@@ -282,6 +369,7 @@ class AssistantMetricsProvider:
             details=(
                 MetricDetail(label="Median", value=f"{summary['p50']:.1f} ms"),
                 MetricDetail(label="95th percentile", value=f"{summary['p95']:.1f} ms"),
+                MetricDetail(label="Errors / cancelled", value=str(summary["failed"])),
             ),
         )
 

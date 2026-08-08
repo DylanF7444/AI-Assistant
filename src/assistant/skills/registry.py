@@ -4,6 +4,7 @@ import importlib
 import shutil
 import tempfile
 from collections.abc import Callable
+from enum import StrEnum
 from pathlib import Path
 from typing import Literal
 
@@ -16,6 +17,13 @@ from assistant.skills.package import PackageVerifier
 from assistant.skills.subprocess import IsolatedSkill
 
 
+class ExtensionExecutionClass(StrEnum):
+    CORE_IN_PROCESS = "core_in_process"
+    MANAGED_IN_PROCESS = "managed_in_process"
+    REVIEWED_WORKER = "reviewed_worker"
+    BLOCKED_NATIVE = "blocked_native"
+
+
 class SkillRegistry:
     def __init__(
         self,
@@ -24,13 +32,39 @@ class SkillRegistry:
         trusted_signing_keys: dict[str, bytes] | None = None,
         require_signatures: bool = True,
         managed_skill_factories: dict[str, Callable[[], Skill]] | None = None,
+        revoked_signing_key_ids: set[str] | None = None,
+        allow_reviewed_worker_extensions: bool = False,
     ) -> None:
         self._skills: dict[str, Skill] = {}
         self._enabled: set[str] = set()
         self.install_dir = install_dir
-        self.verifier = PackageVerifier(trusted_signing_keys or {})
+        self.verifier = PackageVerifier(
+            trusted_signing_keys or {}, revoked_key_ids=revoked_signing_key_ids
+        )
         self.require_signatures = require_signatures
         self.managed_skill_factories = managed_skill_factories or {}
+        self.allow_reviewed_worker_extensions = allow_reviewed_worker_extensions
+
+    def extension_execution_class(self, skill_id: str) -> ExtensionExecutionClass:
+        if skill_id in self.managed_skill_factories:
+            return ExtensionExecutionClass.MANAGED_IN_PROCESS
+        if (
+            self.install_dir is not None
+            and (self.install_dir / skill_id / "manifest.json").is_file()
+        ):
+            return (
+                ExtensionExecutionClass.REVIEWED_WORKER
+                if self.allow_reviewed_worker_extensions
+                else ExtensionExecutionClass.BLOCKED_NATIVE
+            )
+        return ExtensionExecutionClass.CORE_IN_PROCESS
+
+    def _require_worker_extensions_enabled(self) -> None:
+        if not self.allow_reviewed_worker_extensions:
+            raise PermissionError(
+                "Downloaded Python extensions are blocked because this build has no "
+                "OS-enforced hostile-code sandbox. Use a reviewed first-party managed extension."
+            )
 
     def register(self, skill: Skill, *, enabled: bool = True) -> None:
         manifest = SkillManifest.model_validate(skill.manifest)
@@ -64,9 +98,7 @@ class SkillRegistry:
     def is_enabled(self, skill_id: str) -> bool:
         return skill_id in self._enabled
 
-    def availability(
-        self, skill_id: str
-    ) -> Literal["enabled", "disabled", "unavailable"]:
+    def availability(self, skill_id: str) -> Literal["enabled", "disabled", "unavailable"]:
         if skill_id in self._enabled:
             return "enabled"
         if skill_id in self._skills:
@@ -122,6 +154,7 @@ class SkillRegistry:
     def install(self, package_dir: Path) -> SkillManifest:
         if self.install_dir is None:
             raise RuntimeError("No skill install directory configured")
+        self._require_worker_extensions_enabled()
         manifest = self.validate_package(package_dir)
         target = self.install_dir / manifest.skill_id
         if target.exists():
@@ -157,6 +190,7 @@ class SkillRegistry:
     ) -> tuple[SkillManifest, tuple[str, ...]]:
         if self.install_dir is None:
             raise RuntimeError("No skill install directory configured")
+        self._require_worker_extensions_enabled()
         manifest = self.validate_package(package_dir)
         target = self.install_dir / manifest.skill_id
         if not target.is_dir():
@@ -214,6 +248,7 @@ class SkillRegistry:
                 raise ValueError("Managed extension manifest does not match its implementation")
             self.register(implementation, enabled=False)
             return implementation
+        self._require_worker_extensions_enabled()
         manifest = self.validate_package(package_dir)
         isolated = IsolatedSkill(
             package_dir,

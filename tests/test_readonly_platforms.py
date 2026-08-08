@@ -186,9 +186,21 @@ async def test_notion_search_uses_current_version_and_id_paths():
 async def test_github_reads_use_search_envelopes_and_fixed_repository_paths():
     adapter = RecordingAdapter(
         [
-            {"items": [{"id": 1, "full_name": "openai/assistant", "description": "Private"}], "total_count": 30},
+            {
+                "items": [{"id": 1, "full_name": "openai/assistant", "description": "Private"}],
+                "total_count": 30,
+            },
             {"full_name": "openai/assistant", "description": "Private"},
-            {"items": [{"number": 7, "title": "Bug", "html_url": "https://github.com/openai/assistant/issues/7"}], "total_count": 1},
+            {
+                "items": [
+                    {
+                        "number": 7,
+                        "title": "Bug",
+                        "html_url": "https://github.com/openai/assistant/issues/7",
+                    }
+                ],
+                "total_count": 1,
+            },
         ]
     )
     skill = GitHubSkill(adapter)
@@ -264,7 +276,9 @@ async def test_readonly_platform_extensions_are_visible_installable_and_restarta
         "integration.github": "github_api_token",
     }
     for extension_id in extension_ids:
-        assert any(item.extension_id == extension_id for item in container.extension_hub.catalog.extensions)
+        assert any(
+            item.extension_id == extension_id for item in container.extension_hub.catalog.extensions
+        )
         await container.extension_hub.install(extension_id)
     connection = container.extension_hub.connection_service("integration.slack")
     for secret_name in extension_ids.values():

@@ -1016,6 +1016,15 @@ def test_playbook_management_routes(text, arguments):
     assert result.intent.arguments == arguments
 
 
+@pytest.mark.parametrize("text", ["list my playbooks", "show my playbooks"])
+def test_playbook_list_accepts_possessive_phrasing(text):
+    result = DeterministicRouter().route(text)
+
+    assert not result.needs_llm
+    assert result.intent.name == "core.playbook"
+    assert result.intent.arguments == {"operation": "list"}
+
+
 def test_use_playbook_routes_to_open_ended_planner_goal():
     result = DeterministicRouter().route("Use playbook release-check to prepare version 2.0")
 

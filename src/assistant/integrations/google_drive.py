@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import mimetypes
 import time
 import urllib.parse
 import urllib.request
+import uuid
 import webbrowser
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from typing import Any
 
 from assistant.integrations.connections import ConnectionStatus, normalize_scopes
@@ -30,6 +32,7 @@ AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 DRIVE_METADATA_SCOPE = "https://www.googleapis.com/auth/drive.metadata.readonly"
 DRIVE_READ_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
 DEFAULT_GOOGLE_DRIVE_CLIENT_ID = DEFAULT_GOOGLE_CALENDAR_CLIENT_ID
 OAUTH_CLIENT_ID_NAME = "google_drive_oauth_client_id"
 OAUTH_CLIENT_SECRET_NAME = "google_drive_oauth_client_secret"
@@ -327,6 +330,8 @@ class GoogleDriveAdapter:
         timeout_seconds: float = 20,
     ) -> None:
         self.tokens = tokens
+        self.opener = opener
+        self.timeout_seconds = timeout_seconds
         self.client = ExternalJsonClient(
             API_ROOT,
             tokens,
@@ -354,6 +359,97 @@ class GoogleDriveAdapter:
             return {"healthy": True}
         except GoogleDriveError as error:
             return {"healthy": False, "error": error.reason}
+
+    async def download(self, file_id: str, *, max_bytes: int) -> bytes:
+        token = await self.tokens.access_token()
+        return await asyncio.to_thread(self._download_sync, file_id, token, max_bytes)
+
+    def _download_sync(self, file_id: str, token: str, max_bytes: int) -> bytes:
+        url = f"{API_ROOT}/files/{quote_id(file_id)}?alt=media"
+        request = urllib.request.Request(
+            url,
+            headers={"Authorization": f"Bearer {token}", "User-Agent": "LocalAssistant/0.1"},
+        )
+        try:
+            with self.opener(request, timeout=self.timeout_seconds) as response:
+                payload = response.read(max_bytes + 1)
+        except urllib.error.HTTPError as exc:
+            raise GoogleDriveError(exc.code, "Google Drive download failed.") from None
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            raise GoogleDriveError(
+                503, "Google Drive download could not be reached.", recoverable=True
+            ) from exc
+        if len(payload) > max_bytes:
+            raise GoogleDriveError(413, "Google Drive file exceeds the download safety limit.")
+        return payload
+
+    async def upload(
+        self,
+        *,
+        name: str,
+        payload: bytes,
+        parent_id: str | None = None,
+        mime_type: str | None = None,
+    ) -> dict[str, Any]:
+        token = await self.tokens.access_token()
+        return await asyncio.to_thread(
+            self._upload_sync, name, payload, parent_id, mime_type, token
+        )
+
+    def _upload_sync(
+        self,
+        name: str,
+        payload: bytes,
+        parent_id: str | None,
+        mime_type: str | None,
+        token: str,
+    ) -> dict[str, Any]:
+        boundary = f"assistant-{uuid.uuid4().hex}"
+        metadata: dict[str, Any] = {"name": name}
+        if parent_id:
+            metadata["parents"] = [parent_id]
+        content_type = mime_type or mimetypes.guess_type(name)[0] or "application/octet-stream"
+        body = (
+            (
+                f"--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n"
+                f"{json.dumps(metadata, separators=(',', ':'))}\r\n"
+                f"--{boundary}\r\nContent-Type: {content_type}\r\n\r\n"
+            ).encode()
+            + payload
+            + f"\r\n--{boundary}--\r\n".encode()
+        )
+        request = urllib.request.Request(
+            "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields="
+            + urllib.parse.quote(FILE_FIELDS, safe=","),
+            data=body,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": f"multipart/related; boundary={boundary}",
+                "Accept": "application/json",
+                "User-Agent": "LocalAssistant/0.1",
+            },
+        )
+        try:
+            with self.opener(request, timeout=self.timeout_seconds) as response:
+                raw = response.read(2 * 1024 * 1024 + 1)
+        except urllib.error.HTTPError as exc:
+            raise GoogleDriveError(exc.code, "Google Drive upload failed.") from None
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            raise GoogleDriveError(
+                503, "Google Drive upload could not be reached.", recoverable=True
+            ) from exc
+        if len(raw) > 2 * 1024 * 1024:
+            raise GoogleDriveError(502, "Google Drive returned an oversized upload response.")
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise GoogleDriveError(
+                502, "Google Drive returned an invalid upload response."
+            ) from exc
+        if not isinstance(value, dict):
+            raise GoogleDriveError(502, "Google Drive returned an invalid upload response.")
+        return value
 
 
 def quote_id(value: str) -> str:

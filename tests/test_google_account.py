@@ -18,7 +18,7 @@ from assistant.integrations.google import (
     GoogleTokenManager,
 )
 from assistant.integrations.google_calendar import CALENDAR_SCOPE
-from assistant.integrations.google_drive import DRIVE_READ_SCOPE
+from assistant.integrations.google_drive import DRIVE_FILE_SCOPE, DRIVE_READ_SCOPE
 
 
 class MemoryVault:
@@ -48,8 +48,10 @@ class Response(io.BytesIO):
 
 def _complete_callback(url: str) -> None:
     query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
-    callback = query["redirect_uri"][0] + "?" + urllib.parse.urlencode(
-        {"state": query["state"][0], "code": "authorization-code"}
+    callback = (
+        query["redirect_uri"][0]
+        + "?"
+        + urllib.parse.urlencode({"state": query["state"][0], "code": "authorization-code"})
     )
     with urllib.request.urlopen(callback, timeout=5):
         pass
@@ -88,15 +90,14 @@ async def test_google_extensions_share_one_connection_and_keep_scope_boundaries(
     await container.extension_hub.install("integration.gmail")
     await container.extension_hub.install("integration.google_drive")
 
-    assert container.extension_hub.connection_status(
-        "integration.google_calendar"
-    ).usable is True
+    assert container.extension_hub.connection_status("integration.google_calendar").usable is True
     assert container.extension_hub.connection_status("integration.gmail").missing_scopes == (
         GMAIL_SCOPE,
     )
-    assert container.extension_hub.connection_status(
-        "integration.google_drive"
-    ).missing_scopes == (DRIVE_READ_SCOPE,)
+    assert container.extension_hub.connection_status("integration.google_drive").missing_scopes == (
+        DRIVE_FILE_SCOPE,
+        DRIVE_READ_SCOPE,
+    )
 
 
 @pytest.mark.asyncio

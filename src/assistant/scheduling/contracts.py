@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, time
 from enum import StrEnum
 from typing import Annotated, Literal
+from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -128,7 +129,134 @@ class RecurrenceTrigger(StrictModel):
         return self
 
 
-ScheduledTrigger = Annotated[OneTimeTrigger | RecurrenceTrigger, Field(discriminator="kind")]
+class EventTrigger(StrictModel):
+    kind: Literal["event"] = "event"
+    observation_type: Literal["file", "calendar", "process", "device", "web"]
+    target: str = Field(min_length=1, max_length=2_000)
+    events: tuple[str, ...] = Field(min_length=1, max_length=10)
+    minimum_interval_seconds: int = Field(default=30, ge=1, le=86_400)
+
+    @field_validator("events")
+    @classmethod
+    def _events_are_bounded_identifiers(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        # The observation type is unavailable to a field validator, so the exact
+        # cross-field check is performed below.
+        if any(not item or len(item) > 40 for item in value):
+            raise ValueError("event names must be bounded identifiers")
+        return tuple(dict.fromkeys(value))
+
+    @model_validator(mode="after")
+    def _events_match_observation_type(self) -> EventTrigger:
+        allowed = {
+            "file": {"created", "modified", "deleted"},
+            "calendar": {"starting", "created", "updated", "deleted"},
+            "process": {"started", "stopped"},
+            "device": {"changed", "connected", "disconnected"},
+            "web": {"changed"},
+        }[self.observation_type]
+        unsupported = set(self.events) - allowed
+        if unsupported:
+            raise ValueError(
+                f"unsupported {self.observation_type} event(s): {', '.join(sorted(unsupported))}"
+            )
+        if self.observation_type == "web":
+            parsed = urlsplit(self.target)
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+            ):
+                raise ValueError("web event targets must use HTTPS without credentials")
+            object.__setattr__(
+                self,
+                "target",
+                urlunsplit(("https", parsed.hostname.casefold(), parsed.path or "/", "", "")),
+            )
+        return self
+
+
+class FileObservation(StrictModel):
+    observation_type: Literal["file"] = "file"
+    observation_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]+$", max_length=100)
+    occurred_at: datetime
+    target: str = Field(min_length=1, max_length=2_000)
+    event: Literal["created", "modified", "deleted"]
+    size_bytes: int | None = Field(default=None, ge=0)
+
+    @field_validator("occurred_at")
+    @classmethod
+    def _occurred_at_is_aware(cls, value: datetime) -> datetime:
+        return _require_aware(value, "occurred_at")
+
+
+class CalendarObservation(StrictModel):
+    observation_type: Literal["calendar"] = "calendar"
+    observation_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]+$", max_length=100)
+    occurred_at: datetime
+    target: str = Field(min_length=1, max_length=2_000)
+    event: Literal["starting", "created", "updated", "deleted"]
+    provider: str = Field(min_length=1, max_length=80)
+    event_id: str = Field(min_length=1, max_length=500)
+
+    @field_validator("occurred_at")
+    @classmethod
+    def _occurred_at_is_aware(cls, value: datetime) -> datetime:
+        return _require_aware(value, "occurred_at")
+
+
+class ProcessObservation(StrictModel):
+    observation_type: Literal["process"] = "process"
+    observation_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]+$", max_length=100)
+    occurred_at: datetime
+    target: str = Field(min_length=1, max_length=2_000)
+    event: Literal["started", "stopped"]
+    process_id: int | None = Field(default=None, ge=0)
+
+    @field_validator("occurred_at")
+    @classmethod
+    def _occurred_at_is_aware(cls, value: datetime) -> datetime:
+        return _require_aware(value, "occurred_at")
+
+
+class DeviceObservation(StrictModel):
+    observation_type: Literal["device"] = "device"
+    observation_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]+$", max_length=100)
+    occurred_at: datetime
+    target: str = Field(min_length=1, max_length=2_000)
+    event: Literal["changed", "connected", "disconnected"]
+    value: str | int | float | bool | None = None
+
+    @field_validator("occurred_at")
+    @classmethod
+    def _occurred_at_is_aware(cls, value: datetime) -> datetime:
+        return _require_aware(value, "occurred_at")
+
+
+class WebObservation(StrictModel):
+    observation_type: Literal["web"] = "web"
+    observation_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]+$", max_length=100)
+    occurred_at: datetime
+    target: str = Field(min_length=1, max_length=2_000)
+    event: Literal["changed"] = "changed"
+    content_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @field_validator("occurred_at")
+    @classmethod
+    def _occurred_at_is_aware(cls, value: datetime) -> datetime:
+        return _require_aware(value, "occurred_at")
+
+
+EventObservation = Annotated[
+    FileObservation | CalendarObservation | ProcessObservation | DeviceObservation | WebObservation,
+    Field(discriminator="observation_type"),
+]
+OBSERVATION_ADAPTER = TypeAdapter(EventObservation)
+
+
+ScheduledTrigger = Annotated[
+    OneTimeTrigger | RecurrenceTrigger | EventTrigger, Field(discriminator="kind")
+]
 TRIGGER_ADAPTER = TypeAdapter(ScheduledTrigger)
 
 

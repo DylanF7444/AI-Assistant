@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import mimetypes
+import re
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -17,13 +20,14 @@ from assistant.contracts import (
 )
 from assistant.integrations.google_drive import (
     API_ROOT,
-    GoogleDriveAdapter,
     TOKEN_URL,
-    quote_id,
+    GoogleDriveAdapter,
     drive_query_literal,
+    quote_id,
 )
 from assistant.skills.base import Skill
 from assistant.skills.builtin import manifest
+from assistant.windows.paths import resolve_user_path
 
 READ_OPERATIONS = {"search", "list_children", "get_metadata"}
 
@@ -31,19 +35,33 @@ READ_OPERATIONS = {"search", "list_children", "get_metadata"}
 class GoogleDriveInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    operation: Literal["search", "list_children", "get_metadata"]
+    operation: Literal["search", "list_children", "get_metadata", "download", "upload"]
     file_id: str | None = Field(default=None, min_length=1, max_length=1024)
     query: str | None = Field(default=None, min_length=1, max_length=500)
     max_results: int = Field(default=25, ge=1, le=100)
     page_token: str | None = Field(default=None, max_length=2048)
     order_by: Literal["name", "modifiedTime", "createdTime"] = "modifiedTime"
+    local_path: str | None = Field(default=None, min_length=1, max_length=32_768)
+    name: str | None = Field(default=None, min_length=1, max_length=500)
+    parent_id: str | None = Field(default=None, min_length=1, max_length=1024)
+    mime_type: str | None = Field(default=None, min_length=1, max_length=200)
 
     @model_validator(mode="after")
     def _operation_has_required_fields(self) -> GoogleDriveInput:
         if self.operation == "search" and not self.query:
             raise ValueError("search requires query")
-        if self.operation in {"list_children", "get_metadata"} and not self.file_id:
+        if self.operation in {"list_children", "get_metadata", "download"} and not self.file_id:
             raise ValueError(f"{self.operation} requires file_id")
+        if self.operation in {"download", "upload"} and not self.local_path:
+            raise ValueError(f"{self.operation} requires local_path")
+        if self.operation not in {"upload"} and any(
+            value is not None for value in (self.name, self.parent_id, self.mime_type)
+        ):
+            raise ValueError("name, parent_id, and mime_type are only valid for upload")
+        if self.mime_type and not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*", self.mime_type
+        ):
+            raise ValueError("mime_type must be a safe media type")
         return self
 
 
@@ -64,8 +82,8 @@ class GoogleDriveSkill(Skill):
             display_name="Google Drive",
             description=(
                 "Search Google Drive files and folders, list folder contents, and inspect "
-                "metadata for an explicitly selected item. Content downloads and changes "
-                "are intentionally excluded from this first slice."
+                "metadata, download an exact file to an exact new local path, or upload one "
+                "explicit local file. Existing remote and local files are never overwritten."
             ),
             input_model=self.input_model,
             output_model=self.output_model,
@@ -82,32 +100,65 @@ class GoogleDriveSkill(Skill):
                 ),
             ),
             risk=RiskLevel.MEDIUM,
-            safe_to_retry=True,
+            safe_to_retry=False,
             background_mode=BackgroundMode.CAPABILITY_GATED,
         ).model_copy(update={"entry_point": f"{__name__}:GoogleDriveSkill"})
 
     def risk_for(self, call: SkillCall) -> RiskLevel:
-        self.validate(call.arguments)
-        return RiskLevel.LOW
+        return (
+            RiskLevel.HIGH
+            if self.validate(call.arguments).operation in {"download", "upload"}
+            else RiskLevel.LOW
+        )
 
     def required_permissions(self, call: SkillCall):
         args = self.validate(call.arguments)
         target = _permission_target(args)
-        return (
+        scopes = []
+        if args.operation == "download":
+            scopes.append(
+                PermissionScope(
+                    capability="filesystem.write",
+                    targets=(str(resolve_user_path(args.local_path or "")),),
+                    reason="Create this exact local file from the selected Drive item.",
+                )
+            )
+        elif args.operation == "upload":
+            scopes.append(
+                PermissionScope(
+                    capability="filesystem.content.read",
+                    targets=(str(resolve_user_path(args.local_path or "")),),
+                    reason="Read this exact local file for upload.",
+                )
+            )
+        scopes.append(
             PermissionScope(
-                capability="integration.read",
+                capability="integration.write"
+                if args.operation == "upload"
+                else "integration.read",
                 targets=(target,),
-                reason="Allow Google Drive metadata access for this exact target.",
-            ),
+                reason=(
+                    "Upload one file to this exact Google Drive target."
+                    if args.operation == "upload"
+                    else "Allow Google Drive access for this exact target."
+                ),
+            )
+        )
+        scopes.append(
             PermissionScope(
                 capability="network",
                 targets=(API_ROOT.split("/v3")[0], TOKEN_URL.rsplit("/", 1)[0]),
                 reason="Connect to Google Drive and refresh its OAuth token.",
-            ),
+            )
         )
+        return tuple(scopes)
 
     async def preview(self, call: SkillCall) -> str:
         args = self.validate(call.arguments)
+        if args.operation == "download":
+            return f"Download Google Drive file {args.file_id} to new local file {args.local_path}"
+        if args.operation == "upload":
+            return f"Upload local file {args.local_path} to Google Drive parent {args.parent_id or 'root'}"
         return f"Google Drive: {args.operation} on {_permission_target(args)}"
 
     async def health(self) -> dict[str, Any]:
@@ -151,11 +202,30 @@ class GoogleDriveSkill(Skill):
         self,
         args: GoogleDriveInput,
     ) -> dict[str, Any]:
+        if args.operation == "download":
+            payload = await self.adapter.download(args.file_id or "", max_bytes=25 * 1024 * 1024)
+            destination = resolve_user_path(args.local_path or "").resolve()
+            await asyncio.to_thread(_write_new_file, destination, payload)
+            return {
+                "id": args.file_id,
+                "name": destination.name,
+                "mimeType": mimetypes.guess_type(destination.name)[0],
+                "localPath": str(destination),
+                "size": len(payload),
+            }
+        if args.operation == "upload":
+            source = resolve_user_path(args.local_path or "").resolve()
+            payload = await asyncio.to_thread(_read_bounded_file, source)
+            return await self.adapter.upload(
+                name=args.name or source.name,
+                payload=payload,
+                parent_id=args.parent_id,
+                mime_type=args.mime_type,
+            )
         if args.operation == "search":
             literal = drive_query_literal(args.query or "")
             query = (
-                "trashed = false and ("
-                f"name contains '{literal}' or fullText contains '{literal}')"
+                f"trashed = false and (name contains '{literal}' or fullText contains '{literal}')"
             )
             return await self.adapter.request(
                 "GET",
@@ -204,6 +274,10 @@ FILE_FIELDS = (
 
 
 def _permission_target(args: GoogleDriveInput) -> str:
+    if args.operation == "download":
+        return f"google_drive:download:{args.file_id}"
+    if args.operation == "upload":
+        return f"google_drive:upload:{args.parent_id or 'root'}:{args.name or Path(args.local_path or '').name}"
     if args.operation == "search":
         return f"google_drive:query:{args.query or ''}"
     return f"google_drive:file:{args.file_id or 'root'}"
@@ -253,3 +327,18 @@ def _display(operation: str, resources: list[dict[str, Any]]) -> str:
 
 def _string(value: Any) -> str | None:
     return value if isinstance(value, str) else None
+
+
+def _read_bounded_file(path: Path) -> bytes:
+    if not path.is_file():
+        raise ValueError(f"Upload source does not exist: {path}")
+    if path.stat().st_size > 25 * 1024 * 1024:
+        raise ValueError("Upload source exceeds the 25 MB safety limit")
+    return path.read_bytes()
+
+
+def _write_new_file(path: Path, payload: bytes) -> None:
+    if not path.parent.is_dir():
+        raise ValueError(f"Download destination folder does not exist: {path.parent}")
+    with path.open("xb") as handle:
+        handle.write(payload)

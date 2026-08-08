@@ -197,6 +197,50 @@ The UI depends on the orchestrator and event bus, not model or OS
 implementations. STT, LLM, TTS, wake-word, embedding, Windows, storage, clock,
 and device implementations are injected behind typed interfaces.
 
+## Document and image understanding
+
+`assistant.skills.documents` is a bounded extraction boundary for explicit TXT,
+Markdown, CSV, PDF, DOCX, XLSX, and PPTX paths. It emits typed extracted
+sections with opaque source references and format-specific locators. Persistent
+content search stores signatures and bounded chunks in the local vector-index
+boundary, reconciles modifications/deletions under a lock, and never changes
+source files. Content-read and content-index retention are separate policy
+capabilities.
+
+`assistant.skills.vision` accepts one explicit local image and one of four typed
+operations: OCR, accessible description, chart explanation, or error-dialog
+explanation. Optional Tesseract and vision providers are injected. The skill has
+no screen/camera acquisition, clipboard, input, or automatic retention path.
+
+## Event observations
+
+Event schedules use typed `EventTrigger` contracts and `EventObservation`
+records rather than treating source payloads as prompts. `FileEventSource`,
+`ProcessEventSource`, `DeviceEventSource`, and `WebEventSource` collect only
+bounded matching metadata or fingerprints for one exact scoped target. Web
+targets are sanitized public HTTPS locations and flow through the ordinary
+offline-aware web client. Calendar observations use the same contract but enter
+only through an explicitly configured connector. Matching observations create
+durable scheduler occurrences, after which the frozen action uses the same
+lease, authorization, permission, confirmation, and execution path as a clock
+trigger.
+
+## Evaluation and observability
+
+`assistant.evaluation` owns versioned cases, corpus loading, production-planner
+harnesses, deterministic scorers, confidence intervals, and JSON/Markdown
+reports. It invokes the production planner boundary; it does not duplicate a
+separate evaluation-only planner. `planner_contracts` contains the stable
+validated decision/revision models, while orchestration continuation state
+lives under `assistant.orchestration` to prevent planner/engine ownership leaks.
+
+`assistant.observability` defines typed stage and dimension names for correlated
+request, voice, retrieval, planner, provider, execution, and automation timing.
+Only durations, counts, states, provider/model identifiers, and sanitized
+categories are stored—never prompts, transcripts, responses, document text, or
+credentials. Dashboard providers aggregate that store rather than scraping UI
+state.
+
 ## Dashboard
 
 `assistant.dashboard` is a UI-independent read model. Strict card, layout,
@@ -273,6 +317,14 @@ migration. Stable skill IDs are never inferred from display names.
   layout/connection/sample storage, permission-aware refresh, history, and
   diagnostics. Qt dashboard widgets depend on it only through
   `DesktopController`.
+- `assistant.evaluation` owns corpus contracts, planner harnesses, scoring, and
+  report generation; production planner decisions remain owned by
+  `assistant.language`.
+- `assistant.skills.documents` and `assistant.skills.vision` own bounded content
+  interpretation, while file policy and authorization remain external policy
+  boundaries.
+- `assistant.scheduling.event_sources` converts exact external state into
+  privacy-bounded observations; it never invokes a skill directly.
 - `assistant.presentation` owns probing, local reference resolution, guarded
   remote acquisition/cache policy, and in-memory presentation sessions.
 - `assistant.ui.desktop.notification_widgets` owns transient foreground

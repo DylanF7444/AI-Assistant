@@ -1,6 +1,6 @@
 # Local Assistant Acceptance Workflow Roadmap
 
-Updated July 11, 2026.
+Updated August 6, 2026.
 
 This document turns the product workflow roadmap into a repeatable acceptance
 reference. The emphasis is a usable, trustworthy local Windows product rather
@@ -786,6 +786,75 @@ Keep planned actions trustworthy when real conditions change.
 The packaged, sleep, notification, startup, accessibility, and real-time soak
 steps require the target Windows session and remain manual release evidence.
 
+## Documents, visual understanding, and sources
+
+1. Extract each supported document format; verify file/size/character/count
+   bounds, encrypted/malformed failures, and page/sheet/slide/line locators.
+2. Summarize, compare, answer a question, and find action items across explicit
+   documents; verify every grounded claim can expose its opaque source reference.
+3. Build a one-folder index, restart, modify/delete files, search again, inspect
+   state, and clear it; verify source files are unchanged and retention requires
+   its separate capability.
+4. OCR, describe, explain a chart, and explain an error from one explicit image;
+   verify no screen capture, clipboard, input, or implicit-retention route exists.
+5. Inspect and copy response sources from keyboard and mouse at 100%, 150%, and
+   200% display scaling.
+
+Done when contract/unit/UI tests pass offline and the physical display-scaling
+lane records no clipped source or confirmation control.
+
+## Exact productivity writes
+
+Exercise Drive and OneDrive non-overwriting download/upload; Outlook draft then
+separate exact-draft send; exact calendar create/update/delete; exact Slack
+channel/thread post; exact Notion parent creation/append; and exact GitHub issue
+creation/comment. For every operation verify schema rejection, fixed origin,
+minimum scope, exact preview/target, cancellation, offline lock, confirmation,
+non-retry after unknown outcome, and absence of unsupported bulk/destructive
+actions. Use fake transports in automation and test accounts only in the manual
+lane.
+
+## Event-triggered automation
+
+1. File: create/modify/delete matching and nonmatching fixtures in one approved
+   folder; verify bounded metadata and deduplication.
+2. Process: start/stop one exact benign process; verify only name/PID is retained.
+3. Device: feed status changes for one exact instance ID; verify bounded status
+   and fingerprint without raw payload persistence.
+4. Web: change bounded content at one public HTTPS fixture; verify credential,
+   query, fragment, redirect/private-address, offline, and timeout behavior.
+5. Calendar: submit typed connector observations and verify no unconfigured
+   account polling is implied.
+6. For all sources, change the monitor or action digest and verify authority is
+   revoked before the frozen action executes.
+
+## Guided UX and accessibility
+
+Complete the resumable ten-step setup; force configuration, permission,
+provider, file, network, and integrity failures and verify categorized recovery.
+Test keyboard-only operation, accessible names, text scales through 175%, high
+contrast, reduced motion, source inspection/copy, confirmation, cancellation,
+and emergency stop. Offscreen UI tests are automated; Narrator, physical display
+scaling, audio-device, and real focus behavior require an interactive session.
+
+## Evaluation, provenance, and release
+
+1. Run deterministic and full production-planner corpora and retain versioned
+   JSON/Markdown reports with per-category scores and confidence intervals.
+2. Verify correlated metrics contain timings/counts/categories but no prompt,
+   transcript, response, credential, document, or source-body text.
+3. Run Ruff, selected strict mypy, regression/learning/offscreen UI coverage,
+   property/architecture tests, documentation consistency, and dependency audit.
+4. Build the executable and installer where Inno Setup is available; run the
+   packaged diagnostic smoke and media dependency check.
+5. Generate CycloneDX SBOM, artifact hashes, source-tree hash, exact commit/dirty
+   state, SHA256SUMS, and release manifest. A dirty manifest is internal evidence
+   only; a public candidate must be generated from a clean tagged commit.
+6. Complete the licensed speech corpus, physical microphone/speaker, clean
+   install/upgrade/uninstall, Authenticode signing, sleep/toast, and 24-hour soak
+   gates from `RELEASE_AND_SIGNING_RUNBOOK.md`. Record `BLOCKED`, never `PASS`,
+   when the necessary external asset/environment is absent.
+
 ## Recommended Execution Order
 
 ### P0: Product credibility
@@ -807,18 +876,17 @@ steps require the target Windows session and remain manual release evidence.
 12. Routine and Macro Creation.
 13. Recovery and Undo.
 
-### P2: Expansion after local workflows are solid
+### P2: Expansion after the bounded release slices are solid
 
-- Document-content summarization.
-- Meeting preparation with calendar access.
-- Message drafting followed by separately confirmed sending.
-- Email, calendar, and messaging integrations.
-- Screen understanding and OCR.
-- Travel, shopping, and smart-home expansion.
+- Office document editing and generated spreadsheets/slide decks.
+- Live screen/camera understanding and image generation/editing.
+- Additional email/calendar/messaging providers and broad synchronization.
+- Travel, shopping, financial, and broader smart-home actions.
 
-P2 workflows remain outside the MVP claim until they have dedicated skills,
-explicit data-access permissions, and the same confirmation and audit behavior
-as local actions.
+These broader workflows remain outside the release claim until they have
+dedicated schemas, threat reviews, data-access permissions, and acceptance
+evidence. The bounded document, explicit-image, provider-write, and event-source
+slices above are part of the current release candidate.
 
 ## Interactive Run Log
 

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 
 from assistant.storage.database import (
     AuditStore,
@@ -57,7 +57,7 @@ def test_upgrade_from_schema_version_one(tmp_path: Path):
     MacroRow.__table__.drop(database.engine)
     database.migrate()
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 11
+        assert session.get(SchemaVersionRow, 1).version == 12
     assert inspect(database.engine).has_table("macros")
 
 
@@ -115,7 +115,7 @@ def test_upgrade_from_schema_version_three_adds_knowledge_bases(tmp_path: Path):
 
     assert inspect(database.engine).has_table("knowledge_bases")
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 11
+        assert session.get(SchemaVersionRow, 1).version == 12
 
 
 def test_upgrade_from_schema_version_four_adds_vector_items(tmp_path: Path):
@@ -129,7 +129,7 @@ def test_upgrade_from_schema_version_four_adds_vector_items(tmp_path: Path):
 
     assert inspect(database.engine).has_table("vector_items")
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 11
+        assert session.get(SchemaVersionRow, 1).version == 12
 
 
 def test_upgrade_from_schema_version_five_adds_memory_items(tmp_path: Path):
@@ -143,7 +143,7 @@ def test_upgrade_from_schema_version_five_adds_memory_items(tmp_path: Path):
 
     assert inspect(database.engine).has_table("memory_items")
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 11
+        assert session.get(SchemaVersionRow, 1).version == 12
 
 
 def test_upgrade_from_schema_version_eight_adds_dashboard_metric_samples(
@@ -159,7 +159,7 @@ def test_upgrade_from_schema_version_eight_adds_dashboard_metric_samples(
 
     assert inspect(database.engine).has_table("dashboard_metric_samples")
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 11
+        assert session.get(SchemaVersionRow, 1).version == 12
 
 
 def test_upgrade_from_schema_version_nine_adds_notification_inbox(tmp_path: Path):
@@ -173,4 +173,21 @@ def test_upgrade_from_schema_version_nine_adds_notification_inbox(tmp_path: Path
 
     assert inspect(database.engine).has_table("notifications")
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 11
+        assert session.get(SchemaVersionRow, 1).version == 12
+
+
+def test_upgrade_from_schema_version_eleven_adds_metric_dimensions(tmp_path: Path):
+    database = Database(f"sqlite:///{tmp_path / 'old.db'}")
+    database.migrate()
+    with database.session() as session:
+        session.execute(text("ALTER TABLE pipeline_metrics DROP COLUMN dimensions_json"))
+        session.get(SchemaVersionRow, 1).version = 11
+
+    database.migrate()
+
+    columns = {
+        column["name"] for column in inspect(database.engine).get_columns("pipeline_metrics")
+    }
+    assert "dimensions_json" in columns
+    with database.session() as session:
+        assert session.get(SchemaVersionRow, 1).version == 12

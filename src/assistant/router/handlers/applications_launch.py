@@ -63,9 +63,7 @@ class ApplicationHandler:
                 and " " not in application
                 and not match.group("application").endswith(" window")
             )
-            if router._is_known_application_reference(
-                application
-            ) or existing_single_word_form:
+            if router._is_known_application_reference(application) or existing_single_word_form:
                 return RouteResult(
                     Intent(
                         name="windows.application_window",

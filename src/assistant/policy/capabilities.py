@@ -5,12 +5,19 @@ from collections.abc import Iterable
 from assistant.contracts import PermissionScope
 
 BUILT_IN_CAPABILITIES = (
+    "automation.observe.calendar",
+    "automation.observe.device",
+    "automation.observe.file",
+    "automation.observe.process",
+    "automation.observe.web",
     "clipboard.read",
     "clipboard.write",
     "device.control",
     "device.read",
     "filesystem.read",
     "filesystem.write",
+    "filesystem.content.read",
+    "filesystem.content.index",
     "input.control",
     "integration.read",
     "integration.write",

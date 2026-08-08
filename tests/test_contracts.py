@@ -3,8 +3,10 @@ from pydantic import ValidationError
 
 from assistant.contracts import (
     AudioSession,
+    CitationSourceType,
     Intent,
     RequestResultItem,
+    ResponseCitation,
     ResultStatus,
     SkillResult,
     Transcript,
@@ -51,6 +53,26 @@ def test_confidence_percentages_are_normalized_to_decimal_scale():
     assert transcript.confidence == 1
     assert transcript.words[0].confidence == 0.75
     assert intent.confidence == 0.95
+
+
+def test_web_citation_contract_rejects_credentials_queries_and_fragments():
+    with pytest.raises(ValidationError, match="sanitized HTTPS"):
+        ResponseCitation(
+            source_id="web-1",
+            title="Unsafe source",
+            source_type=CitationSourceType.WEB,
+            url="https://user:secret@example.com/page?token=secret#fragment",
+        )
+
+    citation = ResponseCitation(
+        source_id="knowledge-1",
+        title="Local guide",
+        source_type=CitationSourceType.LOCAL_KNOWLEDGE,
+        local_reference="knowledge:1",
+        namespace="knowledge",
+        score=0.9,
+    )
+    assert citation.url is None
 
 
 def test_contracts_are_immutable():

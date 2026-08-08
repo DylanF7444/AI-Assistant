@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+from typing import Any
 from uuid import UUID
 
-from assistant.contracts import MediaDirective, RequestResultItem
+from assistant.context.snapshot import ContextSnapshot
+from assistant.contracts import Intent, MediaDirective, RequestResultItem
+from assistant.language.retrieval import RetrievedContextItem
 
 
 @dataclass(frozen=True)
@@ -14,6 +17,22 @@ class PendingClarificationFollowUp:
     folder_name: str | None
     session_id: str
     kind: str = "generic"
+
+
+@dataclass(frozen=True)
+class ReplanningContinuation:
+    correlation_id: UUID
+    text: str
+    current_intent: Intent
+    interpretation: Any
+    context: ContextSnapshot
+    retrieved: tuple[RetrievedContextItem, ...]
+    session_id: str
+    invoked_by_voice: bool
+    observations: tuple[dict[str, Any], ...]
+    step_summaries: tuple[str, ...]
+    iteration: int
+    max_iterations: int
 
 
 @dataclass
@@ -47,11 +66,7 @@ class ConversationState:
         if self.selected_result_item_id is None:
             return None
         return next(
-            (
-                item
-                for item in self.result_items
-                if item.item_id == self.selected_result_item_id
-            ),
+            (item for item in self.result_items if item.item_id == self.selected_result_item_id),
             None,
         )
 

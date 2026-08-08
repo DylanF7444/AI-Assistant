@@ -8,9 +8,7 @@ from assistant.contracts import RequestResultItem
 
 SelectionFailure = Literal["no_results", "out_of_range", "not_found", "ambiguous"]
 
-_RESULT_NOUN = (
-    r"(?:one|item|result|match|article|headline|story|link|file|task|option)"
-)
+_RESULT_NOUN = r"(?:one|item|result|match|article|headline|story|link|file|task|option)"
 _RESULT_ORDINAL = (
     r"(?:first|one|second|two|third|three|fourth|four|fifth|five|last|"
     r"\d+(?:st|nd|rd|th)?)"
@@ -159,8 +157,5 @@ def _bounded_context_value(value: object, *, depth: int = 0) -> object:
             for key, item in list(value.items())[:20]
         }
     if isinstance(value, (list, tuple)):
-        return [
-            _bounded_context_value(item, depth=depth + 1)
-            for item in value[:20]
-        ]
+        return [_bounded_context_value(item, depth=depth + 1) for item in value[:20]]
     return str(value)[:2_000]

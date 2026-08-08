@@ -5,10 +5,11 @@ import contextlib
 import json
 import logging
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from typing import Any
 
 from assistant.integrations.connections import ConnectionStatus, normalize_scopes
@@ -35,6 +36,10 @@ OFFLINE_ACCESS_SCOPE = "offline_access"
 OUTLOOK_MAIL_READ_SCOPE = "Mail.Read"
 OUTLOOK_CALENDAR_READ_SCOPE = "Calendars.Read"
 ONEDRIVE_READ_SCOPE = "Files.Read"
+OUTLOOK_MAIL_WRITE_SCOPE = "Mail.ReadWrite"
+OUTLOOK_MAIL_SEND_SCOPE = "Mail.Send"
+OUTLOOK_CALENDAR_WRITE_SCOPE = "Calendars.ReadWrite"
+ONEDRIVE_WRITE_SCOPE = "Files.ReadWrite"
 MICROSOFT_GRAPH_BASE_SCOPES = (
     OPENID_SCOPE,
     PROFILE_SCOPE,
@@ -115,11 +120,7 @@ class MicrosoftGraphConnectionService:
             account=tokens.account() if connected else None,
             healthy=healthy,
             message=message
-            or (
-                "Connected."
-                if connected
-                else "No Microsoft account is connected."
-            ),
+            or ("Connected." if connected else "No Microsoft account is connected."),
             provider_id=self.provider_id,
             profile_id=profile_id,
             granted_scopes=tokens.granted_scopes(),
@@ -198,18 +199,22 @@ class MicrosoftGraphConnectionService:
             redirect_uri: str,
             pkce: PKCEAuthorization,
         ) -> str:
-            return AUTH_URL + "?" + urllib.parse.urlencode(
-                {
-                    "client_id": client_id,
-                    "redirect_uri": redirect_uri,
-                    "response_type": "code",
-                    "response_mode": "query",
-                    "scope": " ".join(scopes),
-                    "prompt": "select_account",
-                    "code_challenge": pkce.challenge,
-                    "code_challenge_method": "S256",
-                    "state": pkce.state,
-                }
+            return (
+                AUTH_URL
+                + "?"
+                + urllib.parse.urlencode(
+                    {
+                        "client_id": client_id,
+                        "redirect_uri": redirect_uri,
+                        "response_type": "code",
+                        "response_mode": "query",
+                        "scope": " ".join(scopes),
+                        "prompt": "select_account",
+                        "code_challenge": pkce.challenge,
+                        "code_challenge_method": "S256",
+                        "state": pkce.state,
+                    }
+                )
             )
 
         def exchange(code: str, verifier: str, redirect_uri: str):
@@ -288,7 +293,9 @@ class MicrosoftGraphConnectionService:
             return None
         if not isinstance(payload, dict):
             return None
-        value = payload.get("mail") or payload.get("userPrincipalName") or payload.get("displayName")
+        value = (
+            payload.get("mail") or payload.get("userPrincipalName") or payload.get("displayName")
+        )
         return value[:320] if isinstance(value, str) and value else None
 
     def _disconnect(self) -> None:
@@ -333,6 +340,8 @@ class MicrosoftGraphAdapter:
         timeout_seconds: float = 20,
     ) -> None:
         self.tokens = tokens
+        self.opener = opener
+        self.timeout_seconds = timeout_seconds
         self.client = ExternalJsonClient(
             GRAPH_API_ROOT,
             tokens,
@@ -360,6 +369,77 @@ class MicrosoftGraphAdapter:
             return {"healthy": True}
         except MicrosoftGraphError as error:
             return {"healthy": False, "error": error.reason}
+
+    async def upload_bytes(
+        self, path: str, payload: bytes, *, content_type: str = "application/octet-stream"
+    ) -> dict[str, Any]:
+        if not path.startswith("/") or "?" in path or "#" in path or "\\" in path:
+            raise ValueError("Microsoft Graph upload path must be a safe relative path")
+        token = await self.tokens.access_token()
+        return await asyncio.to_thread(self._upload_bytes_sync, path, payload, content_type, token)
+
+    def _upload_bytes_sync(
+        self, path: str, payload: bytes, content_type: str, token: str
+    ) -> dict[str, Any]:
+        request = urllib.request.Request(
+            f"{GRAPH_API_ROOT}{path}",
+            data=payload,
+            method="PUT",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": content_type,
+                "Accept": "application/json",
+                "User-Agent": "LocalAssistant/0.1",
+            },
+        )
+        try:
+            with self.opener(request, timeout=self.timeout_seconds) as response:
+                raw = response.read(2 * 1024 * 1024 + 1)
+        except urllib.error.HTTPError as exc:
+            raise MicrosoftGraphError(exc.code, "OneDrive upload failed.") from None
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            raise MicrosoftGraphError(
+                503, "OneDrive upload could not be reached.", recoverable=True
+            ) from exc
+        if len(raw) > 2 * 1024 * 1024:
+            raise MicrosoftGraphError(502, "OneDrive returned an oversized upload response.")
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise MicrosoftGraphError(502, "OneDrive returned an invalid upload response.") from exc
+        if not isinstance(value, dict):
+            raise MicrosoftGraphError(502, "OneDrive returned an invalid upload response.")
+        return value
+
+    async def download_url(self, url: str, *, max_bytes: int) -> bytes:
+        parsed = urllib.parse.urlsplit(url)
+        hostname = (parsed.hostname or "").casefold()
+        allowed_suffixes = (".1drv.com", ".onedrive.com", ".sharepoint.com")
+        if (
+            parsed.scheme != "https"
+            or not hostname
+            or not any(hostname.endswith(suffix) for suffix in allowed_suffixes)
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
+            raise ValueError("OneDrive returned an untrusted download origin")
+        return await asyncio.to_thread(self._download_url_sync, url, max_bytes)
+
+    def _download_url_sync(self, url: str, max_bytes: int) -> bytes:
+        request = urllib.request.Request(url, headers={"User-Agent": "LocalAssistant/0.1"})
+        try:
+            with self.opener(request, timeout=self.timeout_seconds) as response:
+                payload = response.read(max_bytes + 1)
+        except urllib.error.HTTPError as exc:
+            raise MicrosoftGraphError(exc.code, "OneDrive download failed.") from None
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            raise MicrosoftGraphError(
+                503, "OneDrive download could not be reached.", recoverable=True
+            ) from exc
+        if len(payload) > max_bytes:
+            raise MicrosoftGraphError(413, "OneDrive file exceeds the download safety limit.")
+        return payload
 
 
 def quote_id(value: str) -> str:

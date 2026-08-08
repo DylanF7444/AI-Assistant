@@ -363,16 +363,27 @@ class ExtensionHubPage(QWidget):
             self.connection_button.setText(
                 "Manage Connected Account" if connected else "Connect Account"
             )
-        if not extension.compatible or status in {"id_in_use", "installed"}:
+        installable = (
+            self.service.is_installable(extension)
+            if hasattr(self.service, "is_installable")
+            else extension.compatible
+        )
+        if not installable or status in {"id_in_use", "installed"}:
             self.install_button.setText("Installed" if status == "installed" else "Unavailable")
         else:
             self.install_button.setText("Install Extension")
-        enabled = extension.compatible and status == "available" and not self._busy
+        enabled = installable and status == "available" and not self._busy
         self.install_button.setEnabled(enabled)
         if not extension.compatible:
             message = (
                 f"This build supports API 1.0 skill packages, not "
                 f"{extension.extension_type} API {extension.api_version}."
+            )
+        elif not installable:
+            message = (
+                "Downloaded Python extensions are blocked in this build because a process and "
+                "Job Object are not an OS-enforced hostile-code sandbox. Use reviewed first-party "
+                "extensions instead."
             )
         elif (
             status == "installed"

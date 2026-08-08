@@ -13,10 +13,15 @@ from assistant.stt.faster_whisper import FasterWhisperProvider
 
 
 class FakeStreamingWhisper(FasterWhisperProvider):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.decode_sizes = []
+
     async def _load(self):
         self._model = object()
 
     async def _decode(self, session, chunks):
+        self.decode_sizes.append(("final", len(chunks)))
         return Transcript(
             session_id=session.session_id,
             raw_text=f"{len(chunks)} bytes",
@@ -25,12 +30,23 @@ class FakeStreamingWhisper(FasterWhisperProvider):
             is_final=True,
         )
 
+    async def _decode_partial(self, session, chunks):
+        self.decode_sizes.append(("partial", len(chunks)))
+        return Transcript(
+            session_id=session.session_id,
+            raw_text=f"chunk {len(chunks)}",
+            normalized_text=f"chunk {len(chunks)}",
+            confidence=0.8,
+            is_final=False,
+        )
+
 
 @pytest.mark.asyncio
 async def test_whisper_emits_partial_and_final_transcripts():
     provider = FakeStreamingWhisper(
         partial_interval_seconds=0.01,
         partial_min_audio_seconds=0.01,
+        partial_overlap_seconds=0,
     )
     session = AudioSession(source="test", sample_rate=16000)
 
@@ -43,6 +59,19 @@ async def test_whisper_emits_partial_and_final_transcripts():
     assert any(not item.is_final for item in values)
     assert values[-1].is_final
     assert values[-1].raw_text.endswith("bytes")
+    final_size = next(size for kind, size in provider.decode_sizes if kind == "final")
+    partial_cost = sum(size for kind, size in provider.decode_sizes if kind == "partial")
+    assert partial_cost <= final_size * 2
+
+
+def test_partial_text_merge_uses_bounded_word_overlap():
+    assert (
+        FasterWhisperProvider._merge_partial_text(
+            "find the quarterly report",
+            "quarterly report on desktop",
+        )
+        == "find the quarterly report on desktop"
+    )
 
 
 @pytest.mark.asyncio

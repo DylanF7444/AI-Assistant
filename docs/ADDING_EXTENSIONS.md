@@ -16,15 +16,16 @@ implementations are Google Calendar and Gmail.
 | Visible without an external catalog | Yes | No |
 | May use host adapters or encrypted secrets | Yes | No |
 | May have an in-app account connection dialog | Yes | No |
-| Runs in the main application boundary | Yes | No, runs in an isolated worker |
+| Runs in the main application boundary | Yes | Blocked by default; reviewed Python may use the process-isolated worker only with advanced opt-in |
 | Outbound network access | Through reviewed host adapters and permissions | Currently blocked in the worker |
 | Installation source | Reviewed implementation in the application build | Public HTTPS ZIP from the catalog |
 | Package signature | Not applicable | Trusted Ed25519 signature required |
 
 Use a **first-party managed extension** for OAuth, API tokens, external account
 connections, or another integration that needs a reviewed host service. Use a
-**signed catalog package** only for a self-contained skill that needs no host
-credentials or outbound network access.
+**signed catalog package** only for controlled development of a self-contained
+reviewed skill that needs no host credentials or outbound network access. It is
+not a shipping path for arbitrary marketplace code.
 
 An always-available core capability normally belongs in the built-in registry,
 not the Extension Hub. Hub entries are optional capabilities that users choose
@@ -478,6 +479,13 @@ unambiguous; do not silently merge different accounts.
 
 ## Adding a signed catalog package
 
+The shipping configuration classifies downloaded Python as `reviewed_worker`
+and blocks installation. The advanced
+`allow_reviewed_worker_extensions` setting exists for controlled development and
+does not turn the worker into a hostile-code sandbox. Downloaded native code is
+always `blocked_native`. Do not enable a public catalog by default until an
+OS-enforced sandbox and its adversarial acceptance suite exist.
+
 Catalog packages are loaded by `assistant.skills.worker`. The entry-point class
 must have a no-argument constructor because the worker creates it as
 `ClassName()`. The worker receives only a small allowlist of operating-system
@@ -564,12 +572,17 @@ raw_public_key = public_key.public_bytes(
     serialization.PublicFormat.Raw,
 )
 
-registry = SkillRegistry(trusted_signing_keys={"acme-2026": raw_public_key})
+registry = SkillRegistry(
+    trusted_signing_keys={"acme-2026": raw_public_key},
+    allow_reviewed_worker_extensions=True,
+)
 registry.validate_package(Path("acme-package"))
 ```
 
 Production `trusted_skill_keys` values are base64 encodings of
 `raw_public_key`. A key named by catalog content is never trusted automatically.
+Add a compromised or retired ID to `revoked_skill_key_ids`; revocation takes
+precedence over the trusted-key map during install, load, and update.
 
 ### 3. Archive and publish
 

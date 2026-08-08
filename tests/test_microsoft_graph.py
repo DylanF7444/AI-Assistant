@@ -14,8 +14,12 @@ from assistant.contracts import PermissionContext, RiskLevel, SkillCall
 from assistant.integrations.microsoft_graph import (
     MICROSOFT_GRAPH_BASE_SCOPES,
     ONEDRIVE_READ_SCOPE,
+    ONEDRIVE_WRITE_SCOPE,
     OUTLOOK_CALENDAR_READ_SCOPE,
+    OUTLOOK_CALENDAR_WRITE_SCOPE,
     OUTLOOK_MAIL_READ_SCOPE,
+    OUTLOOK_MAIL_SEND_SCOPE,
+    OUTLOOK_MAIL_WRITE_SCOPE,
     MicrosoftGraphConnectionService,
     MicrosoftGraphTokenManager,
 )
@@ -74,7 +78,11 @@ def call(skill_id, arguments):
 @pytest.mark.parametrize(
     ("text", "skill_id", "operation"),
     [
-        ("find my Outlook mail for quarterly planning", "integration.outlook_mail", "search_messages"),
+        (
+            "find my Outlook mail for quarterly planning",
+            "integration.outlook_mail",
+            "search_messages",
+        ),
         ("show my Outlook calendar", "integration.outlook_calendar", "list_events"),
         ("find planning in my Outlook calendar", "integration.outlook_calendar", "search_events"),
         ("find my OneDrive for budget", "integration.onedrive", "search"),
@@ -92,9 +100,21 @@ def test_explicit_microsoft_requests_route_without_the_llm(text, skill_id, opera
 @pytest.mark.parametrize(
     ("skill_id", "text", "message"),
     [
-        ("integration.outlook_mail", "find my Outlook mail for planning", "no Microsoft account is connected"),
-        ("integration.outlook_calendar", "show my Outlook calendar", "no Microsoft account is connected"),
-        ("integration.onedrive", "find my OneDrive for planning", "no Microsoft account is connected"),
+        (
+            "integration.outlook_mail",
+            "find my Outlook mail for planning",
+            "no Microsoft account is connected",
+        ),
+        (
+            "integration.outlook_calendar",
+            "show my Outlook calendar",
+            "no Microsoft account is connected",
+        ),
+        (
+            "integration.onedrive",
+            "find my OneDrive for planning",
+            "no Microsoft account is connected",
+        ),
     ],
 )
 def test_microsoft_request_explains_disconnected_extension(skill_id, text, message):
@@ -121,11 +141,15 @@ def test_microsoft_permissions_are_exact_targeted_and_read_only():
     drive = OneDriveSkill(RecordingAdapter())
 
     mail_call = call("integration.outlook_mail", {"operation": "get_message", "message_id": "m-1"})
-    calendar_call = call("integration.outlook_calendar", {"operation": "get_event", "event_id": "e-1"})
+    calendar_call = call(
+        "integration.outlook_calendar", {"operation": "get_event", "event_id": "e-1"}
+    )
     drive_call = call("integration.onedrive", {"operation": "get_metadata", "file_id": "f-1"})
 
     assert mail.required_permissions(mail_call)[0].targets == ("outlook:message:m-1",)
-    assert calendar.required_permissions(calendar_call)[0].targets == ("outlook-calendar:event:e-1",)
+    assert calendar.required_permissions(calendar_call)[0].targets == (
+        "outlook-calendar:event:e-1",
+    )
     assert drive.required_permissions(drive_call)[0].targets == ("onedrive:file:f-1",)
     assert mail.risk_for(mail_call) == RiskLevel.LOW
     assert calendar.risk_for(calendar_call) == RiskLevel.LOW
@@ -162,7 +186,10 @@ async def test_outlook_mail_search_escapes_filter_and_returns_sensitive_items():
 
     request = adapter.requests[0]
     assert request["path"] == "/me/mailFolders/inbox/messages"
-    assert request["query"]["$filter"] == "(contains(subject,'O''Reilly') or contains(bodyPreview,'O''Reilly')) and isRead eq false"
+    assert (
+        request["query"]["$filter"]
+        == "(contains(subject,'O''Reilly') or contains(bodyPreview,'O''Reilly')) and isRead eq false"
+    )
     assert result.data["next_page_token"] == "continuation"
     assert result.items[0].title == "Quarterly plan"
     assert result.items[0].sensitive is True
@@ -241,8 +268,10 @@ async def test_microsoft_connection_requests_incremental_scope_and_disconnects()
     def browser_open(url):
         query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
         authorization.update(query)
-        callback = query["redirect_uri"][0] + "?" + urllib.parse.urlencode(
-            {"state": query["state"][0], "code": "authorization-code"}
+        callback = (
+            query["redirect_uri"][0]
+            + "?"
+            + urllib.parse.urlencode({"state": query["state"][0], "code": "authorization-code"})
         )
         with urllib.request.urlopen(callback, timeout=5):
             pass
@@ -283,7 +312,9 @@ async def test_microsoft_graph_extensions_are_visible_installable_and_restartabl
         "integration.onedrive": ONEDRIVE_READ_SCOPE,
     }
     for extension_id in extension_ids:
-        assert any(item.extension_id == extension_id for item in container.extension_hub.catalog.extensions)
+        assert any(
+            item.extension_id == extension_id for item in container.extension_hub.catalog.extensions
+        )
         await container.extension_hub.install(extension_id)
 
     connection = container.extension_hub.connection_service("integration.outlook_mail")
@@ -291,7 +322,16 @@ async def test_microsoft_graph_extensions_are_visible_installable_and_restartabl
     connection.vault.set("microsoft_graph_refresh_token", "refresh-token")
     connection.vault.set(
         "microsoft_graph_granted_scopes",
-        json.dumps([*MICROSOFT_GRAPH_BASE_SCOPES, *extension_ids.values()]),
+        json.dumps(
+            [
+                *MICROSOFT_GRAPH_BASE_SCOPES,
+                *extension_ids.values(),
+                OUTLOOK_MAIL_WRITE_SCOPE,
+                OUTLOOK_MAIL_SEND_SCOPE,
+                OUTLOOK_CALENDAR_WRITE_SCOPE,
+                ONEDRIVE_WRITE_SCOPE,
+            ]
+        ),
     )
 
     restarted = build_container(settings)

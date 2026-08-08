@@ -27,7 +27,7 @@ from assistant.integrations.connections import (
     ConnectionStatus,
 )
 from assistant.skills.base import Skill
-from assistant.skills.registry import SkillRegistry
+from assistant.skills.registry import ExtensionExecutionClass, SkillRegistry
 from assistant.storage.database import AuditStore
 
 CATALOG_SCHEMA_VERSION = "1.0"
@@ -355,6 +355,20 @@ class ExtensionHubService:
             return "available"
         return "id_in_use"
 
+    def execution_class(self, extension_id: str) -> ExtensionExecutionClass:
+        if extension_id in self.managed_registry:
+            return ExtensionExecutionClass.MANAGED_IN_PROCESS
+        return (
+            ExtensionExecutionClass.REVIEWED_WORKER
+            if self.registry.allow_reviewed_worker_extensions
+            else ExtensionExecutionClass.BLOCKED_NATIVE
+        )
+
+    def is_installable(self, extension: CatalogExtension) -> bool:
+        return extension.compatible and self.execution_class(extension.extension_id) != (
+            ExtensionExecutionClass.BLOCKED_NATIVE
+        )
+
     def connection_service(self, extension_id: str) -> Any | None:
         binding = self.managed_registry.connection(extension_id)
         return binding.service if binding else None
@@ -438,6 +452,11 @@ class ExtensionHubService:
         if status == "id_in_use":
             raise ValueError("This extension ID is already used by a built-in skill")
         try:
+            if not self.is_installable(extension):
+                raise PermissionError(
+                    "Downloaded Python extensions are blocked because this build has no "
+                    "OS-enforced hostile-code sandbox."
+                )
             if extension_id in self.managed_registry:
                 manifest = await asyncio.to_thread(self._install_managed, extension)
             else:

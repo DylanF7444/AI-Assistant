@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
 from typing import Any
 
 from assistant.integrations.connections import ConnectionStatus, normalize_scopes
@@ -66,7 +65,9 @@ class ApiTokenConnectionService:
         try:
             probe = await self.probe()
             if not probe.get("healthy"):
-                raise RuntimeError(str(probe.get("message") or f"{self.display_name} token was rejected"))
+                raise RuntimeError(
+                    str(probe.get("message") or f"{self.display_name} token was rejected")
+                )
             resolved_account = account or _bounded_string(probe.get("account"))
             if resolved_account and self.account_secret_name:
                 self.vault.set(self.account_secret_name, resolved_account)
@@ -107,7 +108,9 @@ class ApiTokenConnectionService:
             ),
         )
 
-    async def disconnect(self, *, profile_id=None, required_scopes: tuple[str, ...] = ()) -> ConnectionStatus:
+    async def disconnect(
+        self, *, profile_id=None, required_scopes: tuple[str, ...] = ()
+    ) -> ConnectionStatus:
         self.vault.delete(self.token_secret_name)
         if self.account_secret_name:
             self.vault.delete(self.account_secret_name)

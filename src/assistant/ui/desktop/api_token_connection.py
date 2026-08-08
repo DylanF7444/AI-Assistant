@@ -105,7 +105,9 @@ class ApiTokenConnectionDialog(QDialog):
     def _connect(self) -> None:
         token = self.token_input.text().strip()
         if not token:
-            QMessageBox.warning(self, "Token Required", f"Enter a {self.config.provider_name} token.")
+            QMessageBox.warning(
+                self, "Token Required", f"Enter a {self.config.provider_name} token."
+            )
             return
         self._set_busy(f"Connecting {self.config.provider_name}…")
         self._start(AsyncWorker(self.service.connect(token)), changed=True)

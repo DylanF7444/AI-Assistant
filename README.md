@@ -58,9 +58,10 @@ language instructions and optional registered skill IDs. Playbooks remain
 planning guidance: every resulting call still uses the normal typed skill,
 permission, confirmation, and audit pipeline.
 
-The desktop Extension Hub can browse a configured HTTPS catalog and install
-compatible signed skill packages. Platform discovery never enables an extension
-or grants it permissions; see `docs/EXTENSION_HUB.md` for the catalog contract
+The desktop Extension Hub can browse a configured HTTPS catalog and review
+signed skill packages. Downloaded Python code is blocked by default because the
+worker is process-isolated but not OS-sandboxed. Platform discovery never
+enables an extension or grants it permissions; see `docs/EXTENSION_HUB.md` for the catalog contract
 and `docs/ADDING_EXTENSIONS.md` for the contributor guide to managed and
 packaged extensions.
 
@@ -84,6 +85,12 @@ tables—in the same results window. These visuals are typed, offline, and have
 text and speech fallbacks. They can be requested in ordinary typed or dictated
 language without fixed punctuation or label/value separators. See
 `docs/VISUAL_CAPABILITIES_IMPLEMENTATION_PLAN.md`.
+
+The current release candidate also provides bounded local document extraction
+and one-folder content search for TXT/Markdown/CSV/PDF/DOCX/XLSX/PPTX, plus
+explicit local-image OCR/description/chart/error understanding. These use
+separate content permissions and never imply screen capture or document editing.
+See `docs/FEATURES.md` and `docs/USER_GUIDE.md` for formats and boundaries.
 
 Background reminders and results are retained in a durable notification Inbox
 with unread badges, a recent-item drawer, in-app banners, Windows click-through,

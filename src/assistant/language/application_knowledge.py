@@ -76,3 +76,42 @@ def application_knowledge_prompt() -> str:
     """Return compact, stable product knowledge for planner prompts."""
 
     return json.dumps(APPLICATION_KNOWLEDGE, separators=(",", ":"))
+
+
+def application_knowledge_answer(text: str) -> str:
+    """Return a bounded code-owned fallback when a model misclassifies product help."""
+
+    normalized = " ".join(text.casefold().split())
+    if "permission" in normalized or "confirmation" in normalized:
+        return (
+            "Actions are limited to registered, schema-validated skills. A separate policy "
+            "layer checks exact scoped permissions and file policy, and sensitive actions "
+            "need a short-lived confirmation bound to the proposed call before execution."
+        )
+    if "offline" in normalized or "network" in normalized:
+        return (
+            "Core routing, storage, policy, local models, and local skills can work offline. "
+            "External integrations require configuration and permission, and the global "
+            "offline lock blocks their network access."
+        )
+    if any(word in normalized for word in ("memory", "context", "knowledge", "playbook")):
+        return (
+            "Recent conversation context is bounded and session-scoped. Optional preference "
+            "memory, local knowledge bases, and user-authored playbooks may guide planning, "
+            "but they cannot add a capability, permission, or execution authority."
+        )
+    if any(word in normalized for word in ("aware", "introspect", "chain of thought")):
+        return str(APPLICATION_KNOWLEDGE["self_knowledge_limits"])
+    if "what can you do" in normalized or "capabilit" in normalized or "skill" in normalized:
+        return (
+            "My live registered skill directory is the source of truth for actions, inputs, "
+            "risk, and permissions. Deterministic commands work without a planner; optional "
+            "local-model and network capabilities work only when configured and permitted."
+        )
+    return (
+        "Typed or spoken input is normalized and common commands use deterministic routing. "
+        "Other requests go to a schema-constrained local planner, which may answer, clarify, "
+        "reject, or select registered skills. A separate execution layer then validates "
+        "arguments, checks policy and permissions, obtains required confirmation, executes, "
+        "and records the outcome locally."
+    )
