@@ -15,12 +15,14 @@ class ApiTokenConnectionService:
         *,
         provider_id: str,
         token_secret_name: str,
+        legacy_token_secret_names: tuple[str, ...] = (),
         account_secret_name: str | None = None,
         display_name: str,
     ) -> None:
         self.vault = vault
         self.provider_id = provider_id
         self.token_secret_name = token_secret_name
+        self.legacy_token_secret_names = tuple(legacy_token_secret_names)
         self.account_secret_name = account_secret_name
         self.display_name = display_name
 
@@ -32,7 +34,7 @@ class ApiTokenConnectionService:
         healthy: bool | None = None,
         message: str | None = None,
     ) -> ConnectionStatus:
-        connected = bool(self.vault.get(self.token_secret_name))
+        connected = bool(self.token())
         return ConnectionStatus(
             connected=connected,
             account=self.account() if connected else None,
@@ -73,6 +75,8 @@ class ApiTokenConnectionService:
                 self.vault.set(self.account_secret_name, resolved_account)
             elif self.account_secret_name:
                 self.vault.delete(self.account_secret_name)
+            for legacy_name in self.legacy_token_secret_names:
+                self.vault.delete(legacy_name)
         except Exception:
             if previous_token:
                 self.vault.set(self.token_secret_name, previous_token)
@@ -112,6 +116,8 @@ class ApiTokenConnectionService:
         self, *, profile_id=None, required_scopes: tuple[str, ...] = ()
     ) -> ConnectionStatus:
         self.vault.delete(self.token_secret_name)
+        for legacy_name in self.legacy_token_secret_names:
+            self.vault.delete(legacy_name)
         if self.account_secret_name:
             self.vault.delete(self.account_secret_name)
         return self.status(profile_id=profile_id, required_scopes=required_scopes)
@@ -122,7 +128,16 @@ class ApiTokenConnectionService:
         return self.vault.get(self.account_secret_name)
 
     def token(self) -> str | None:
-        return self.vault.get(self.token_secret_name)
+        token = self.vault.get(self.token_secret_name)
+        if token:
+            return token
+        for legacy_name in self.legacy_token_secret_names:
+            token = self.vault.get(legacy_name)
+            if token:
+                self.vault.set(self.token_secret_name, token)
+                self.vault.delete(legacy_name)
+                return token
+        return None
 
     async def probe(self) -> dict[str, Any]:
         return {"healthy": True}

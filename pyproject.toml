@@ -14,6 +14,7 @@ dependencies = [
   "platformdirs>=4.2,<5",
   "jsonschema>=4.23,<5",
     "cryptography>=50,<51",
+  "certifi>=2024.7.4,<2027",
   "PyYAML>=6,<7",
   "tzdata>=2025.2,<2028",
 ]

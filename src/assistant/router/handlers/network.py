@@ -112,53 +112,6 @@ class NetworkHandler:
                         source="rule",
                     )
                 )
-        if match := re.fullmatch(r"ask (chatgpt|codex|openai|claude) (?:for )?(.+)", routed):
-            provider = {
-                "claude": "anthropic",
-                "codex": "codex",
-            }.get(match.group(1), "openai")
-            arguments = {
-                "provider": provider,
-                "question": match.group(2),
-                "max_tokens": 1500,
-            }
-            return RouteResult(
-                Intent(
-                    name="cloud.ask",
-                    arguments=arguments,
-                    confidence=0.99,
-                    source="rule",
-                )
-            )
-        if match := re.fullmatch(
-            r"(?:make|write|generate|create) (?:some )?(?:code|a script|an app|a program)(?: (?:to|for|that|which))? (.+)",
-            routed,
-        ):
-            return RouteResult(
-                Intent(
-                    name="cloud.ask",
-                    arguments={
-                        "provider": "codex",
-                        "question": f"Write code {match.group(1)}",
-                        "max_tokens": 4000,
-                    },
-                    confidence=0.96,
-                    source="rule",
-                )
-            )
-        if match := re.fullmatch(r"code (?:up|me|for me) (.+)", routed):
-            return RouteResult(
-                Intent(
-                    name="cloud.ask",
-                    arguments={
-                        "provider": "codex",
-                        "question": f"Write code for {match.group(1)}",
-                        "max_tokens": 4000,
-                    },
-                    confidence=0.94,
-                    source="rule",
-                )
-            )
         return None
 
     @staticmethod

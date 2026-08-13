@@ -160,6 +160,8 @@ class AssistantOrchestrator:
         self._response_visible_recorded: set[UUID] = set()
         self._retrieval_refresh_lock = threading.Lock()
         self._active_stt: STTProvider | None = None
+        self._speech_state_lock = threading.Lock()
+        self._speech_active = False
         self.state = ConversationState()
         self.interactions = InteractionRecorder(history, self.state)
         self.file_resolver = FileReferenceResolver(self._resolve_file_placeholders)
@@ -242,18 +244,26 @@ class AssistantOrchestrator:
         with self._request_state_lock:
             return bool(self._active_request_correlations)
 
+    @property
+    def speech_in_progress(self) -> bool:
+        with self._speech_state_lock:
+            return self._speech_active
+
     def discard_voice_interaction(self, correlation_id: UUID) -> None:
         """Release timing state when passive audio was not an assistant request."""
 
         self._voice_interaction_starts.pop(correlation_id, None)
 
     async def consume_persistent_voice_interrupt(self, text: str) -> bool:
-        """Consume speech heard during a request, cancelling only on an explicit command."""
+        """Consume passive voice audio while a request or speech playback is active."""
 
-        if not self.request_in_progress:
+        if not (self.request_in_progress or self.speech_in_progress):
             return False
         if is_explicit_cancel_command(text):
-            await self.cancel()
+            if self.request_in_progress:
+                await self.cancel()
+            else:
+                await self.stop_speaking()
         return True
 
     def _remember_interaction(
@@ -3311,6 +3321,8 @@ class AssistantOrchestrator:
             path=RequestPath.SPEECH,
             provider=self.tts.__class__.__name__,
         )
+        with self._speech_state_lock:
+            self._speech_active = True
         try:
             async for event in self.tts.speak(response):
                 if (
@@ -3346,6 +3358,9 @@ class AssistantOrchestrator:
                     dimensions=metric_dimensions,
                 )
             return
+        finally:
+            with self._speech_state_lock:
+                self._speech_active = False
         if self.metrics is not None and correlation_id is not None:
             completed_at = time.perf_counter()
             if first_audio_at is not None:
@@ -3536,8 +3551,11 @@ class AssistantOrchestrator:
             return await self._finish(response, ExecutionOutcome(), invoked_by_voice=True)
         return await self.handle_transcript(final)
 
+    async def stop_speaking(self) -> None:
+        if self.tts:
+            await self.tts.cancel()
+
     async def cancel(self, *, exclude_correlation: UUID | None = None) -> None:
-        # Provider cancellation is coordinated by the desktop/bootstrap layer.
         self._pending_confirmation = None
         self._replanning_continuations.clear()
         with self._request_state_lock:
@@ -3556,8 +3574,7 @@ class AssistantOrchestrator:
             await self._active_stt.cancel()
         if self.planner:
             await self.planner.cancel()
-        if self.tts:
-            await self.tts.cancel()
+        await self.stop_speaking()
         if cancellation_correlation:
             await self.events.publish(
                 PipelineEvent(

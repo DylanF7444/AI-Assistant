@@ -105,6 +105,58 @@ _DEMO_STRING_VALUES = {
 }
 
 
+_SKILL_GROUP_STYLES = {
+    "Assistant & Security": ("#b996ff", "#1f1b35"),
+    "Connections": ("#4fd7ef", "#122d37"),
+    "Files & Folders": ("#72e2bd", "#15342d"),
+    "Media": ("#ffb86b", "#382b1c"),
+    "Productivity": ("#87aef8", "#172b49"),
+    "Visualization": ("#ff86c8", "#351d2d"),
+    "Web & Cloud": ("#ffd18a", "#3a2a18"),
+    "Windows": ("#ff9cac", "#3a1e2a"),
+}
+_SKILL_GROUP_FALLBACK_STYLES = (
+    ("#9fc0ff", "#172b49"),
+    ("#72e2bd", "#15342d"),
+    ("#ffd18a", "#3a2a18"),
+)
+
+
+def _group_skill_manifests(manifests: Any) -> tuple[tuple[str, tuple[Any, ...]], ...]:
+    """Return manifests grouped by their declared category for the Skills tab."""
+    grouped: dict[str, list[Any]] = {}
+    for manifest in manifests:
+        category = str(getattr(manifest, "category", "General") or "General").strip()
+        category = category or "General"
+        grouped.setdefault(category, []).append(manifest)
+    return tuple(
+        (
+            category,
+            tuple(
+                sorted(
+                    values,
+                    key=lambda item: (
+                        str(getattr(item, "display_name", "")).casefold(),
+                        str(getattr(item, "skill_id", "")).casefold(),
+                    ),
+                )
+            ),
+        )
+        for category, values in sorted(grouped.items(), key=lambda item: item[0].casefold())
+    )
+
+
+def _skill_group_style(category: str, group_index: int) -> tuple[str, str]:
+    return _SKILL_GROUP_STYLES.get(
+        category,
+        _SKILL_GROUP_FALLBACK_STYLES[group_index % len(_SKILL_GROUP_FALLBACK_STYLES)],
+    )
+
+
+def _skill_source_label(from_extension_hub: bool) -> str:
+    return "Extension Hub" if from_extension_hub else "Built-in"
+
+
 def _demo_arguments(input_schema: dict[str, Any]) -> dict[str, Any]:
     """Build an editable starting point from a skill's declared JSON schema."""
 
@@ -317,6 +369,7 @@ def run_desktop(container: Container) -> int:
         from PySide6.QtCore import QObject, QRect, QSize, Qt, QTimer, Signal
         from PySide6.QtGui import (
             QAction,
+            QBrush,
             QColor,
             QIcon,
             QKeySequence,
@@ -440,6 +493,7 @@ def run_desktop(container: Container) -> int:
         submitted = Signal(str)
         listen_requested = Signal()
         cancel_requested = Signal()
+        stop_speaking_requested = Signal()
         expand_requested = Signal()
         pinned_changed = Signal(bool)
         activation_mode_changed = Signal(str)
@@ -585,13 +639,20 @@ def run_desktop(container: Container) -> int:
             self.listen_button.clicked.connect(self.listen_requested.emit)
             self.cancel_button = QPushButton("Stop")
             self.cancel_button.setObjectName("dangerButton")
+            self.cancel_button.setAccessibleName("Stop current request")
             self.cancel_button.setEnabled(False)
             self.cancel_button.clicked.connect(self.cancel_requested.emit)
+            self.stop_speaking_button = QPushButton("Stop speaking")
+            self.stop_speaking_button.setObjectName("secondaryButton")
+            self.stop_speaking_button.setAccessibleName("Stop assistant speech")
+            self.stop_speaking_button.setEnabled(False)
+            self.stop_speaking_button.clicked.connect(self.stop_speaking_requested.emit)
             self.send_button = QPushButton("Send  >")
             self.send_button.setObjectName("primaryButton")
             self.send_button.clicked.connect(self._submit)
             controls.addWidget(self.listen_button)
             controls.addStretch()
+            controls.addWidget(self.stop_speaking_button)
             controls.addWidget(self.cancel_button)
             controls.addWidget(self.send_button)
             layout.addLayout(controls)
@@ -615,13 +676,20 @@ def run_desktop(container: Container) -> int:
             if mode:
                 self.activation_mode_changed.emit(str(mode))
 
-        def set_pipeline_busy(self, *, blocked: bool, cancellable: bool) -> None:
+        def set_pipeline_busy(
+            self,
+            *,
+            blocked: bool,
+            cancellable: bool,
+            speech_cancellable: bool = False,
+        ) -> None:
             self.composer.setEnabled(not blocked)
             self.send_button.setEnabled(not blocked)
             self.listen_button.setEnabled(not blocked)
             self.activation_mode.setEnabled(not blocked)
             self.expand_button.setEnabled(not blocked)
             self.cancel_button.setEnabled(cancellable)
+            self.stop_speaking_button.setEnabled(speech_cancellable)
 
         def set_request(self, text: str) -> None:
             text = " ".join(text.split())
@@ -747,6 +815,7 @@ def run_desktop(container: Container) -> int:
             self.compact_panel.submitted.connect(self._run_compact_command)
             self.compact_panel.listen_requested.connect(self.listen)
             self.compact_panel.cancel_requested.connect(self.cancel)
+            self.compact_panel.stop_speaking_requested.connect(self.stop_speaking)
             self.compact_panel.expand_requested.connect(lambda: self._switch_window_mode("full"))
             self.compact_panel.inbox_requested.connect(self._toggle_notification_drawer)
             self.compact_panel.pinned_changed.connect(self._set_compact_pinned)
@@ -2173,11 +2242,17 @@ def run_desktop(container: Container) -> int:
             self.run_button.clicked.connect(self.run_command)
             self.cancel_button = QPushButton("Stop")
             self.cancel_button.setObjectName("dangerButton")
-            self.cancel_button.setAccessibleName("Emergency stop current request")
+            self.cancel_button.setAccessibleName("Stop current request")
             self.cancel_button.clicked.connect(self.cancel)
             self.cancel_button.setEnabled(False)
+            self.stop_speaking_button = QPushButton("Stop speaking")
+            self.stop_speaking_button.setObjectName("secondaryButton")
+            self.stop_speaking_button.setAccessibleName("Stop assistant speech")
+            self.stop_speaking_button.clicked.connect(self.stop_speaking)
+            self.stop_speaking_button.setEnabled(False)
             controls.addWidget(self.listen_button)
             controls.addStretch()
+            controls.addWidget(self.stop_speaking_button)
             controls.addWidget(self.cancel_button)
             controls.addWidget(self.run_button)
             response_header = QHBoxLayout()
@@ -2399,8 +2474,17 @@ def run_desktop(container: Container) -> int:
             self.run_button.setEnabled(not blocked)
             self.listen_button.setEnabled(not blocked)
             self.cancel_button.setEnabled(active)
+            speech_active = (
+                self._active_state == PipelineState.SPEAKING
+                or container.orchestrator.speech_in_progress
+            )
+            self.stop_speaking_button.setEnabled(speech_active)
             self.compact_view_button.setEnabled(not blocked)
-            self.compact_panel.set_pipeline_busy(blocked=blocked, cancellable=active)
+            self.compact_panel.set_pipeline_busy(
+                blocked=blocked,
+                cancellable=active,
+                speech_cancellable=speech_active,
+            )
 
         def _add_shortcut(self, sequence: str, callback: Any) -> None:
             shortcut = QShortcut(QKeySequence(sequence), self)
@@ -2775,7 +2859,8 @@ def run_desktop(container: Container) -> int:
             browser_layout.addWidget(browser_title)
             browser_layout.addWidget(
                 self._info_label(
-                    "Select a skill to review its purpose, access, security level, and demo."
+                    "Select a skill to review its purpose, access, security level, and demo. "
+                    "Skills are grouped by category; Extension Hub skills carry a source badge."
                 )
             )
             self.skill_list = QListWidget()
@@ -2829,6 +2914,9 @@ def run_desktop(container: Container) -> int:
             overview_header = QHBoxLayout()
             self.skill_category_value = QLabel("General")
             self.skill_category_value.setObjectName("skillCategoryBadge")
+            self.skill_source_value = QLabel("Built-in")
+            self.skill_source_value.setObjectName("skillSourceBadge")
+            self.skill_source_value.setProperty("source", "builtin")
             self.skill_security_value = QLabel("Low security risk")
             self.skill_security_value.setObjectName("skillSecurityBadge")
             self.skill_security_value.setWordWrap(True)
@@ -2836,6 +2924,7 @@ def run_desktop(container: Container) -> int:
                 QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
             )
             overview_header.addWidget(self.skill_category_value)
+            overview_header.addWidget(self.skill_source_value)
             overview_header.addStretch()
             self.skill_description = QLabel("")
             self.skill_description.setObjectName("skillDescription")
@@ -2909,27 +2998,74 @@ def run_desktop(container: Container) -> int:
             return page
 
         @staticmethod
-        def _skill_list_text(manifest: Any, enabled: bool) -> str:
+        def _skill_list_text(
+            manifest: Any,
+            enabled: bool,
+            *,
+            from_extension_hub: bool = False,
+        ) -> str:
             state = "Enabled" if enabled else "Disabled"
-            return f"{manifest.display_name}\n{manifest.category}  ·  {state}"
+            source = _skill_source_label(from_extension_hub)
+            return f"{manifest.display_name}\n{source}  ·  {manifest.category}  ·  {state}"
+
+        def _set_skill_source_badge(self, from_extension_hub: bool) -> None:
+            self.skill_source_value.setText(_skill_source_label(from_extension_hub))
+            self.skill_source_value.setProperty(
+                "source", "extension_hub" if from_extension_hub else "builtin"
+            )
+            self.skill_source_value.setToolTip(
+                "Installed through Extension Hub"
+                if from_extension_hub
+                else "Included with Local Assistant"
+            )
+            self.skill_source_value.style().unpolish(self.skill_source_value)
+            self.skill_source_value.style().polish(self.skill_source_value)
 
         def _reload_skills(self) -> None:
             selected = self._selected_manifest()
             selected_id = selected.skill_id if selected is not None else "core.calculator"
             self.skill_list.clear()
-            for manifest in container.registry.list():
-                item = QListWidgetItem(
-                    self._skill_list_text(
-                        manifest, container.registry.is_enabled(manifest.skill_id)
+            selected_item = None
+            for group_index, (category, manifests) in enumerate(
+                _group_skill_manifests(container.registry.list())
+            ):
+                accent, background = _skill_group_style(category, group_index)
+                header = QListWidgetItem(f"{category}  ·  {len(manifests)} skills")
+                header.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                header.setForeground(QBrush(QColor(accent)))
+                header.setBackground(QBrush(QColor("#17263d")))
+                header_font = header.font()
+                header_font.setBold(True)
+                header.setFont(header_font)
+                header.setToolTip(f"Skills grouped under {category}")
+                self.skill_list.addItem(header)
+                for manifest in manifests:
+                    from_extension_hub = container.extension_hub.is_installed(manifest.skill_id)
+                    item = QListWidgetItem(
+                        self._skill_list_text(
+                            manifest,
+                            container.registry.is_enabled(manifest.skill_id),
+                            from_extension_hub=from_extension_hub,
+                        )
                     )
+                    item.setData(Qt.ItemDataRole.UserRole, manifest.skill_id)
+                    item.setToolTip(f"{manifest.description}\n{manifest.skill_id}")
+                    item.setForeground(QBrush(QColor("#dce7f3")))
+                    item.setBackground(QBrush(QColor(background)))
+                    self.skill_list.addItem(item)
+                    if manifest.skill_id == selected_id:
+                        selected_item = item
+            if selected_item is None:
+                selected_item = next(
+                    (
+                        self.skill_list.item(row)
+                        for row in range(self.skill_list.count())
+                        if self.skill_list.item(row).data(Qt.ItemDataRole.UserRole)
+                    ),
+                    None,
                 )
-                item.setData(Qt.ItemDataRole.UserRole, manifest.skill_id)
-                item.setToolTip(f"{manifest.description}\n{manifest.skill_id}")
-                self.skill_list.addItem(item)
-                if manifest.skill_id == selected_id:
-                    self.skill_list.setCurrentItem(item)
-            if self.skill_list.currentRow() < 0 and self.skill_list.count():
-                self.skill_list.setCurrentRow(0)
+            if selected_item is not None:
+                self.skill_list.setCurrentItem(selected_item)
             self._update_skill_details()
 
         @staticmethod
@@ -2946,6 +3082,7 @@ def run_desktop(container: Container) -> int:
             if manifest is None:
                 self.skill_detail_title.setText("No skill selected")
                 self.skill_detail_id.clear()
+                self._set_skill_source_badge(False)
                 self.skill_description.clear()
                 self.skill_background_value.clear()
                 self.skill_permissions_summary.clear()
@@ -2961,6 +3098,7 @@ def run_desktop(container: Container) -> int:
                 f"{'Enabled' if enabled else 'Disabled'}"
             )
             self.skill_category_value.setText(manifest.category)
+            self._set_skill_source_badge(container.extension_hub.is_installed(manifest.skill_id))
             self.skill_security_value.setText(self._security_description(manifest.risk))
             self.skill_security_value.setProperty("level", manifest.risk.value)
             self.skill_security_value.style().unpolish(self.skill_security_value)
@@ -3012,7 +3150,11 @@ def run_desktop(container: Container) -> int:
             else:
                 container.registry.enable(manifest.skill_id)
             self.skill_list.currentItem().setText(
-                self._skill_list_text(manifest, container.registry.is_enabled(manifest.skill_id))
+                self._skill_list_text(
+                    manifest,
+                    container.registry.is_enabled(manifest.skill_id),
+                    from_extension_hub=container.extension_hub.is_installed(manifest.skill_id),
+                )
             )
             self._update_skill_details(reset_demo=False)
 
@@ -3144,6 +3286,8 @@ def run_desktop(container: Container) -> int:
             if item is None:
                 return None
             skill_id = item.data(Qt.ItemDataRole.UserRole)
+            if not skill_id:
+                return None
             return next(
                 (
                     manifest
@@ -3724,18 +3868,13 @@ def run_desktop(container: Container) -> int:
             self.setting_openai_codex_model = QLineEdit(container.settings.openai_codex_model)
             self.setting_anthropic_model = QLineEdit(container.settings.anthropic_model)
             vault = SecretVault(container.settings.data_dir / "secrets")
-            self.setting_openai_key = QLineEdit()
-            self.setting_openai_key.setEchoMode(QLineEdit.EchoMode.Password)
-            self.setting_openai_key.setPlaceholderText(
-                "Stored; enter a new key to replace" if vault.has("openai") else "OpenAI API key"
+            self.setting_cloud_model_help = QLabel(
+                "Connect OpenAI or Anthropic from the Extension Hub; API keys are managed "
+                "there and never stored in application settings. The OpenAI extension also "
+                "provides local Codex mode without an OpenAI API key."
             )
-            self.setting_anthropic_key = QLineEdit()
-            self.setting_anthropic_key.setEchoMode(QLineEdit.EchoMode.Password)
-            self.setting_anthropic_key.setPlaceholderText(
-                "Stored; enter a new key to replace"
-                if vault.has("anthropic")
-                else "Anthropic API key"
-            )
+            self.setting_cloud_model_help.setWordWrap(True)
+            self.setting_cloud_model_help.setObjectName("activityHint")
             self.setting_brave_key = QLineEdit()
             self.setting_brave_key.setEchoMode(QLineEdit.EchoMode.Password)
             self.setting_brave_key.setPlaceholderText(
@@ -3957,9 +4096,8 @@ def run_desktop(container: Container) -> int:
             form.addRow("Preload local LLM at startup", self.setting_llm_preload)
             form.addRow("OpenAI model", self.setting_openai_model)
             form.addRow("OpenAI Codex model", self.setting_openai_codex_model)
-            form.addRow("OpenAI API key", self.setting_openai_key)
             form.addRow("Anthropic model", self.setting_anthropic_model)
-            form.addRow("Anthropic API key", self.setting_anthropic_key)
+            form.addRow("Cloud API keys", self.setting_cloud_model_help)
             form.addRow("Web search provider", self.setting_search_provider)
             form.addRow("Brave Search API key", self.setting_brave_key)
             form.addRow("Speech provider", self.setting_tts_provider)
@@ -4273,8 +4411,6 @@ def run_desktop(container: Container) -> int:
             container.scheduler.wake()
             vault = SecretVault(validated.data_dir / "secrets")
             for name, field in (
-                ("openai", self.setting_openai_key),
-                ("anthropic", self.setting_anthropic_key),
                 ("brave", self.setting_brave_key),
                 ("elevenlabs", self.setting_elevenlabs_key),
             ):
@@ -5722,6 +5858,19 @@ def run_desktop(container: Container) -> int:
             self._workers.append(worker)
             worker.start()
 
+        def stop_speaking(self) -> None:
+            async def stop():
+                await controller.stop_speaking()
+
+            worker = AsyncWorker(stop())
+            worker.complete.connect(
+                lambda _: self._append_activity("Speech stopped", "Stopped assistant speech")
+            )
+            worker.failed.connect(self._show_error)
+            worker.finished.connect(lambda: self._workers.remove(worker))
+            self._workers.append(worker)
+            worker.start()
+
         def _position_notification_overlays(self) -> None:
             margin = 16
             drawer_width = min(420, max(320, self.width() - margin * 2))
@@ -6124,7 +6273,7 @@ def run_desktop(container: Container) -> int:
             font-size: 10.5pt;
             padding-top: 8px;
         }
-        #skillCategoryBadge, #skillSecurityBadge {
+        #skillCategoryBadge, #skillSourceBadge, #skillSecurityBadge {
             color: #9fc0ff;
             background: #172b49;
             border: 1px solid #28456f;
@@ -6132,6 +6281,16 @@ def run_desktop(container: Container) -> int:
             padding: 5px 9px;
             font-size: 8pt;
             font-weight: 700;
+        }
+        #skillSourceBadge[source="extension_hub"] {
+            color: #d6b4ff;
+            background: #2b2150;
+            border-color: #624c9d;
+        }
+        #skillSourceBadge[source="builtin"] {
+            color: #9fc0ff;
+            background: #172b49;
+            border-color: #28456f;
         }
         #skillSecurityBadge[level="medium"] {
             color: #ffd18a;

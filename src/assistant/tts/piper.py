@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import re
 import tempfile
+import threading
 import time
 import wave
 from collections.abc import AsyncIterator
@@ -37,10 +38,15 @@ class PiperProvider:
         self.cache_max_bytes = cache_max_bytes
         self.cache_retention_days = cache_retention_days
         self._process: asyncio.subprocess.Process | None = None
+        self._speech_state_lock = threading.Lock()
+        self._active_cancel_event: threading.Event | None = None
 
     async def speak(self, response: Response) -> AsyncIterator[PipelineEvent]:
         if not response.speech_text:
             return
+        cancel_event = threading.Event()
+        with self._speech_state_lock:
+            self._active_cancel_event = cancel_event
         if self.cache_dir is not None:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             await asyncio.to_thread(self._prune_cache)
@@ -50,10 +56,14 @@ class PiperProvider:
             self.playback_state(True)
         try:
             for chunk in chunks:
+                if cancel_event.is_set():
+                    return
                 output, cacheable = self._output_path(chunk)
                 try:
                     if not output.exists() or output.stat().st_size == 0:
                         await self._synthesize(chunk, output)
+                    if cancel_event.is_set():
+                        return
                     if first_audio:
                         first_audio = False
                         yield PipelineEvent(
@@ -62,6 +72,8 @@ class PiperProvider:
                             message="Speaking",
                         )
                     await asyncio.to_thread(self._play, output)
+                    if cancel_event.is_set():
+                        return
                 finally:
                     if not cacheable:
                         output.unlink(missing_ok=True)
@@ -69,6 +81,9 @@ class PiperProvider:
             if self.playback_state:
                 self.playback_state(False)
             self._process = None
+            with self._speech_state_lock:
+                if self._active_cancel_event is cancel_event:
+                    self._active_cancel_event = None
 
     @staticmethod
     def _speech_chunks(text: str, *, maximum_characters: int = 180) -> tuple[str, ...]:
@@ -156,14 +171,35 @@ class PiperProvider:
         except (ImportError, RuntimeError):
             import winsound
 
-            winsound.PlaySound(str(path), winsound.SND_FILENAME)
+            winsound.PlaySound(
+                str(path),
+                winsound.SND_FILENAME | winsound.SND_ASYNC,
+            )
+            with wave.open(str(path), "rb") as audio:
+                duration = audio.getnframes() / max(audio.getframerate(), 1)
+            with self._speech_state_lock:
+                cancel_event = self._active_cancel_event
+            if cancel_event is None:
+                time.sleep(duration)
+            else:
+                cancel_event.wait(duration)
+            if cancel_event is not None and cancel_event.is_set():
+                winsound.PlaySound(None, winsound.SND_PURGE)
 
     async def cancel(self) -> None:
-        if self._process:
-            self._process.terminate()
-        import winsound
+        with self._speech_state_lock:
+            cancel_event = self._active_cancel_event
+            process = self._process
+        if cancel_event is not None:
+            cancel_event.set()
+        if process:
+            process.terminate()
+        try:
+            import winsound
 
-        winsound.PlaySound(None, winsound.SND_PURGE)
+            winsound.PlaySound(None, winsound.SND_PURGE)
+        except ImportError:
+            pass
         try:
             import sounddevice as sd
 

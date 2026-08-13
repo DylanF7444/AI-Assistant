@@ -39,6 +39,8 @@ class ExternalJsonClient:
         tokens: AccessTokenProvider,
         *,
         provider_name: str,
+        token_header: str = "Authorization",
+        token_prefix: str = "Bearer ",
         opener: Callable[..., Any] = urllib.request.urlopen,
         timeout_seconds: float = 20,
         max_response_bytes: int = DEFAULT_MAX_JSON_RESPONSE_BYTES,
@@ -51,6 +53,15 @@ class ExternalJsonClient:
         self.base_url = _validate_base_url(base_url)
         self.tokens = tokens
         self.provider_name = provider_name
+        normalized_token_header = token_header.strip()
+        if not normalized_token_header or any(
+            ord(character) < 33 or ord(character) > 126 for character in normalized_token_header
+        ):
+            raise ValueError("External API token header is invalid")
+        if any(ord(character) < 32 for character in token_prefix):
+            raise ValueError("External API token prefix is invalid")
+        self.token_header = normalized_token_header
+        self.token_prefix = token_prefix
         self.opener = opener
         self.timeout_seconds = max(0.1, float(timeout_seconds))
         self.max_response_bytes = max(1024, int(max_response_bytes))
@@ -138,7 +149,7 @@ class ExternalJsonClient:
         url = f"{self.base_url}{path}" + (f"?{encoded_query}" if encoded_query else "")
         request_headers = {
             **headers,
-            "Authorization": f"Bearer {token}",
+            self.token_header: f"{self.token_prefix}{token}",
             "Accept": "application/json",
             "Content-Type": "application/json",
             "User-Agent": self.user_agent,

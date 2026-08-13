@@ -38,6 +38,11 @@ from assistant.extensions.platform import (
     ManagedExtensionRegistry,
     ManagedExtensionSpec,
 )
+from assistant.integrations.anthropic import (
+    ANTHROPIC_API_KEY_SECRET,
+    ANTHROPIC_LEGACY_SECRET_NAMES,
+    AnthropicConnectionService,
+)
 from assistant.integrations.api_token import ApiTokenProvider
 from assistant.integrations.connections import ConnectionBinding
 from assistant.integrations.github import GitHubAdapter, GitHubConnectionService
@@ -69,8 +74,13 @@ from assistant.integrations.microsoft_graph import (
     MicrosoftGraphTokenManager,
 )
 from assistant.integrations.notion import NotionAdapter, NotionConnectionService
+from assistant.integrations.openai import (
+    OPENAI_API_KEY_SECRET,
+    OPENAI_LEGACY_SECRET_NAMES,
+    OpenAIConnectionService,
+)
 from assistant.integrations.slack import SlackAdapter, SlackConnectionService
-from assistant.integrations.web import CloudModelClient, WebClient
+from assistant.integrations.web import WebClient
 from assistant.language.embeddings import (
     FallbackEmbeddingProvider,
     LexicalFallbackEmbeddingProvider,
@@ -110,6 +120,7 @@ from assistant.scheduling.runner import BackgroundRunner
 from assistant.scheduling.runtime import BackgroundRuntime
 from assistant.scheduling.service import SchedulerService
 from assistant.scheduling.store import ScheduleStore
+from assistant.skills.anthropic import AnthropicSkill
 from assistant.skills.builtin import (
     CalculatorSkill,
     ClipboardSkill,
@@ -133,7 +144,7 @@ from assistant.skills.macros import MacroSkill
 from assistant.skills.media import MediaPresentSkill, MediaViewerControlSkill
 from assistant.skills.memory import MemorySkill
 from assistant.skills.network import (
-    CloudAskSkill,
+    CodexAskSkill,
     HeadlessReadSkill,
     NewsSearchSkill,
     WebFetchSkill,
@@ -141,6 +152,7 @@ from assistant.skills.network import (
 )
 from assistant.skills.notion import NotionSkill
 from assistant.skills.onedrive import OneDriveSkill
+from assistant.skills.openai import OpenAISkill
 from assistant.skills.outlook_calendar import OutlookCalendarSkill
 from assistant.skills.outlook_mail import OutlookMailSkill
 from assistant.skills.playbooks import PlaybookSkill
@@ -431,17 +443,7 @@ def _register_network_skills(
     registry.register(
         HeadlessReadSkill(PlaywrightHeadlessBrowser(offline_mode=settings.offline_lock))
     )
-    registry.register(
-        CloudAskSkill(
-            CloudModelClient(),
-            secret_vault.get,
-            {
-                "openai": settings.openai_model,
-                "codex": settings.openai_codex_model,
-                "anthropic": settings.anthropic_model,
-            },
-        )
-    )
+    registry.register(CodexAskSkill(settings.openai_codex_model))
 
 
 def _google_calendar_skill_factory(secret_vault: SecretVault):
@@ -489,7 +491,34 @@ def _github_skill_factory(secret_vault: SecretVault):
     )
 
 
-def _managed_extension_registry(secret_vault: SecretVault) -> ManagedExtensionRegistry:
+def _migrate_cloud_api_key(
+    secret_vault: SecretVault,
+    target_name: str,
+    legacy_names: tuple[str, ...],
+) -> None:
+    if secret_vault.get(target_name):
+        return
+    for legacy_name in legacy_names:
+        value = secret_vault.get(legacy_name)
+        if value:
+            secret_vault.set(target_name, value)
+            secret_vault.delete(legacy_name)
+            return
+
+
+def _managed_extension_registry(
+    secret_vault: SecretVault,
+    *,
+    openai_model: str = "gpt-5.5",
+    codex_model: str = "gpt-5.5",
+    anthropic_model: str = "claude-sonnet-4-6",
+) -> ManagedExtensionRegistry:
+    _migrate_cloud_api_key(secret_vault, OPENAI_API_KEY_SECRET, OPENAI_LEGACY_SECRET_NAMES)
+    _migrate_cloud_api_key(
+        secret_vault,
+        ANTHROPIC_API_KEY_SECRET,
+        ANTHROPIC_LEGACY_SECRET_NAMES,
+    )
     google_calendar_factory = _google_calendar_skill_factory(secret_vault)
     gmail_factory = _gmail_skill_factory(secret_vault)
     google_drive_factory = _google_drive_skill_factory(secret_vault)
@@ -504,6 +533,19 @@ def _managed_extension_registry(secret_vault: SecretVault) -> ManagedExtensionRe
     slack_connection = SlackConnectionService(secret_vault)
     notion_connection = NotionConnectionService(secret_vault)
     github_connection = GitHubConnectionService(secret_vault)
+    openai_connection = OpenAIConnectionService(secret_vault)
+    anthropic_connection = AnthropicConnectionService(secret_vault)
+
+    def openai_factory():
+        return OpenAISkill(
+            openai_connection.adapter,
+            default_model=openai_model,
+            default_codex_model=codex_model,
+        )
+
+    def anthropic_factory():
+        return AnthropicSkill(anthropic_connection.adapter, default_model=anthropic_model)
+
     return ManagedExtensionRegistry(
         (
             ManagedExtensionSpec.from_factory(
@@ -623,6 +665,33 @@ def _managed_extension_registry(secret_vault: SecretVault) -> ManagedExtensionRe
                     service=github_connection,
                     provider_id=github_connection.provider_id,
                     dialog_entry_point="assistant.ui.desktop.github_connection:GitHubConnectionDialog",
+                ),
+            ),
+            ManagedExtensionSpec.from_factory(
+                openai_factory,
+                package_slug="openai",
+                featured=True,
+                connection=ConnectionBinding(
+                    service=openai_connection,
+                    provider_id=openai_connection.provider_id,
+                    required_scopes=(),
+                    connection_required=False,
+                    dialog_entry_point=(
+                        "assistant.ui.desktop.openai_connection:OpenAIConnectionDialog"
+                    ),
+                ),
+            ),
+            ManagedExtensionSpec.from_factory(
+                anthropic_factory,
+                package_slug="anthropic",
+                featured=True,
+                connection=ConnectionBinding(
+                    service=anthropic_connection,
+                    provider_id=anthropic_connection.provider_id,
+                    required_scopes=(),
+                    dialog_entry_point=(
+                        "assistant.ui.desktop.anthropic_connection:AnthropicConnectionDialog"
+                    ),
                 ),
             ),
         )
@@ -898,7 +967,12 @@ def build_container(settings: Settings | None = None) -> Container:
     storage = _build_storage_services(settings, database)
     retrieval = _build_retrieval_services(settings, storage)
     events = EventBus()
-    managed_extensions = _managed_extension_registry(storage.secret_vault)
+    managed_extensions = _managed_extension_registry(
+        storage.secret_vault,
+        openai_model=settings.openai_model,
+        codex_model=settings.openai_codex_model,
+        anthropic_model=settings.anthropic_model,
+    )
     registry, macro_store, media_sessions, media_cache = _build_registry(
         settings,
         database,

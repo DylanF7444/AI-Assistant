@@ -1,3 +1,4 @@
+from assistant.router.handlers.anthropic import AnthropicHandler
 from assistant.router.handlers.applications import ApplicationWindowHandler
 from assistant.router.handlers.applications_launch import ApplicationHandler
 from assistant.router.handlers.calendar import CalendarHandler
@@ -14,6 +15,7 @@ from assistant.router.handlers.media import MediaHandler
 from assistant.router.handlers.network import NetworkHandler
 from assistant.router.handlers.notion import NotionHandler
 from assistant.router.handlers.onedrive import OneDriveHandler
+from assistant.router.handlers.openai import OpenAIHandler
 from assistant.router.handlers.outlook_calendar import OutlookCalendarHandler
 from assistant.router.handlers.outlook_mail import OutlookMailHandler
 from assistant.router.handlers.productivity import ProductivityHandler
@@ -33,6 +35,8 @@ DEFAULT_ROUTE_HANDLERS: tuple[RouteHandler, ...] = (
     SlackHandler(),
     NotionHandler(),
     GitHubHandler(),
+    OpenAIHandler(),
+    AnthropicHandler(),
     ProductivityHandler(),
     VisualizationHandler(),
     NetworkHandler(),

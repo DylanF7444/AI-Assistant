@@ -4,12 +4,20 @@ import asyncio
 import io
 import json
 import os
+import ssl
+from urllib.error import URLError
+from urllib.request import Request
 
 import pytest
 
 from assistant.contracts import PermissionContext, SkillCall
 from assistant.integrations.headless_browser import PlaywrightHeadlessBrowser, RenderedPage
-from assistant.integrations.web import CloudModelClient, CodexExecClient, WebClient
+from assistant.integrations.web import (
+    CloudModelClient,
+    CodexExecClient,
+    WebClient,
+    _open_request,
+)
 from assistant.policy.network import OfflineNetworkError
 from assistant.router.deterministic import DeterministicRouter
 from assistant.skills.network import (
@@ -66,8 +74,8 @@ def test_network_routes_are_explicit():
     router = DeterministicRouter()
     assert router.route("search the web for current Python news").intent.name == "web.search"
     claude = router.route("ask Claude explain asyncio").intent
-    assert claude.name == "cloud.ask"
-    assert claude.arguments["provider"] == "anthropic"
+    assert claude.name == "integration.anthropic"
+    assert claude.arguments["question"] == "explain asyncio"
     codex = router.route("ask Codex review this function").intent
     assert codex.arguments["provider"] == "codex"
     headless = router.route("read https://example.com in the background").intent
@@ -94,7 +102,7 @@ def test_network_routes_are_explicit():
     assert spoken_news.arguments["provider"] == "codex"
     assert spoken_news.arguments["question"] == "todays news"
     code = router.route("make code to parse a CSV file").intent
-    assert code.name == "cloud.ask"
+    assert code.name == "integration.openai"
     assert code.arguments["provider"] == "codex"
     assert code.arguments["max_tokens"] == 4000
 
@@ -286,6 +294,40 @@ async def test_duckduckgo_search_is_default_and_parses_nested_topics(monkeypatch
     assert request.full_url.startswith("https://api.duckduckgo.com/?")
     assert "format=json" in request.full_url
     assert "X-subscription-token" not in request.headers
+
+
+def test_default_web_requests_retry_with_certifi_after_certificate_verification_failure(
+    monkeypatch,
+):
+    openers = []
+
+    class FakeSecureOpener:
+        def open(self, request, timeout):
+            if len(openers) == 1:
+                raise URLError(
+                    ssl.SSLCertVerificationError(
+                        1,
+                        "[SSL: CERTIFICATE_VERIFY_FAILED] certificate has expired",
+                    )
+                )
+            return FakeResponse({"ok": True})
+
+    def fake_build_secure_opener(context):
+        openers.append(context)
+        return FakeSecureOpener()
+
+    monkeypatch.setattr(
+        "assistant.integrations.web._build_secure_opener",
+        fake_build_secure_opener,
+    )
+
+    request = Request("https://example.com")
+    with _open_request(request, timeout=5) as response:
+        assert json.loads(response.read()) == {"ok": True}
+
+    assert len(openers) == 2
+    assert all(context.verify_mode == ssl.CERT_REQUIRED for context in openers)
+    assert all(context.check_hostname for context in openers)
 
 
 @pytest.mark.asyncio

@@ -190,13 +190,18 @@ class ConnectionService(Protocol):
 
 @dataclass(frozen=True)
 class ConnectionBinding:
-    """Bind an extension to one provider profile and its required OAuth scopes."""
+    """Bind an extension to one provider profile and its required OAuth scopes.
+
+    ``connection_required`` may be disabled when a managed skill also exposes
+    a useful local mode that does not need the provider account.
+    """
 
     service: ConnectionService
     provider_id: str
     required_scopes: tuple[str, ...] = ()
     profile_id: UUID | None = None
     dialog_entry_point: str | None = None
+    connection_required: bool = True
 
     def __post_init__(self) -> None:
         if not self.provider_id or any(

@@ -7,7 +7,7 @@ import re
 import time
 import wave
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -208,7 +208,11 @@ class AudioCapture:
         self._clap_detected = False
         return detected
 
-    async def chunks(self) -> AsyncIterator[bytes]:
+    async def chunks(
+        self,
+        *,
+        allow_playback: bool | Callable[[], bool] = False,
+    ) -> AsyncIterator[bytes]:
         try:
             import sounddevice as sd
         except ImportError as exc:
@@ -241,7 +245,10 @@ class AudioCapture:
             ):
                 while not self._stop.is_set():
                     payload = await queue.get()
-                    if self._playback_active:
+                    playback_allowed = (
+                        allow_playback() if callable(allow_playback) else allow_playback
+                    )
+                    if self._playback_active and not playback_allowed:
                         pre_roll.clear()
                         continue
                     raw_level = self.rms(payload)

@@ -389,7 +389,10 @@ class ExtensionHubService:
         return binding.status() if binding else None
 
     def skill_availability(
-        self, extension_id: str
+        self,
+        extension_id: str,
+        *,
+        connection_required: bool = True,
     ) -> Literal[
         "enabled",
         "disabled",
@@ -399,7 +402,7 @@ class ExtensionHubService:
     ]:
         availability = self.registry.availability(extension_id)
         status = self.connection_status(extension_id)
-        if availability != "unavailable" and status is not None:
+        if connection_required and availability != "unavailable" and status is not None:
             if status.state in {
                 ConnectionState.MISSING_SCOPES,
                 ConnectionState.REAUTHORIZATION_REQUIRED,
@@ -420,7 +423,7 @@ class ExtensionHubService:
         except KeyError:
             return False
         status = binding.status()
-        if status.usable:
+        if status.usable or not binding.connection_required:
             self.registry.enable(extension_id)
         else:
             self.registry.disable(extension_id)

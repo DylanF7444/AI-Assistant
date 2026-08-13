@@ -5,7 +5,7 @@ from typing import Any
 
 from PySide6.QtCore import QThread, Signal
 
-from assistant.audio.activation import keyword_request
+from assistant.audio.activation import is_explicit_cancel_command, keyword_request
 from assistant.bootstrap import Container
 
 
@@ -94,20 +94,82 @@ class PassiveVoiceWorker(QThread):
         if self._stop_requested or transcript is None or not transcript.normalized_text.strip():
             return
         spoken = transcript.normalized_text.strip()
-        if await self.container.orchestrator.consume_persistent_voice_interrupt(spoken):
+        if is_explicit_cancel_command(spoken):
+            await self.container.orchestrator.consume_persistent_voice_interrupt(spoken)
             return
-        result = await self.container.orchestrator.handle_transcript(transcript)
+        result = await self._run_persistent_request(transcript)
+        if result is None or self._stop_requested:
+            return
         self.request_transcript.emit(transcript.raw_text.strip() or spoken)
         self.complete.emit(result)
+
+    async def _run_persistent_request(self, transcript: Any):
+        """Handle a request while listening for an explicit spoken interruption."""
+
+        request_task = asyncio.create_task(
+            self.container.orchestrator.handle_transcript(transcript)
+        )
+        try:
+            while not request_task.done():
+                interrupt_task = asyncio.create_task(
+                    self.container.orchestrator.transcribe_once(
+                        self.container.stt,
+                        self.container.audio_capture.chunks(
+                            allow_playback=lambda: (
+                                self.container.orchestrator.request_in_progress
+                                or self.container.orchestrator.speech_in_progress
+                            )
+                        ),
+                        publish_events=False,
+                    )
+                )
+                done, _pending = await asyncio.wait(
+                    (request_task, interrupt_task),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if request_task in done:
+                    interrupt_task.cancel()
+                    await asyncio.gather(interrupt_task, return_exceptions=True)
+                    return request_task.result()
+
+                interrupt = interrupt_task.result()
+                if self._stop_requested:
+                    await self.container.orchestrator.cancel()
+                    request_task.cancel()
+                    await asyncio.gather(request_task, return_exceptions=True)
+                    return None
+                if interrupt is None or not interrupt.normalized_text.strip():
+                    continue
+                spoken = interrupt.normalized_text.strip()
+                if is_explicit_cancel_command(spoken):
+                    await self.container.orchestrator.consume_persistent_voice_interrupt(spoken)
+                    return await request_task
+                await self.container.orchestrator.consume_persistent_voice_interrupt(spoken)
+            return request_task.result()
+        finally:
+            if not request_task.done():
+                await self.container.orchestrator.cancel()
+                request_task.cancel()
+                await asyncio.gather(request_task, return_exceptions=True)
 
     async def _listen_for_activation(self) -> None:
         transcript = await self.container.orchestrator.transcribe_once(
             self.container.stt,
-            self.container.audio_capture.chunks(),
+            self.container.audio_capture.chunks(
+                allow_playback=lambda: (
+                    self.container.orchestrator.request_in_progress
+                    or self.container.orchestrator.speech_in_progress
+                )
+            ),
             publish_events=False,
             on_transcript=self._show_transcript,
         )
         if self._stop_requested:
+            return
+        if transcript is not None and is_explicit_cancel_command(transcript.normalized_text):
+            await self.container.orchestrator.consume_persistent_voice_interrupt(
+                transcript.normalized_text
+            )
             return
         settings = self.container.settings
         clap_detected = (

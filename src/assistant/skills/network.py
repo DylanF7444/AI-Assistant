@@ -5,7 +5,7 @@ import os
 from collections.abc import Callable
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from assistant.contracts import (
     BackgroundMode,
@@ -322,6 +322,13 @@ class CloudAskOutput(BaseModel):
 
 
 class CloudAskSkill(Skill):
+    """Legacy direct-call compatibility for callers that still construct it explicitly.
+
+    Bootstrap retains :class:`CodexAskSkill` for ``cloud.ask`` compatibility,
+    while current Codex and OpenAI routes use the managed OpenAI Extension Hub
+    skill.
+    """
+
     input_model = CloudAskInput
     output_model = CloudAskOutput
 
@@ -387,5 +394,65 @@ class CloudAskSkill(Skill):
             display_text=answer,
             speech_text=answer,
             data=CloudAskOutput(provider=args.provider, model=model, answer=answer).model_dump(),
+            sensitive=True,
+        )
+
+
+class CodexAskInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["codex"] = "codex"
+    question: str = Field(min_length=1, max_length=20_000)
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+    max_tokens: int = Field(default=1_500, ge=1, le=16_000)
+
+
+class CodexAskSkill(Skill):
+    """The retained built-in path for the locally installed Codex CLI."""
+
+    input_model = CodexAskInput
+    output_model = CloudAskOutput
+
+    def __init__(
+        self,
+        default_model: str,
+        codex_client: CodexExecClient | None = None,
+    ) -> None:
+        self.default_model = default_model
+        self.codex_client = codex_client or CodexExecClient()
+        self.manifest = manifest(
+            skill_id="cloud.ask",
+            display_name="Codex Ask",
+            description=(
+                "Ask the locally installed Codex CLI to review, explain, or generate code in "
+                "a read-only sandbox."
+            ),
+            input_model=self.input_model,
+            output_model=self.output_model,
+            permissions=CODEX_EXEC_PERMISSION,
+            safe_to_retry=False,
+            background_mode=BackgroundMode.FOREGROUND_ONLY,
+        )
+
+    def required_permissions(self, call: SkillCall):
+        self.validate(call.arguments)
+        return CODEX_EXEC_PERMISSION
+
+    async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult:
+        args = self.validate(call.arguments)
+        if cancel_event.is_set():
+            return SkillResult(status=ResultStatus.CANCELLED, summary="Codex request cancelled.")
+        model = args.model or self.default_model
+        answer = await self.codex_client.ask(
+            args.question,
+            model=model,
+            cancel_event=cancel_event,
+        )
+        return SkillResult(
+            status=ResultStatus.COMPLETED,
+            summary=f"Codex answered using {model}.",
+            display_text=answer,
+            speech_text=answer,
+            data=CloudAskOutput(provider="codex", model=model, answer=answer).model_dump(),
             sensitive=True,
         )

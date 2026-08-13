@@ -121,7 +121,11 @@ workers. Google Calendar, Gmail, and Google Drive use one shared encrypted
 Google account authorization. Each binding still declares its own required API
 scope, so installing or connecting one product does not grant another product's
 capability automatically. Disconnecting the shared Google account signs out all
-three Google extensions together.
+three Google extensions together. OpenAI and Anthropic use separate encrypted
+API-key connections; their keys are never passed through skill arguments or
+community workers. The OpenAI managed skill also provides the local Codex CLI
+mode; that mode uses the declared process and network permissions but does not
+require the OpenAI API-key connection.
 
 The current bootstrap bindings are:
 
@@ -130,6 +134,8 @@ The current bootstrap bindings are:
 | `integration.google_calendar` | `google` | `CALENDAR_SCOPE` (`https://www.googleapis.com/auth/calendar`) | `assistant.ui.desktop.google_calendar_connection:GoogleCalendarConnectionDialog` |
 | `integration.gmail` | `google` | `GMAIL_SCOPE` (`https://www.googleapis.com/auth/gmail.modify`) | `assistant.ui.desktop.gmail_connection:GmailConnectionDialog` |
 | `integration.google_drive` | `google` | `DRIVE_READ_SCOPE` (`https://www.googleapis.com/auth/drive.readonly`) | `assistant.ui.desktop.google_drive_connection:GoogleDriveConnectionDialog` |
+| `integration.openai` | `openai` | optional encrypted API key; local Codex mode | `assistant.ui.desktop.openai_connection:OpenAIConnectionDialog` |
+| `integration.anthropic` | `anthropic` | none (encrypted API key) | `assistant.ui.desktop.anthropic_connection:AnthropicConnectionDialog` |
 
 ## Managed extension composition
 
@@ -156,8 +162,8 @@ lookups. `bootstrap.py` creates the registry once, passes its factories to
 the catalog entry, persisted installation, runtime factory, and dialog
 metadata on one stable extension ID. The binding separately requires its
 `provider_id` to match the connection service's provider namespace; that ID
-may intentionally differ from the extension ID. Google Calendar, Gmail, and
-Google Drive are the current managed entries in this registry.
+may intentionally differ from the extension ID. Google Calendar, Gmail, Google
+Drive, OpenAI, and Anthropic are the current managed entries in this registry.
 
 Managed entries are merged into the remote catalog and take precedence over a
 remote entry with the same ID. Installing a managed entry persists its

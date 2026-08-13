@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,7 +22,12 @@ from assistant.contracts import (
 )
 from assistant.execution.engine import ExecutionOutcome
 from assistant.storage.database import SettingsStore
-from assistant.ui.desktop.app import _demo_arguments, run_desktop
+from assistant.ui.desktop.app import (
+    _demo_arguments,
+    _group_skill_manifests,
+    _skill_source_label,
+    run_desktop,
+)
 from assistant.ui.desktop.controller import DesktopController
 from assistant.ui.desktop.state import DesktopWindowState, WindowGeometry
 from assistant.ui.desktop.tabs import TAB_GROUPS, TAB_LABELS
@@ -32,6 +38,22 @@ from assistant.ui.desktop.workers import AsyncWorker, PassiveVoiceWorker
 def test_desktop_preserves_all_tab_labels():
     assert len(TAB_LABELS) == 18
     assert {label for labels in TAB_GROUPS.values() for label in labels} == set(TAB_LABELS)
+
+
+@pytest.mark.ui
+def test_skill_groups_sort_categories_and_make_source_explicit():
+    manifests = (
+        SimpleNamespace(category="Productivity", display_name="Zulu", skill_id="core.zulu"),
+        SimpleNamespace(category="Files & Folders", display_name="Reader", skill_id="files.read"),
+        SimpleNamespace(category="Productivity", display_name="Alpha", skill_id="core.alpha"),
+    )
+
+    groups = _group_skill_manifests(manifests)
+
+    assert [category for category, _ in groups] == ["Files & Folders", "Productivity"]
+    assert [manifest.display_name for manifest in groups[1][1]] == ["Alpha", "Zulu"]
+    assert _skill_source_label(False) == "Built-in"
+    assert _skill_source_label(True) == "Extension Hub"
 
 
 @pytest.mark.ui
@@ -82,6 +104,54 @@ async def test_persistent_voice_ignores_an_empty_final_transcript(settings, monk
     await worker._listen_persistent()
 
     assert handled == []
+
+
+@pytest.mark.ui
+@pytest.mark.asyncio
+async def test_persistent_voice_worker_listens_for_stop_while_request_runs(settings, monkeypatch):
+    container = build_container(settings)
+    worker = PassiveVoiceWorker(container, "persistent")
+    request_started = asyncio.Event()
+    release_request = asyncio.Event()
+    stop_heard = asyncio.Event()
+    initial = Transcript(
+        session_id=__import__("uuid").uuid4(),
+        raw_text="calculate 1 plus 1",
+        normalized_text="calculate 1 plus 1",
+    )
+    stop = Transcript(
+        session_id=__import__("uuid").uuid4(),
+        raw_text="stop",
+        normalized_text="stop",
+    )
+    result = ("response", "outcome")
+
+    async def handle_transcript(value):
+        assert value is initial
+        request_started.set()
+        await release_request.wait()
+        return result
+
+    async def transcribe_once(*args, **kwargs):
+        await request_started.wait()
+        return stop
+
+    async def consume_interrupt(value):
+        assert value == "stop"
+        stop_heard.set()
+        release_request.set()
+        return True
+
+    monkeypatch.setattr(container.orchestrator, "handle_transcript", handle_transcript)
+    monkeypatch.setattr(container.orchestrator, "transcribe_once", transcribe_once)
+    monkeypatch.setattr(
+        container.orchestrator,
+        "consume_persistent_voice_interrupt",
+        consume_interrupt,
+    )
+
+    assert await worker._run_persistent_request(initial) == result
+    assert stop_heard.is_set()
 
 
 def test_skill_demo_arguments_are_generated_from_the_declared_schema():
@@ -363,6 +433,7 @@ def test_skills_tab_shows_details_permissions_security_and_runs_demo(qtbot, sett
 
     monkeypatch.setattr(QApplication, "exec", capture_window)
     container = build_container(settings)
+    asyncio.run(container.extension_hub.install("integration.gmail"))
     container.playbook_store.save_markdown(container.playbook_store.EXAMPLE)
     SettingsStore(container.database).set("first_run_complete", True)
 
@@ -375,6 +446,19 @@ def test_skills_tab_shows_details_permissions_security_and_runs_demo(qtbot, sett
     window.playbook_list.setCurrentRow(0)
     window._toggle_playbook()
     assert container.playbook_store.get("prepare-release").enabled is False
+
+    header_rows = [
+        window.skill_list.item(row).text()
+        for row in range(window.skill_list.count())
+        if window.skill_list.item(row).data(Qt.ItemDataRole.UserRole) is None
+    ]
+    assert any(row.startswith("Productivity  · ") for row in header_rows)
+    calculator_item = next(
+        window.skill_list.item(row)
+        for row in range(window.skill_list.count())
+        if window.skill_list.item(row).data(Qt.ItemDataRole.UserRole) == "core.calculator"
+    )
+    assert "Built-in" in calculator_item.text()
 
     def select_skill(skill_id: str) -> None:
         for row in range(window.skill_list.count()):
@@ -395,9 +479,20 @@ def test_skills_tab_shows_details_permissions_security_and_runs_demo(qtbot, sett
 
     select_skill("core.calculator")
     assert window.skill_category_value.text() == "Productivity"
+    assert window.skill_source_value.text() == "Built-in"
     assert "no special permissions" in window.skill_permissions_summary.text()
     assert '"expression": "2 + 2"' in window.skill_demo_input.toPlainText()
     assert "Background eligible" in window.skill_background_value.text()
+
+    select_skill("integration.gmail")
+    assert window.skill_source_value.text() == "Extension Hub"
+    gmail_item = next(
+        window.skill_list.item(row)
+        for row in range(window.skill_list.count())
+        if window.skill_list.item(row).data(Qt.ItemDataRole.UserRole) == "integration.gmail"
+    )
+    assert "Extension Hub" in gmail_item.text()
+    select_skill("core.calculator")
 
     window._run_skill_demo()
     qtbot.waitUntil(

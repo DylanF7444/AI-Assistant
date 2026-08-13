@@ -559,14 +559,34 @@ configured explicitly.
 Web and cloud-model skills are optional. Disable the global offline lock to use
 DuckDuckGo for keyless web searches and current headline feeds for news
 briefings. DuckDuckGo is the default; Brave Search remains selectable in
-Settings and requires a Brave Search API key. Configure an OpenAI or Anthropic
-API key to ask ChatGPT/OpenAI models or
-Claude. Codex requests use the locally installed `codex exec` CLI. API keys are
-encrypted with Windows DPAPI and are not included in settings exports. Cloud
-API invocations require the `network` permission; Codex invocations require
-`network` and `process.launch` for the Codex CLI. Supported commands include
+Settings and requires a Brave Search API key. Codex requests use the locally
+installed `codex exec` CLI. OpenAI and Anthropic requests are first-party
+Extension Hub components and require an installed, enabled extension. OpenAI
+cloud requests additionally require its connected encrypted API key; the
+OpenAI extension's local Codex mode does not. Cloud API invocations require
+the `network` permission, and Codex invocations require `network` and
+`process.launch` for the read-only Codex CLI. Supported commands include
 `search the web for ...`, `read https://...`, `ask ChatGPT ...`, `ask Codex ...`,
 `ask Claude ...`, and `make code to ...`.
+
+### OpenAI and Anthropic setup
+
+Open **Extension Hub** and install **OpenAI** or **Anthropic**. Review the
+declared fixed-origin `network` permission, then enable the extension in
+**Skills**. From the extension detail page, choose **Connect OpenAI** or
+**Connect Anthropic**, enter the provider API key, and use **Test Connection**.
+The key is stored in the Windows-encrypted secret vault and is never included
+in settings exports, skill arguments, transcripts, activity details, or the
+language model. The global offline lock disables both connection tests and
+model requests.
+
+The default OpenAI and Anthropic model names remain configurable in **Settings**;
+an individual request may provide another model name and a bounded output-token
+limit. The OpenAI adapter disables Responses API application-state storage for
+each request. The extensions support one text prompt and one text response
+through the OpenAI Responses API or Anthropic Messages API. They do not upload
+files, invoke provider tools, maintain remote conversations, or retry a model
+request automatically because a replay can incur another provider charge.
 
 For JavaScript-rendered pages, install the optional browser extra:
 

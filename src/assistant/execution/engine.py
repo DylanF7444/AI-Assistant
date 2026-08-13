@@ -75,8 +75,14 @@ def _activity_action_detail(call: SkillCall, display_name: str) -> str:
         if arguments.get("extract"):
             detail = detail[:-1] + f" and extract {_quoted_activity_value(arguments['extract'])}."
         return detail
-    if skill_id == "cloud.ask":
-        provider = _activity_value(arguments.get("provider", "configured cloud provider"))
+    if skill_id == "cloud.ask" or skill_id in {"integration.openai", "integration.anthropic"}:
+        provider = (
+            _activity_value(arguments.get("provider", "Codex"))
+            if skill_id == "cloud.ask"
+            else _activity_value(
+                arguments.get("provider", "OpenAI" if skill_id == "integration.openai" else "Anthropic")
+            )
+        )
         model = arguments.get("model")
         suffix = f" using {_activity_value(model)}" if model else ""
         return f"Ask {provider}{suffix}; prompt content hidden for privacy."

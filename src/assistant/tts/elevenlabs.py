@@ -174,7 +174,16 @@ class ElevenLabsProvider:
         except (ImportError, RuntimeError):
             import winsound
 
-            winsound.PlaySound(str(path), winsound.SND_FILENAME)
+            winsound.PlaySound(
+                str(path),
+                winsound.SND_FILENAME | winsound.SND_ASYNC,
+            )
+            duration = 0.0
+            with wave.open(str(path), "rb") as audio:
+                duration = audio.getnframes() / max(audio.getframerate(), 1)
+            self._cancel_event.wait(duration)
+            if self._cancel_event.is_set():
+                winsound.PlaySound(None, winsound.SND_PURGE)
 
     def set_offline_lock(self, enabled: bool) -> None:
         self.offline_lock = enabled

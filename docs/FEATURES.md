@@ -33,7 +33,7 @@ the relevant setting, credential, local service, or device to be configured.
 | Documents | `documents.read` | Implemented/Optional formats | Low | `filesystem.content.read` | Extract, summarize, compare, find action items in, or answer questions from up to five explicitly selected TXT, Markdown, CSV, PDF, DOCX, XLSX, or PPTX files with source locators. |
 | Documents | `documents.content_search` | Implemented/Optional formats | Medium | `filesystem.content.read`, `filesystem.content.index` | Build, inspect, search, or clear a bounded persistent content index for one approved folder, with modification and deletion reconciliation. |
 | Vision | `vision.understand_image` | Implemented/Optional OCR | Low | `filesystem.content.read` | Read text, describe an image, explain a chart, or explain an error dialog from one explicitly selected local image; never captures the screen or performs input. |
-| Network | `cloud.ask` | Optional | Low | `network`, `process.launch` for Codex | Ask configured OpenAI, Anthropic, or local Codex CLI providers. |
+| Network | `cloud.ask` | Compatibility | Low | `network`, `process.launch` | Legacy direct-call alias for the local Codex path, now provided by the OpenAI Extension Hub skill. |
 | Network | `web.fetch` | Optional | Low | `network` | Read text from a specific public HTTPS page. |
 | Network | `web.headless_read` | Optional | Low | `network` | Render a public HTTPS page in a fresh non-persistent headless browser and return bounded visible text/links or matching deal, product, article, listing, and result cards without opening a user window. |
 | Network | `web.news_search` | Optional | Low | `network` | Retrieve current headlines with source and publication time for reports and briefings. |
@@ -47,6 +47,8 @@ the relevant setting, credential, local service, or device to be configured.
 | Connections | `integration.slack` | Extension Hub/Optional | Dynamic | `integration.read`, `messaging`, `network` | Search and read bounded Slack content and post one exact confirmed message to an exact channel or thread. Reactions, uploads, and broad ingestion remain excluded. |
 | Connections | `integration.notion` | Extension Hub/Optional | Dynamic | `integration.read`, `integration.write`, `network` | Search and read shared Notion content, create one page under an exact parent, or append bounded content to one exact page. Database writes and broad ingestion remain excluded. |
 | Connections | `integration.github` | Extension Hub/Optional | Dynamic | `integration.read`, `integration.write`, `network` | Search and inspect repositories/issues/releases, create one issue, or add one confirmed comment to an exact issue. Code, workflow, secret, and bulk mutations remain excluded. |
+| Connections | `integration.openai` | Extension Hub/Optional | Low | `network`, `process.launch` | Ask OpenAI Responses API models with an encrypted API key or use the local Codex CLI in its read-only sandbox; cloud and local modes are selected explicitly. |
+| Connections | `integration.anthropic` | Extension Hub/Optional | Low | `network` | Ask Anthropic Messages API models with an encrypted API key; prompt content is private and the fixed API origin is the only network target. |
 | Media | `media.present` | Implemented/Optional remote | Low | `filesystem.read` or `network` | Present an exact approved local file or explicitly downloaded public HTTPS image, audio file, or video in the Assistant. |
 | Media | `media.viewer_control` | Implemented | Low | None | Control only the active in-app viewer: playback, seek, volume, rate, mute, fullscreen, stop, or close. |
 | Windows | `windows.application_window` | Implemented | High | `process.window` | Focus, minimize, maximize, close, move, or resize an approved application window. |
@@ -122,8 +124,9 @@ the relevant setting, credential, local service, or device to be configured.
   grounding. Deterministic text/voice commands support save, list, recall,
   enable/disable, confirmation-gated delete, and exact named application.
   Playbooks guide planning but cannot grant permissions or execute directly.
-- Optional MQTT, Home Assistant, Wyoming, web search/fetch, and cloud-model
-  integrations behind explicit configuration and permissions.
+- Optional MQTT, Home Assistant, Wyoming, web search/fetch, local Codex, and
+  managed OpenAI/Anthropic cloud-model extensions behind explicit installation,
+  encrypted connection, and permission review.
 - Optional Google Calendar integration backed by a shared Google desktop OAuth
   2.0 PKCE account, exact calendar/event permission targets, bounded typed
   results, calendar and event CRUD, recurring instances, RSVP, free/busy,

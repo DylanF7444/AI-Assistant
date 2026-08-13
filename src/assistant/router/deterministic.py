@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import re
 from collections.abc import Callable, Iterable
 from datetime import datetime
@@ -18,7 +19,7 @@ class DeterministicRouter:
         self,
         application_names: Callable[[], Iterable[str]] | Iterable[str] | None = None,
         *,
-        skill_status: Callable[[str], Literal["enabled", "disabled", "disconnected", "unavailable"]]
+        skill_status: Callable[..., Literal["enabled", "disabled", "disconnected", "unavailable"]]
         | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -120,10 +121,27 @@ class DeterministicRouter:
         raise RuntimeError("Deterministic router has no fallback handler")
 
     def skill_availability(
-        self, skill_id: str
+        self,
+        skill_id: str,
+        *,
+        connection_required: bool = True,
     ) -> Literal["enabled", "disabled", "disconnected", "unavailable"]:
         if self._skill_status is None:
             return "enabled"
+        try:
+            parameters = inspect.signature(self._skill_status).parameters.values()
+        except (TypeError, ValueError):
+            parameters = ()
+        accepts_connection_requirement = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            or parameter.name == "connection_required"
+            for parameter in parameters
+        )
+        if accepts_connection_requirement:
+            return self._skill_status(
+                skill_id,
+                connection_required=connection_required,
+            )
         return self._skill_status(skill_id)
 
     def now(self) -> datetime:

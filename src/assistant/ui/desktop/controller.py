@@ -54,6 +54,9 @@ class DesktopController:
         await self.container.stt.cancel()
         await self.container.orchestrator.cancel()
 
+    async def stop_speaking(self) -> None:
+        await self.container.orchestrator.stop_speaking()
+
     @property
     def media_session_registry(self) -> MediaSessionRegistry:
         return self.container.media_sessions

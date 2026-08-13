@@ -351,11 +351,13 @@ even when the provider service has a default scope set.
 At startup, `registry.load_all_installed()` recreates persisted managed skills
 through the factory. `extension_hub.sync_connected_extensions()` enables an
 installed account-backed skill only while its connection binding reports
-`usable`. Every new installation is initially registered disabled. Connecting
-an account synchronizes and enables an account-backed extension; disconnecting,
-missing scopes, reauthorization, or a connection error disables it. A managed
-extension with no connection service is enabled manually from **Skills** after
-review.
+`usable`, unless the binding explicitly sets `connection_required=False` for a
+local mode that remains valid without the provider account. Every new
+installation is initially registered disabled. Connecting an account
+synchronizes and enables an account-backed extension; disconnecting, missing
+scopes, reauthorization, or a connection error disables connection-required
+skills. A managed extension with no connection service is enabled manually
+from **Skills** after review.
 
 ### 3. Wire an account dialog when needed
 

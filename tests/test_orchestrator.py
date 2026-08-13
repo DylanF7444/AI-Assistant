@@ -52,6 +52,23 @@ class FakeTTS:
         self.cancelled = True
 
 
+class BlockingTTS(FakeTTS):
+    def __init__(self):
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def speak(self, response):
+        self.spoken.append(response.speech_text)
+        self.started.set()
+        yield PipelineEvent(
+            correlation_id=uuid4(),
+            state=PipelineState.SPEAKING,
+            message="speaking",
+        )
+        await self.release.wait()
+
+
 class GatedSTT:
     def __init__(self):
         self.started = asyncio.Event()
@@ -1236,6 +1253,32 @@ async def test_voice_only_tts_speaks_voice_invocations_once(settings):
     assert response_ready < speaking
     await container.orchestrator.cancel()
     assert tts.cancelled
+
+
+@pytest.mark.asyncio
+async def test_voice_stop_stops_speech_without_cancelling_a_request(settings):
+    container = build_container(settings)
+    tts = BlockingTTS()
+    container.orchestrator.tts = tts
+    container.orchestrator.speech_mode = "voice_only"
+    response = Response(display_text="A long answer", speech_text="A long answer", speak=True)
+
+    speech = asyncio.create_task(
+        container.orchestrator._speak_if_enabled(
+            response,
+            invoked_by_voice=True,
+        )
+    )
+    await asyncio.wait_for(tts.started.wait(), timeout=1)
+    assert container.orchestrator.speech_in_progress
+
+    assert await container.orchestrator.consume_persistent_voice_interrupt("stop")
+    assert tts.cancelled
+    assert not container.orchestrator.request_in_progress
+
+    tts.release.set()
+    await asyncio.wait_for(speech, timeout=1)
+    assert not container.orchestrator.speech_in_progress
 
 
 @pytest.mark.asyncio

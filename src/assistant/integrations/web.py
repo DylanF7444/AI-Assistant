@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import time
@@ -17,7 +18,9 @@ from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
+
+import certifi
 
 USER_AGENT = "LocalAssistant/0.1"
 DUCKDUCKGO_HTML_USER_AGENT = (
@@ -134,6 +137,38 @@ class _SafeRedirectHandler(HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def _build_secure_opener(context: ssl.SSLContext):
+    return build_opener(
+        _SafeRedirectHandler(),
+        HTTPSHandler(context=context),
+    )
+
+
+def _is_certificate_verification_error(error: URLError) -> bool:
+    reason = getattr(error, "reason", None)
+    return (
+        isinstance(reason, ssl.SSLError) and "CERTIFICATE_VERIFY_FAILED" in str(reason)
+    ) or "CERTIFICATE_VERIFY_FAILED" in str(error)
+
+
+def _open_request(request: Request, *, timeout: float, opener=None):
+    if opener is not None:
+        return opener.open(request, timeout=timeout)
+
+    contexts = (
+        ssl.create_default_context(),
+        ssl.create_default_context(cafile=certifi.where()),
+    )
+    for index, context in enumerate(contexts):
+        try:
+            return _build_secure_opener(context).open(request, timeout=timeout)
+        except URLError as error:
+            if index == 0 and _is_certificate_verification_error(error):
+                continue
+            raise
+    raise RuntimeError("No secure web opener was available")
+
+
 def _request_json(
     url: str,
     *,
@@ -146,9 +181,7 @@ def _request_json(
     body = json.dumps(payload).encode("utf-8") if payload is not None else None
     request = Request(url, data=body, headers=headers, method="POST" if body else "GET")
     try:
-        with (opener or build_opener(_SafeRedirectHandler())).open(
-            request, timeout=timeout
-        ) as response:
+        with _open_request(request, timeout=timeout, opener=opener) as response:
             return json.loads(response.read(2_000_001).decode("utf-8"))
     except HTTPError as error:
         detail = error.read(2000).decode("utf-8", errors="replace")
@@ -205,10 +238,7 @@ class WebClient:
             },
         )
         try:
-            with (self.opener or build_opener(_SafeRedirectHandler())).open(
-                request,
-                timeout=30,
-            ) as response:
+            with _open_request(request, timeout=30, opener=self.opener) as response:
                 content_type = response.headers.get_content_type()
                 if content_type not in {"application/rss+xml", "application/xml", "text/xml"}:
                     raise ValueError(f"Unsupported news content type: {content_type}")
@@ -300,10 +330,7 @@ class WebClient:
             },
         )
         try:
-            with (self.opener or build_opener(_SafeRedirectHandler())).open(
-                request,
-                timeout=30,
-            ) as response:
+            with _open_request(request, timeout=30, opener=self.opener) as response:
                 content_type = response.headers.get_content_type()
                 if content_type != "text/html":
                     raise ValueError(f"Unsupported search content type: {content_type}")
@@ -370,9 +397,7 @@ class WebClient:
             headers={"User-Agent": USER_AGENT, "Accept": "text/html,text/plain"},
         )
         try:
-            with (self.opener or build_opener(_SafeRedirectHandler())).open(
-                request, timeout=30
-            ) as response:
+            with _open_request(request, timeout=30, opener=self.opener) as response:
                 content_type = response.headers.get_content_type()
                 if content_type not in {"text/html", "text/plain"}:
                     raise ValueError(f"Unsupported content type: {content_type}")

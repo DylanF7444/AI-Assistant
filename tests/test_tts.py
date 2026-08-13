@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import os
@@ -149,6 +150,41 @@ async def test_piper_sentence_chunks_publish_first_audio_before_all_playback(tmp
     assert [event.state for event in events] == [PipelineState.SPEAKING]
     assert synthesized == ["First sentence is ready.", "Second sentence follows."]
     assert played == [b"wave", b"wave"]
+
+
+@pytest.mark.asyncio
+async def test_piper_cancel_stops_before_playback_and_remaining_chunks(tmp_path):
+    provider = PiperProvider(tmp_path / "piper.exe", tmp_path / "voice.onnx")
+    synthesis_started = asyncio.Event()
+    release_synthesis = asyncio.Event()
+    synthesized = []
+    played = []
+
+    async def synthesize(text, output):
+        synthesized.append(text)
+        output.write_bytes(b"wave")
+        synthesis_started.set()
+        await release_synthesis.wait()
+
+    provider._synthesize = synthesize
+    provider._play = lambda path: played.append(path.read_bytes())
+    response = Response(
+        display_text="Long response",
+        speech_text="First sentence is ready. Second sentence follows.",
+    )
+
+    async def speak():
+        return [event async for event in provider.speak(response)]
+
+    task = asyncio.create_task(speak())
+    await asyncio.wait_for(synthesis_started.wait(), timeout=1)
+    await provider.cancel()
+    release_synthesis.set()
+
+    events = await asyncio.wait_for(task, timeout=1)
+    assert synthesized == ["First sentence is ready."]
+    assert played == []
+    assert events == []
 
 
 @pytest.mark.asyncio

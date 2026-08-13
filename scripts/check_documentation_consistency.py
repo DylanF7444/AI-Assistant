@@ -25,6 +25,8 @@ REQUIRED_SKILL_IDS = (
     "integration.slack",
     "integration.notion",
     "integration.github",
+    "integration.openai",
+    "integration.anthropic",
 )
 REQUIRED_ROADMAP_DOCUMENTS = (
     ROOT / "docs" / "ROADMAP_EXECUTION_REPORT.md",
