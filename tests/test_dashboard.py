@@ -78,6 +78,20 @@ async def test_default_dashboard_aggregates_privacy_bounded_local_metrics(settin
         duration_ms=60,
         outcome="planner.grounded",
     )
+    container.metrics.record(
+        correlation_id="cloud",
+        stage="cloud.tokens",
+        value=123,
+        outcome="completed",
+        dimensions={"provider": "openai", "model": "gpt-test"},
+    )
+    container.metrics.record(
+        correlation_id="cloud",
+        stage="cloud.cost",
+        value=0.0042,
+        outcome="completed",
+        dimensions={"provider": "openai", "model": "gpt-test"},
+    )
     container.dashboard.set_pipeline_state(PipelineState.THINKING)
 
     layout = container.dashboard.layout()
@@ -87,6 +101,7 @@ async def test_default_dashboard_aggregates_privacy_bounded_local_metrics(settin
     assert [card.metric_id for card in layout.cards] == [
         "assistant.status",
         "assistant.request_outcomes",
+        "assistant.cloud_usage",
         "assistant.typed_request_latency",
         "assistant.voice_request_latency",
         "assistant.model_latency",
@@ -99,6 +114,8 @@ async def test_default_dashboard_aggregates_privacy_bounded_local_metrics(settin
     assert SettingsStore(container.database).get(DashboardLayoutStore.KEY) is not None
     assert by_metric["assistant.status"].value == "Thinking"
     assert by_metric["assistant.request_outcomes"].value == 2
+    assert by_metric["assistant.cloud_usage"].value == 123
+    assert "estimated cost $0.004200" in by_metric["assistant.cloud_usage"].summary
     assert by_metric["assistant.typed_request_latency"].value == 100
     assert "p95 100.0 ms" in by_metric["assistant.typed_request_latency"].summary
     assert by_metric["assistant.voice_request_latency"].value == 300
@@ -113,6 +130,31 @@ async def test_default_dashboard_aggregates_privacy_bounded_local_metrics(settin
     assert by_metric["tasks.summary"].state == MetricState.EMPTY
     assert by_metric["assistant.recent_activity"].value == "Failed"
     assert all("transcript" not in snapshot.model_dump() for snapshot in snapshots.values())
+
+
+@pytest.mark.asyncio
+async def test_cloud_dashboard_preserves_configured_zero_cost_details(settings):
+    container = build_container(settings)
+    container.metrics.record(
+        correlation_id="zero-cost",
+        stage="cloud.tokens",
+        value=1,
+        outcome="completed",
+        dimensions={"provider": "openai", "model": "gpt-free"},
+    )
+    container.metrics.record(
+        correlation_id="zero-cost",
+        stage="cloud.cost",
+        value=0.0,
+        outcome="completed",
+        dimensions={"provider": "openai", "model": "gpt-free"},
+    )
+
+    layout = container.dashboard.layout()
+    snapshots = await container.dashboard.refresh()
+    card = next(card for card in layout.cards if card.metric_id == "assistant.cloud_usage")
+
+    assert snapshots[card.card_id].details[0].value == "1 tokens  •  $0.000000"
 
 
 @pytest.mark.asyncio

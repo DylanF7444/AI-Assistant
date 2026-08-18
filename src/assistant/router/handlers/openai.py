@@ -13,10 +13,18 @@ if TYPE_CHECKING:
 OPENAI_SKILL = "integration.openai"
 
 
-def _setup_route(status: str, *, provider: str) -> RouteResult | None:
+def _setup_route(
+    status: str,
+    *,
+    provider: str,
+    allow_disconnected: bool = False,
+) -> RouteResult | None:
     if status == "enabled":
         return None
-    if provider == "codex" and status in {"disconnected", "reauthorization_required"}:
+    if (provider == "codex" or allow_disconnected) and status in {
+        "disconnected",
+        "reauthorization_required",
+    }:
         return None
     if status == "disconnected":
         message = (
@@ -48,8 +56,55 @@ def _setup_route(status: str, *, provider: str) -> RouteResult | None:
     )
 
 
+def _provider_alias(value: str) -> str:
+    return {
+        "chatgpt": "openai",
+        "openai": "openai",
+        "codex": "codex",
+        "claude": "anthropic",
+        "anthropic": "anthropic",
+    }[value]
+
+
 class OpenAIHandler:
     def route(self, context: RouteContext, router: DeterministicRouter) -> RouteResult | None:
+        match = re.fullmatch(
+            r"ask (openai|chatgpt|codex) "
+            r"(?:or|then|if unavailable (?:use|ask)|and then) "
+            r"(openai|chatgpt|codex|claude|anthropic)"
+            r"(?: (?:for|to))? (.+)",
+            context.routed,
+        )
+        if match is not None:
+            primary = _provider_alias(match.group(1))
+            fallback = _provider_alias(match.group(2))
+            if primary != fallback:
+                result = RouteResult(
+                    Intent(
+                        name=OPENAI_SKILL,
+                        arguments={
+                            "provider": primary,
+                            "question": match.group(3),
+                            "max_tokens": 1_500,
+                            "fallback_provider": fallback,
+                        },
+                        confidence=0.99,
+                        source="rule",
+                    )
+                )
+                status = router.skill_availability(
+                    OPENAI_SKILL,
+                    connection_required=primary != "codex",
+                )
+                return (
+                    _setup_route(
+                        status,
+                        provider=primary,
+                        allow_disconnected=True,
+                    )
+                    or result
+                )
+
         match = re.fullmatch(r"ask codex (?:for )?(.+)", context.routed)
         if match is not None:
             result = RouteResult(
@@ -131,7 +186,10 @@ class OpenAIHandler:
                 source="rule",
             )
         )
-        return _setup_route(
-            router.skill_availability(OPENAI_SKILL),
-            provider="openai",
-        ) or result
+        return (
+            _setup_route(
+                router.skill_availability(OPENAI_SKILL),
+                provider="openai",
+            )
+            or result
+        )

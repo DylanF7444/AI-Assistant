@@ -19,6 +19,12 @@ requiring a manually composed `cd` command:
 powershell -ExecutionPolicy Bypass -File scripts/run.ps1
 ```
 
+The assistant can delegate `ask Codex ...` requests to the official Codex CLI,
+so a ChatGPT subscription can be used without an OpenAI API key. Install Codex,
+run `codex login`, choose **Sign in with ChatGPT**, and then use
+`python -m assistant.app --text "ask Codex to explain this project"`. See
+`docs/USER_GUIDE.md` for the permission and read-only execution boundaries.
+
 If you change directories explicitly, quote paths containing spaces:
 `Set-Location -LiteralPath 'C:\path with spaces\Assistant'`.
 

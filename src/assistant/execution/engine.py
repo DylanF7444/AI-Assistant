@@ -80,11 +80,16 @@ def _activity_action_detail(call: SkillCall, display_name: str) -> str:
             _activity_value(arguments.get("provider", "Codex"))
             if skill_id == "cloud.ask"
             else _activity_value(
-                arguments.get("provider", "OpenAI" if skill_id == "integration.openai" else "Anthropic")
+                arguments.get(
+                    "provider", "OpenAI" if skill_id == "integration.openai" else "Anthropic"
+                )
             )
         )
         model = arguments.get("model")
         suffix = f" using {_activity_value(model)}" if model else ""
+        fallback = arguments.get("fallback_provider")
+        if fallback:
+            suffix += f"; explicit fallback {_activity_value(fallback)}"
         return f"Ask {provider}{suffix}; prompt content hidden for privacy."
     if skill_id == "windows.file_search":
         return (
@@ -706,7 +711,13 @@ class ExecutionEngine:
                     break
                 except Exception as exc:
                     if attempts >= max_attempts:
-                        result = self._failure("skill_failed", str(exc), ResultStatus.FAILED)
+                        error_message = (
+                            "The cloud request failed."
+                            if call.skill_id
+                            in {"cloud.ask", "integration.openai", "integration.anthropic"}
+                            else str(exc)
+                        )
+                        result = self._failure("skill_failed", error_message, ResultStatus.FAILED)
         finally:
             with self._state_lock:
                 self._jobs.pop(call.correlation_id, None)
@@ -722,7 +733,7 @@ class ExecutionEngine:
             permissions=[item.capability for item in required_permissions],
             details={
                 "arguments": self._audit_arguments(call),
-                "result": self._audit_result(result),
+                "result": self._audit_result(result, skill_id=call.skill_id),
                 "attempts": attempts,
             },
         )
@@ -742,6 +753,7 @@ class ExecutionEngine:
                     path=RequestPath.EXECUTION,
                 ),
             )
+            self._record_cloud_usage(str(call.correlation_id), call, result)
         logger.info(
             "Skill execution finished",
             extra={
@@ -947,8 +959,20 @@ class ExecutionEngine:
 
     @staticmethod
     def _audit_arguments(call: SkillCall) -> dict[str, Any]:
+        if call.skill_id in {"cloud.ask", "integration.openai", "integration.anthropic"}:
+            safe_keys = {
+                "provider",
+                "model",
+                "max_tokens",
+                "fallback_provider",
+                "fallback_model",
+            }
+            return {
+                **{key: call.arguments[key] for key in safe_keys if key in call.arguments},
+                "prompt_omitted": True,
+            }
         if call.skill_id != "core.visualize":
-            return call.arguments
+            return dict(call.arguments)
         spec = call.arguments.get("spec")
         return {
             "title": call.arguments.get("title", "Visualization"),
@@ -957,8 +981,34 @@ class ExecutionEngine:
         }
 
     @staticmethod
-    def _audit_result(result: SkillResult) -> dict[str, Any]:
+    def _audit_result(result: SkillResult, *, skill_id: str | None = None) -> dict[str, Any]:
         payload = result.model_dump(mode="json")
+        if skill_id in {"cloud.ask", "integration.openai", "integration.anthropic"}:
+            payload["summary"] = "[CLOUD_RESULT_OMITTED]"
+            payload["display_text"] = "[CLOUD_RESULT_OMITTED]"
+            payload["speech_text"] = "[CLOUD_RESULT_OMITTED]"
+            payload["items"] = None
+            payload["rollback_token"] = None
+            payload["media_directive"] = None
+            payload["visual_artifact"] = None
+            error = payload.get("error")
+            if isinstance(error, dict):
+                payload["error"] = {
+                    "code": error.get("code", "cloud_error"),
+                    "message": "[CLOUD_ERROR_OMITTED]",
+                    "recoverable": bool(error.get("recoverable", False)),
+                }
+            data = payload.get("data")
+            if isinstance(data, dict):
+                safe_data = {
+                    key: data[key]
+                    for key in ("provider", "model", "usage", "attempts", "fallback_used")
+                    if key in data
+                }
+                payload["data"] = safe_data or {"redacted": True}
+            else:
+                payload["data"] = {"redacted": True}
+            return payload
         if result.visual_artifact is None:
             return payload
         metadata = {
@@ -972,6 +1022,54 @@ class ExecutionEngine:
         if isinstance(payload.get("data"), dict) and "artifact" in payload["data"]:
             payload["data"] = {"artifact": metadata}
         return payload
+
+    def _record_cloud_usage(
+        self,
+        correlation_id: str,
+        call: SkillCall,
+        result: SkillResult,
+    ) -> None:
+        if self.metrics is None or call.skill_id not in {
+            "cloud.ask",
+            "integration.openai",
+            "integration.anthropic",
+        }:
+            return
+        data = result.data if isinstance(result.data, dict) else {}
+        provider = data.get("provider")
+        model = data.get("model")
+        usage = data.get("usage")
+        if not isinstance(provider, str) or not isinstance(model, str):
+            return
+        provider = _activity_value(provider, limit=120)
+        model = _activity_value(model, limit=120)
+        if not provider or not model:
+            return
+        if not isinstance(usage, dict):
+            return
+        dimensions = MetricDimensions(
+            path=RequestPath.EXECUTION,
+            provider=provider,
+            model=model,
+        )
+        total = usage.get("total_tokens")
+        if isinstance(total, int | float) and not isinstance(total, bool) and total >= 0:
+            self.metrics.record(
+                correlation_id=correlation_id,
+                stage=MetricStage.CLOUD_TOKENS,
+                value=float(total),
+                outcome=result.status.value,
+                dimensions=dimensions,
+            )
+        cost = usage.get("estimated_cost_usd")
+        if isinstance(cost, int | float) and not isinstance(cost, bool) and cost >= 0:
+            self.metrics.record(
+                correlation_id=correlation_id,
+                stage=MetricStage.CLOUD_COST,
+                value=float(cost),
+                outcome=result.status.value,
+                dimensions=dimensions,
+            )
 
     @staticmethod
     def _aggregate_plan_results(results: Mapping[str, SkillResult]) -> SkillResult:

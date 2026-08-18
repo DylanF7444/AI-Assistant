@@ -25,6 +25,7 @@ from assistant.contracts import (
     SkillCall,
 )
 from assistant.diagnostics import hardware_report, model_recommendations
+from assistant.integrations.cloud import CloudPricing
 from assistant.models import ModelManifest
 from assistant.onboarding import OnboardingStore, SetupStep, outcome_guidance, recovery_issues
 from assistant.policy.background import background_mode_summary
@@ -890,6 +891,12 @@ def run_desktop(container: Container) -> int:
             )
             container.settings = settings
             container.dashboard.set_offline_lock(settings.offline_lock)
+            container.extension_hub.set_offline_lock(settings.offline_lock)
+            container.extension_hub.set_cloud_pricing(
+                CloudPricing.from_mapping(settings.cloud_pricing)
+                if settings.cloud_pricing
+                else None
+            )
             container.dashboard.set_history_retention_days(
                 settings.dashboard_history_retention_days
             )
@@ -3149,6 +3156,7 @@ def run_desktop(container: Container) -> int:
                 container.registry.disable(manifest.skill_id)
             else:
                 container.registry.enable(manifest.skill_id)
+            container.extension_hub.sync_managed_runtime_state()
             self.skill_list.currentItem().setText(
                 self._skill_list_text(
                     manifest,
@@ -3875,6 +3883,15 @@ def run_desktop(container: Container) -> int:
             )
             self.setting_cloud_model_help.setWordWrap(True)
             self.setting_cloud_model_help.setObjectName("activityHint")
+            self.setting_cloud_pricing = QLineEdit(
+                json.dumps(container.settings.cloud_pricing, sort_keys=True)
+            )
+            self.setting_cloud_pricing.setPlaceholderText(
+                '{"openai:gpt-5.5":{"input_usd_per_million":1.25,"output_usd_per_million":10}}'
+            )
+            self.setting_cloud_pricing.setToolTip(
+                "JSON pricing keyed by provider:model; prices are USD per million tokens."
+            )
             self.setting_brave_key = QLineEdit()
             self.setting_brave_key.setEchoMode(QLineEdit.EchoMode.Password)
             self.setting_brave_key.setPlaceholderText(
@@ -4098,6 +4115,7 @@ def run_desktop(container: Container) -> int:
             form.addRow("OpenAI Codex model", self.setting_openai_codex_model)
             form.addRow("Anthropic model", self.setting_anthropic_model)
             form.addRow("Cloud API keys", self.setting_cloud_model_help)
+            form.addRow("Cloud pricing JSON", self.setting_cloud_pricing)
             form.addRow("Web search provider", self.setting_search_provider)
             form.addRow("Brave Search API key", self.setting_brave_key)
             form.addRow("Speech provider", self.setting_tts_provider)
@@ -4267,6 +4285,10 @@ def run_desktop(container: Container) -> int:
         def _save_settings(self) -> None:
             try:
                 speech_enabled = self.setting_speech.currentText() != "never"
+                cloud_pricing_text = self.setting_cloud_pricing.text().strip()
+                cloud_pricing = json.loads(cloud_pricing_text or "{}")
+                if not isinstance(cloud_pricing, dict):
+                    raise ValueError("Cloud pricing must be a JSON object")
                 tts_provider = self.setting_tts_provider.currentData()
                 piper_executable_text = self.setting_piper_executable.text().strip()
                 piper_executable = (
@@ -4344,6 +4366,7 @@ def run_desktop(container: Container) -> int:
                     "openai_model": self.setting_openai_model.text().strip(),
                     "openai_codex_model": (self.setting_openai_codex_model.text().strip()),
                     "anthropic_model": self.setting_anthropic_model.text().strip(),
+                    "cloud_pricing": cloud_pricing,
                     "search_provider": self.setting_search_provider.currentData(),
                     "extension_catalog_url": (
                         self.setting_extension_catalog_url.text().strip() or None

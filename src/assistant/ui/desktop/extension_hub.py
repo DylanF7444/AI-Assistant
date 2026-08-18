@@ -360,9 +360,12 @@ class ExtensionHubPage(QWidget):
                     getattr(connection_status, "connected", False),
                 )
             )
-            self.connection_button.setText(
-                "Manage Connected Account" if connected else "Connect Account"
-            )
+            if extension.extension_id == "integration.openai":
+                self.connection_button.setText("Configure OpenAI / Codex")
+            else:
+                self.connection_button.setText(
+                    "Manage Connected Account" if connected else "Connect Account"
+                )
         installable = (
             self.service.is_installable(extension)
             if hasattr(self.service, "is_installable")

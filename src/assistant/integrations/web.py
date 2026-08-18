@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -483,23 +484,29 @@ class CloudModelClient:
 
 
 class CodexExecClient:
+    DEFAULT_EXTRA_ARGS = (
+        "-c",
+        'approval_policy="never"',
+        "--sandbox",
+        "read-only",
+        "--ephemeral",
+        "--skip-git-repo-check",
+    )
+
     def __init__(
         self,
         executable: str | Path = "codex",
         *,
         cwd: str | Path | None = None,
         timeout_seconds: float = 120,
-        extra_args: tuple[str, ...] = (
-            "-c",
-            'approval_policy="never"',
-            "--sandbox",
-            "read-only",
-        ),
+        extra_args: tuple[str, ...] | None = None,
     ) -> None:
+        if timeout_seconds <= 0:
+            raise ValueError("Codex exec timeout must be greater than zero")
         self.executable = str(executable)
         self.cwd = Path(cwd) if cwd is not None else None
         self.timeout_seconds = timeout_seconds
-        self.extra_args = extra_args
+        self.extra_args = tuple(self.DEFAULT_EXTRA_ARGS if extra_args is None else extra_args)
 
     async def ask(
         self,
@@ -526,12 +533,14 @@ class CodexExecClient:
         command = [executable, "exec", *self.extra_args]
         if model:
             command.extend(["--model", model])
-        command.append(question)
+        # Use the documented stdin form so the prompt does not appear in the
+        # child process command line or in shell/process-manager diagnostics.
+        command.append("-")
         try:
             process = subprocess.Popen(
                 command,
                 cwd=str(self.cwd) if self.cwd is not None else None,
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -540,9 +549,20 @@ class CodexExecClient:
                 creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
             )
         except OSError as error:
-            raise RuntimeError(f"Could not start codex exec: {error}") from error
+            raise RuntimeError(
+                "Could not start the Codex CLI. Install it, ensure it is on PATH, "
+                "and run `codex login` with ChatGPT."
+            ) from error
         stdout = stderr = ""
         try:
+            if process.stdin is not None:
+                try:
+                    process.stdin.write(question)
+                    process.stdin.close()
+                except BrokenPipeError:
+                    # The CLI may have exited early; preserve its actual
+                    # diagnostic and classify it below from the exit status.
+                    pass
             deadline = time.monotonic() + self.timeout_seconds
             while process.poll() is None:
                 if time.monotonic() >= deadline:
@@ -555,6 +575,7 @@ class CodexExecClient:
                         process.wait(timeout=5)
                     except subprocess.TimeoutExpired:
                         process.kill()
+                    process.communicate()
                     raise RuntimeError("codex exec was cancelled")
                 try:
                     stdout, stderr = process.communicate(timeout=0.2)
@@ -571,7 +592,7 @@ class CodexExecClient:
             detail = (stderr or stdout).strip()
             raise RuntimeError(
                 f"codex exec failed with exit code {process.returncode}"
-                + (f": {detail}" if detail else "")
+                + (f": {_bounded_process_detail(detail)}" if detail else "")
             )
         text = stdout.strip() or stderr.strip()
         if not text:
@@ -579,12 +600,21 @@ class CodexExecClient:
         return text
 
     def _resolve_executable(self) -> str:
+        return self.find_executable() or self.executable
+
+    def find_executable(self) -> str | None:
+        """Return an installed Codex CLI without assuming PATH is current."""
+
         if self.executable.casefold() != "codex":
-            return shutil.which(self.executable) or self.executable
+            resolved = shutil.which(self.executable)
+            if resolved:
+                return resolved
+            path = Path(self.executable)
+            return str(path) if path.is_file() else None
         bundled = self._latest_user_codex_binary()
         if bundled is not None:
             return str(bundled)
-        return shutil.which(self.executable) or self.executable
+        return shutil.which(self.executable)
 
     @staticmethod
     def _latest_user_codex_binary() -> Path | None:
@@ -598,3 +628,155 @@ class CodexExecClient:
         if not candidates:
             return None
         return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+CODEX_INSTALL_URL = "https://learn.chatgpt.com/docs/codex/cli"
+
+
+@dataclass(frozen=True)
+class CodexSetupStatus:
+    installed: bool
+    authenticated: bool
+    message: str
+    executable: str | None = None
+    version: str | None = None
+
+    @property
+    def connected(self) -> bool:
+        return self.authenticated
+
+    @property
+    def usable(self) -> bool:
+        return self.installed and self.authenticated
+
+
+class CodexSetupService:
+    """Inspect and start the official Codex CLI authentication flow."""
+
+    install_url = CODEX_INSTALL_URL
+
+    def __init__(
+        self,
+        client: CodexExecClient | None = None,
+        *,
+        status_timeout_seconds: float = 10,
+        login_timeout_seconds: float = 300,
+    ) -> None:
+        if status_timeout_seconds <= 0 or login_timeout_seconds <= 0:
+            raise ValueError("Codex setup timeouts must be greater than zero")
+        self.client = client or CodexExecClient()
+        self.status_timeout_seconds = status_timeout_seconds
+        self.login_timeout_seconds = login_timeout_seconds
+
+    def status(self) -> CodexSetupStatus:
+        executable = self.client.find_executable()
+        if executable is None:
+            return CodexSetupStatus(
+                installed=False,
+                authenticated=False,
+                message=(
+                    "Codex CLI is not installed. Open the install guide, install Codex, "
+                    "then return here to sign in."
+                ),
+            )
+
+        version = self._version(executable)
+        try:
+            result = self._run(
+                (executable, "login", "status"),
+                timeout=self.status_timeout_seconds,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            return CodexSetupStatus(
+                installed=True,
+                authenticated=False,
+                executable=executable,
+                version=version,
+                message=f"Codex CLI was found, but its sign-in status could not be checked: {error}",
+            )
+
+        detail = _bounded_process_detail(result.stdout or result.stderr, limit=240)
+        if result.returncode == 0:
+            suffix = f" ({version})" if version else ""
+            authentication = detail or "Signed in"
+            return CodexSetupStatus(
+                installed=True,
+                authenticated=True,
+                executable=executable,
+                version=version,
+                message=f"Codex is ready{suffix}. {authentication}",
+            )
+        suffix = f" ({version})" if version else ""
+        return CodexSetupStatus(
+            installed=True,
+            authenticated=False,
+            executable=executable,
+            version=version,
+            message=(
+                f"Codex CLI is installed{suffix}, but it is not signed in. "
+                "Select Sign in with ChatGPT."
+            ),
+        )
+
+    async def check(self) -> CodexSetupStatus:
+        return await asyncio.to_thread(self.status)
+
+    async def sign_in(self) -> CodexSetupStatus:
+        return await asyncio.to_thread(self._sign_in_sync)
+
+    def _sign_in_sync(self) -> CodexSetupStatus:
+        executable = self.client.find_executable()
+        if executable is None:
+            raise RuntimeError(
+                "Codex CLI is not installed. Open the Codex install guide before signing in."
+            )
+        try:
+            result = self._run(
+                (executable, "login"),
+                timeout=self.login_timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError("Codex sign-in did not finish within five minutes.") from error
+        except OSError as error:
+            raise RuntimeError(f"Could not start Codex sign-in: {error}") from error
+        if result.returncode != 0:
+            detail = _bounded_process_detail(result.stderr or result.stdout, limit=500)
+            raise RuntimeError("Codex sign-in failed" + (f": {detail}" if detail else "."))
+        status = self.status()
+        if not status.authenticated:
+            raise RuntimeError("Codex sign-in finished, but no authenticated session was found.")
+        return status
+
+    def _version(self, executable: str) -> str | None:
+        try:
+            result = self._run(
+                (executable, "--version"),
+                timeout=self.status_timeout_seconds,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if result.returncode != 0:
+            return None
+        value = _bounded_process_detail(result.stdout or result.stderr, limit=120)
+        return value or None
+
+    @staticmethod
+    def _run(command: tuple[str, ...], *, timeout: float) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+            creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
+        )
+
+
+def _bounded_process_detail(value: str, limit: int = 1_000) -> str:
+    """Keep CLI diagnostics useful without allowing unbounded error payloads."""
+
+    compact = " ".join(value.split())
+    return compact[:limit] + ("…" if len(compact) > limit else "")

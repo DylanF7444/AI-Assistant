@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from assistant import API_VERSION
 from assistant.contracts import PermissionScope, RiskLevel, SkillManifest
+from assistant.integrations.cloud import CloudPricing
 from assistant.integrations.connections import (
     ConnectionBinding,
     ConnectionState,
@@ -34,6 +35,7 @@ CATALOG_SCHEMA_VERSION = "1.0"
 DEFAULT_CATALOG_MAX_BYTES = 2 * 1024 * 1024
 DEFAULT_PACKAGE_MAX_BYTES = 25 * 1024 * 1024
 MAX_ARCHIVE_FILES = 512
+CLOUD_EXTENSION_IDS = frozenset({"integration.openai", "integration.anthropic"})
 
 
 class _StrictModel(BaseModel):
@@ -304,6 +306,8 @@ class ExtensionHubService:
             connection_dialogs or {},
         )
         self._catalog = ExtensionCatalog(extensions=self.managed_registry.catalog_extensions)
+        self.offline_lock = False
+        self.cloud_pricing: CloudPricing | None = None
 
     @property
     def catalog_url(self) -> str | None:
@@ -319,7 +323,74 @@ class ExtensionHubService:
         if previous_url != self.client.catalog_url:
             self._catalog = ExtensionCatalog(extensions=self.managed_registry.catalog_extensions)
 
+    def set_offline_lock(self, enabled: bool) -> None:
+        self.offline_lock = bool(enabled)
+        seen: set[int] = set()
+        for spec in self.managed_registry.specs:
+            binding = spec.connection
+            if binding is None:
+                continue
+            service = binding.service
+            marker = id(service)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            setter = getattr(service, "set_offline_lock", None)
+            if callable(setter):
+                setter(self.offline_lock)
+        self._update_managed_skill("set_offline_lock", self.offline_lock)
+        self._update_legacy_cloud_skill("set_offline_lock", self.offline_lock)
+        self.sync_managed_runtime_state()
+
+    def set_cloud_pricing(self, pricing: CloudPricing | None) -> None:
+        self.cloud_pricing = pricing
+        seen: set[int] = set()
+        for spec in self.managed_registry.specs:
+            binding = spec.connection
+            if binding is None:
+                continue
+            service = binding.service
+            marker = id(service)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            setter = getattr(service, "set_pricing", None)
+            if callable(setter):
+                setter(pricing)
+        self._update_managed_skill("set_pricing", pricing)
+        self.sync_managed_runtime_state()
+
+    def sync_managed_runtime_state(self) -> None:
+        """Push cross-provider availability to the reviewed cloud skills."""
+
+        availability = {
+            "openai": self.registry.is_enabled("integration.openai"),
+            "anthropic": self.registry.is_enabled("integration.anthropic"),
+            "codex": self.registry.is_enabled("cloud.ask"),
+        }
+        self._update_managed_skill("set_provider_availability", availability)
+
+    def _update_managed_skill(self, method_name: str, value: Any) -> None:
+        for manifest in self.registry.list():
+            if manifest.skill_id not in self.managed_registry:
+                continue
+            skill = self.registry.inspect(manifest.skill_id)
+            setter = getattr(skill, method_name, None)
+            if callable(setter):
+                setter(value)
+
+    def _update_legacy_cloud_skill(self, method_name: str, value: Any) -> None:
+        try:
+            skill = self.registry.inspect("cloud.ask")
+        except KeyError:
+            return
+        setter = getattr(skill, method_name, None)
+        if callable(setter):
+            setter(value)
+
     async def refresh(self) -> tuple[CatalogExtension, ...]:
+        if self.offline_lock:
+            raise PermissionError("Extension catalog access is blocked by offline mode")
         remote = await asyncio.to_thread(self.client.fetch_catalog)
         managed = self.managed_registry.catalog_extensions
         catalog = ExtensionCatalog(
@@ -423,19 +494,22 @@ class ExtensionHubService:
         except KeyError:
             return False
         status = binding.status()
-        if status.usable or not binding.connection_required:
+        if status.usable or not binding.connection_required or extension_id in CLOUD_EXTENSION_IDS:
             self.registry.enable(extension_id)
         else:
             self.registry.disable(extension_id)
+        self.sync_managed_runtime_state()
         return status.usable
 
     def sync_connected_extensions(self) -> tuple[str, ...]:
-        return tuple(
+        connected = tuple(
             spec.extension_id
             for spec in self.managed_registry.specs
             if spec.connection is not None
             if self.sync_connection_state(spec.extension_id)
         )
+        self.sync_managed_runtime_state()
+        return connected
 
     async def install(self, extension_id: str) -> SkillManifest:
         extension = next(
@@ -464,6 +538,10 @@ class ExtensionHubService:
                 manifest = await asyncio.to_thread(self._install_managed, extension)
             else:
                 manifest = await asyncio.to_thread(self._install_skill, extension)
+            if extension_id in self.managed_registry:
+                self._update_managed_skill("set_offline_lock", self.offline_lock)
+                self._update_managed_skill("set_pricing", self.cloud_pricing)
+                self.sync_managed_runtime_state()
         except Exception as error:
             self._record(
                 event_type="extension_installation",
@@ -529,6 +607,7 @@ class ExtensionHubService:
             permissions=permissions,
             details=details,
         )
+        self.sync_managed_runtime_state()
 
     def _install_managed(self, extension: CatalogExtension) -> SkillManifest:
         spec = self.managed_registry.get(extension.extension_id)

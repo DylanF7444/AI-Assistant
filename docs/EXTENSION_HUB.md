@@ -127,6 +127,20 @@ community workers. The OpenAI managed skill also provides the local Codex CLI
 mode; that mode uses the declared process and network permissions but does not
 require the OpenAI API-key connection.
 
+The managed cloud skills also support explicit, user-directed provider
+fallbacks. For example, `ask OpenAI or Claude ...` selects OpenAI first and
+allows Anthropic only for a transient unavailable, timeout, rate-limit, or
+missing-connection failure. No fallback is implicit, and authentication,
+missing-connection failure. The fallback extension must be installed and
+enabled; a disconnected primary is executable only for this explicit route,
+while ordinary requests still receive connection guidance. No fallback is
+implicit, and authentication, invalid-request, malformed-response,
+cancellation, and Offline-lock failures do not resend a prompt. Cloud prompts
+and answers are sensitive and omitted from activity/audit details; safe
+provider/model, token, fallback, and configured cost-estimate metadata remains
+available to the local dashboard. A fallback request may create a second
+provider charge, and estimates are not a spend limit.
+
 The current bootstrap bindings are:
 
 | Managed skill | Provider ID | Required scope | Dialog entry point |

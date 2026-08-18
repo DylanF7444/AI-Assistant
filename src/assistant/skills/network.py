@@ -15,6 +15,7 @@ from assistant.contracts import (
     SkillCall,
     SkillResult,
 )
+from assistant.integrations.cloud import CloudOfflineError
 from assistant.integrations.headless_browser import HeadlessBrowser
 from assistant.integrations.web import CloudModelClient, CodexExecClient, WebClient
 from assistant.skills.base import Skill
@@ -338,11 +339,13 @@ class CloudAskSkill(Skill):
         key: Callable[[str], str | None],
         default_models: dict[str, str],
         codex_client: CodexExecClient | None = None,
+        offline_lock: bool = False,
     ) -> None:
         self.client = client
         self.key = key
         self.default_models = default_models
         self.codex_client = codex_client or CodexExecClient()
+        self.offline_lock = bool(offline_lock)
         self.manifest = manifest(
             skill_id="cloud.ask",
             display_name="Cloud Ask",
@@ -362,6 +365,16 @@ class CloudAskSkill(Skill):
 
     async def execute(self, call: SkillCall, cancel_event: asyncio.Event) -> SkillResult:
         args = self.validate(call.arguments)
+        if self.offline_lock:
+            error = CloudOfflineError(args.provider.title())
+            return SkillResult(
+                status=ResultStatus.FAILED,
+                summary=error.user_message,
+                display_text=error.user_message,
+                speech_text=error.user_message,
+                data={"provider": args.provider, "code": error.code},
+                sensitive=True,
+            )
         if args.provider == "codex":
             model = args.model or self.default_models[args.provider]
             answer = await self.codex_client.ask(
@@ -417,9 +430,11 @@ class CodexAskSkill(Skill):
         self,
         default_model: str,
         codex_client: CodexExecClient | None = None,
+        offline_lock: bool = False,
     ) -> None:
         self.default_model = default_model
         self.codex_client = codex_client or CodexExecClient()
+        self.offline_lock = bool(offline_lock)
         self.manifest = manifest(
             skill_id="cloud.ask",
             display_name="Codex Ask",
@@ -434,6 +449,9 @@ class CodexAskSkill(Skill):
             background_mode=BackgroundMode.FOREGROUND_ONLY,
         )
 
+    def set_offline_lock(self, enabled: bool) -> None:
+        self.offline_lock = bool(enabled)
+
     def required_permissions(self, call: SkillCall):
         self.validate(call.arguments)
         return CODEX_EXEC_PERMISSION
@@ -442,6 +460,16 @@ class CodexAskSkill(Skill):
         args = self.validate(call.arguments)
         if cancel_event.is_set():
             return SkillResult(status=ResultStatus.CANCELLED, summary="Codex request cancelled.")
+        if self.offline_lock:
+            error = CloudOfflineError("Codex")
+            return SkillResult(
+                status=ResultStatus.FAILED,
+                summary=error.user_message,
+                display_text=error.user_message,
+                speech_text=error.user_message,
+                data={"provider": "codex", "code": error.code},
+                sensitive=True,
+            )
         model = args.model or self.default_model
         answer = await self.codex_client.ask(
             args.question,

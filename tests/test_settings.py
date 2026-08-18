@@ -4,7 +4,7 @@ import pytest
 
 import assistant.bootstrap as bootstrap
 from assistant.bootstrap import build_container
-from assistant.config import Settings
+from assistant.config import DEFAULT_CODEX_MODEL, Settings
 from assistant.storage.aliases import AliasStore
 from assistant.storage.database import SettingsStore
 from assistant.tts.elevenlabs import ElevenLabsProvider
@@ -60,6 +60,18 @@ def test_persisted_settings_load_on_restart(settings):
     assert second.settings.voice_activation_mode == "keyword_clap"
     assert second.settings.voice_activation_keyword == "computer"
     assert second.settings.voice_activation_clap_enabled is True
+
+
+def test_legacy_default_codex_model_migrates_on_restart(settings):
+    first = build_container(settings)
+    SettingsStore(first.database).set(
+        "application_settings",
+        {"openai_codex_model": "gpt-5.3-codex"},
+    )
+
+    restored = build_container(settings).settings
+
+    assert restored.openai_codex_model == DEFAULT_CODEX_MODEL
 
 
 def test_ollama_keep_alive_validates_supported_duration_syntax(tmp_path):

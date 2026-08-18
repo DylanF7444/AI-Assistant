@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import math
 import re
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from platformdirs import user_data_path
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
+LEGACY_CODEX_MODEL_DEFAULTS = frozenset({"gpt-5.3-codex"})
 
 
 class Settings(BaseModel):
@@ -55,8 +60,9 @@ class Settings(BaseModel):
     embedding_model: str = "nomic-embed-text"
     embedding_timeout_seconds: float = Field(default=10.0, gt=0)
     openai_model: str = "gpt-5.5"
-    openai_codex_model: str = "gpt-5.3-codex"
+    openai_codex_model: str = DEFAULT_CODEX_MODEL
     anthropic_model: str = "claude-sonnet-4-6"
+    cloud_pricing: dict[str, dict[str, float]] = Field(default_factory=dict)
     search_provider: Literal["duckduckgo", "brave"] = "duckduckgo"
     extension_catalog_url: str | None = None
     extension_catalog_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
@@ -116,6 +122,44 @@ class Settings(BaseModel):
     notification_quiet_hours_enabled: bool = False
     notification_quiet_hours_start: str = "22:00"
     notification_quiet_hours_end: str = "07:00"
+
+    @field_validator("cloud_pricing", mode="before")
+    @classmethod
+    def _cloud_pricing_is_bounded(
+        cls,
+        value: Any,
+    ) -> Any:
+        if not isinstance(value, Mapping):
+            return value
+        for key, prices in value.items():
+            if not isinstance(key, str):
+                raise ValueError("Cloud pricing keys must use provider:model format")
+            if not re.fullmatch(r"[a-z][a-z0-9_-]*:[A-Za-z0-9*._-]+", key):
+                raise ValueError("Cloud pricing keys must use provider:model format")
+            provider = key.split(":", 1)[0]
+            if provider not in {"openai", "anthropic", "codex"}:
+                raise ValueError(f"Unsupported cloud pricing provider: {provider}")
+            if not isinstance(prices, Mapping):
+                raise ValueError(f"Cloud pricing {key} must be an object")
+            unknown_fields = set(prices).difference(
+                {"input_usd_per_million", "output_usd_per_million"}
+            )
+            if unknown_fields:
+                raise ValueError(
+                    f"Cloud pricing {key} contains unsupported fields: "
+                    + ", ".join(sorted(unknown_fields))
+                )
+            for field_name in ("input_usd_per_million", "output_usd_per_million"):
+                price = prices.get(field_name)
+                if (
+                    price is None
+                    or isinstance(price, bool)
+                    or not isinstance(price, int | float | str)
+                    or not math.isfinite(float(price))
+                    or float(price) < 0
+                ):
+                    raise ValueError(f"Cloud pricing {key} needs finite non-negative {field_name}")
+        return value
 
     @field_validator("extension_catalog_url", mode="before")
     @classmethod

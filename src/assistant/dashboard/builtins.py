@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 from datetime import UTC, datetime
+from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy import select
@@ -21,7 +22,7 @@ from assistant.dashboard.contracts import (
     ProviderConnection,
     ProviderHealth,
 )
-from assistant.observability import InteractionMode
+from assistant.observability import InteractionMode, MetricStage
 from assistant.scheduling.service import SchedulerService
 from assistant.storage.database import Database, ItemRow, MetricsStore
 
@@ -43,6 +44,7 @@ def default_dashboard_layout() -> DashboardLayout:
     metrics = (
         ("assistant.status", MetricPresentation.STATUS),
         ("assistant.request_outcomes", MetricPresentation.NUMBER),
+        ("assistant.cloud_usage", MetricPresentation.NUMBER),
         ("assistant.typed_request_latency", MetricPresentation.DURATION),
         ("assistant.voice_request_latency", MetricPresentation.DURATION),
         ("assistant.model_latency", MetricPresentation.DURATION),
@@ -101,6 +103,21 @@ class AssistantMetricsProvider:
                 description="Privacy-bounded execution outcomes from the last 24 hours.",
                 source_label="Local Assistant",
                 value_kind=MetricValueKind.NUMBER,
+                supported_presentations=(MetricPresentation.NUMBER,),
+                default_presentation=MetricPresentation.NUMBER,
+                supports_history=True,
+            ),
+            MetricDefinition(
+                metric_id="assistant.cloud_usage",
+                provider_id=self.provider_id,
+                display_name="Cloud usage",
+                description=(
+                    "Token usage and estimated cost for OpenAI, Anthropic, and Codex requests. "
+                    "Cost is shown only when pricing is configured."
+                ),
+                source_label="Local Assistant",
+                value_kind=MetricValueKind.NUMBER,
+                unit="tokens",
                 supported_presentations=(MetricPresentation.NUMBER,),
                 default_presentation=MetricPresentation.NUMBER,
                 supports_history=True,
@@ -224,6 +241,8 @@ class AssistantMetricsProvider:
             return self._status(request)
         if request.metric_id == "assistant.request_outcomes":
             return self._request_outcomes(request)
+        if request.metric_id == "assistant.cloud_usage":
+            return self._cloud_usage(request)
         if request.metric_id == "assistant.request_latency":
             return self._latency(
                 request,
@@ -308,6 +327,70 @@ class AssistantMetricsProvider:
             request,
             stage="execution",
             empty_summary="No execution samples in the last 24 hours.",
+        )
+
+    def _cloud_usage(self, request: MetricRequest) -> MetricSnapshot:
+        token_rows = self.metrics.query(
+            since=request.since,
+            stages=(str(MetricStage.CLOUD_TOKENS),),
+        )
+        cost_rows = self.metrics.query(
+            since=request.since,
+            stages=(str(MetricStage.CLOUD_COST),),
+        )
+        token_total = sum(
+            float(row["value"]) for row in token_rows if isinstance(row.get("value"), int | float)
+        )
+        cost_values = [
+            float(row["value"]) for row in cost_rows if isinstance(row.get("value"), int | float)
+        ]
+        if not token_rows and not cost_rows:
+            return MetricSnapshot(
+                metric_id=request.metric_id,
+                collected_at=datetime.now(UTC),
+                state=MetricState.EMPTY,
+                value=None,
+                unit="tokens",
+                summary="No cloud usage samples in the last 24 hours.",
+            )
+
+        by_provider: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in token_rows:
+            dimensions = row.get("dimensions") or {}
+            key = (str(dimensions.get("provider", "Unknown")), str(dimensions.get("model", "")))
+            by_provider.setdefault(key, {"tokens": 0.0, "cost": 0.0, "cost_available": False})[
+                "tokens"
+            ] += float(row.get("value") or 0)
+        for row in cost_rows:
+            dimensions = row.get("dimensions") or {}
+            key = (str(dimensions.get("provider", "Unknown")), str(dimensions.get("model", "")))
+            values = by_provider.setdefault(
+                key, {"tokens": 0.0, "cost": 0.0, "cost_available": False}
+            )
+            values["cost"] += float(row.get("value") or 0)
+            values["cost_available"] = True
+        if cost_values:
+            summary = f"{int(token_total):,} tokens  •  estimated cost ${sum(cost_values):.6f}"
+        else:
+            summary = f"{int(token_total):,} tokens  •  cost estimate unavailable"
+        details = tuple(
+            MetricDetail(
+                label=f"{provider} {model}".rstrip(),
+                value=(
+                    f"{int(values['tokens']):,} tokens"
+                    + (f"  •  ${values['cost']:.6f}" if values["cost_available"] else "")
+                ),
+            )
+            for (provider, model), values in sorted(by_provider.items())
+        )
+        return MetricSnapshot(
+            metric_id=request.metric_id,
+            collected_at=datetime.now(UTC),
+            state=MetricState.READY,
+            value=int(token_total),
+            unit="tokens",
+            summary=summary,
+            details=details,
         )
 
     def _resource_usage(self, request: MetricRequest) -> MetricSnapshot:

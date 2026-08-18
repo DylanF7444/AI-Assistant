@@ -18,6 +18,15 @@ and execution steps under each on-screen response. Register applications by
 friendly spoken name before asking the assistant to launch them; arbitrary
 executable paths are not accepted from transcripts or models.
 
+Assistant settings can also be changed with requests such as “set response
+detail to detailed,” “enable high contrast,” or “disable offline mode.” The
+assistant asks for a setting-scoped `settings.set` permission before making a
+change. Privacy, offline-lock, transcript-retention, background-action,
+diagnostic-audio, and confirmation-policy changes also show the exact proposed
+value and wait for confirmation. Settings tied to model, speech, audio-device,
+or wake-word initialization are saved immediately but report that an application
+restart is required.
+
 ## Compact companion
 
 The assistant opens as a compact companion on first launch and remembers whether
@@ -48,14 +57,17 @@ The full window presents Dashboard and Assistant as its two primary screens.
 The last selected primary screen is remembered when the window is hidden and
 restored. Use `Ctrl+1` for Dashboard and `Ctrl+2` for Assistant.
 
-The default Dashboard contains local Assistant status, request outcomes, typed
-request latency, voice request latency, model latency, skill-execution latency,
-resource use, automation summary, local tasks, and recent activity cards. The Tasks card shows open and
+The default Dashboard contains local Assistant status, request outcomes, cloud
+usage, typed request latency, voice request latency, model latency,
+skill-execution latency, resource use, automation summary, local tasks, and
+recent activity cards. Cloud usage shows token totals by provider/model and an
+estimated cost only when deployment pricing is configured; otherwise it says
+that the estimate is unavailable. The Tasks card shows open and
 completed counts plus task titles and status. Select
 **Customize** to add, remove, hide, reorder, resize, rename, or change the
 presentation and refresh interval of a card. Changes are staged until **Save**;
 **Cancel** leaves the saved layout untouched, and **Reset to defaults** restores
-the ten local cards. The catalog also offers CPU, memory, storage, and battery
+the eleven local cards. The catalog also offers CPU, memory, storage, and battery
 cards. These remain unavailable until the exact read-only `device.read` grant
 is approved from the card.
 
@@ -563,30 +575,82 @@ Settings and requires a Brave Search API key. Codex requests use the locally
 installed `codex exec` CLI. OpenAI and Anthropic requests are first-party
 Extension Hub components and require an installed, enabled extension. OpenAI
 cloud requests additionally require its connected encrypted API key; the
-OpenAI extension's local Codex mode does not. Cloud API invocations require
-the `network` permission, and Codex invocations require `network` and
+OpenAI extension's local Codex mode does not. To use a ChatGPT subscription,
+install the official Codex CLI, run `codex login` from the same Windows account,
+and choose **Sign in with ChatGPT**. Verify the session with `codex login status`.
+The assistant reuses that saved Codex session; it does not read, store, or
+exchange ChatGPT credentials itself. Cloud API invocations require the
+`network` permission, and Codex invocations require `network` and
 `process.launch` for the read-only Codex CLI. Supported commands include
 `search the web for ...`, `read https://...`, `ask ChatGPT ...`, `ask Codex ...`,
 `ask Claude ...`, and `make code to ...`.
 
-### OpenAI and Anthropic setup
+### OpenAI, Codex, and Anthropic setup
 
 Open **Extension Hub** and install **OpenAI** or **Anthropic**. Review the
 declared fixed-origin `network` permission, then enable the extension in
-**Skills**. From the extension detail page, choose **Connect OpenAI** or
-**Connect Anthropic**, enter the provider API key, and use **Test Connection**.
+**Skills**. For OpenAI, choose **Configure OpenAI / Codex**. The dialog has two
+independent setup sections: enter and test an OpenAI API key for direct OpenAI
+requests, or install the Codex CLI and choose **Sign in with ChatGPT** for
+`ask Codex ...` requests. **Check Codex Setup** verifies both the local CLI and
+its saved sign-in. For Anthropic, choose **Connect Anthropic**, enter the
+provider API key, and use **Test Connection**.
 The key is stored in the Windows-encrypted secret vault and is never included
 in settings exports, skill arguments, transcripts, activity details, or the
 language model. The global offline lock disables both connection tests and
 model requests.
 
-The default OpenAI and Anthropic model names remain configurable in **Settings**;
-an individual request may provide another model name and a bounded output-token
+The default OpenAI, Codex, and Anthropic model names remain configurable in
+**Settings**; the shipped Codex default is `gpt-5.6-sol`. Existing settings that
+still contain the former `gpt-5.3-codex` default are migrated automatically.
+An individual request may provide another model name and a bounded output-token
 limit. The OpenAI adapter disables Responses API application-state storage for
 each request. The extensions support one text prompt and one text response
 through the OpenAI Responses API or Anthropic Messages API. They do not upload
 files, invoke provider tools, maintain remote conversations, or retry a model
 request automatically because a replay can incur another provider charge.
+
+For a terminal-only smoke test after signing in, run this from the repository
+root:
+
+```powershell
+python -m assistant.app --text "ask Codex to summarize this project"
+```
+
+This invokes `codex exec` with the prompt on stdin, a read-only sandbox, no
+interactive approval prompts, and an ephemeral run. Because the desktop app
+may start outside a Git repository, it also uses the documented
+`--skip-git-repo-check` automation flag; the Codex sandbox remains read-only.
+The assistant does not turn a ChatGPT subscription into a general OpenAI API
+key: `ask ChatGPT` or other direct OpenAI API requests still require the
+encrypted OpenAI API-key connection.
+
+Fallbacks are explicit. Say `ask OpenAI or Claude to explain cancellation` or
+`ask Claude if unavailable use OpenAI to summarize this`; the named provider is
+tried only after a transient unavailable, timeout, rate-limit, or missing-
+connection failure. Authentication failures, invalid requests, malformed
+responses, cancellation, and Offline lock never silently resend the prompt to
+another provider. A fallback must be installed and enabled in Extension Hub; a
+disconnected primary remains eligible for this explicit route, while ordinary
+requests still require its connection. The result identifies the provider
+actually used and records bounded token usage. Cost is an estimate, not a bill,
+and remains unavailable when current deployment pricing has not been configured.
+If the primary fails and the fallback runs, both provider requests can incur
+separate charges; the assistant does not enforce a spend cap.
+
+To configure estimates, set **Cloud pricing JSON** in Settings using provider
+and model keys such as
+`{"openai:gpt-5.5":{"input_usd_per_million":1.25,"output_usd_per_million":10}}`.
+Use `provider:*` for a deployment-wide model fallback. Prices are USD per
+million tokens; the assistant does not bundle or infer changing provider
+prices.
+
+Cloud prompts and answers are marked sensitive. They are omitted from execution
+activity/audit payloads, while provider, model, fallback outcome, token counts,
+and configured cost estimates remain visible for review. The normal sensitive
+display, speech, transcript-retention, and history controls still apply.
+Provider requests observe the cancel action and return a clear cancelled,
+timed-out, authentication, rate-limit, unavailable, or Offline-lock state.
 
 For JavaScript-rendered pages, install the optional browser extra:
 

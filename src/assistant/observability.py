@@ -35,6 +35,8 @@ class MetricStage(StrEnum):
     REQUEST_TOTAL = "request.total"
     RESOURCE_MEMORY = "resource.memory"
     RESOURCE_QUEUE_DEPTH = "resource.queue_depth"
+    CLOUD_TOKENS = "cloud.tokens"
+    CLOUD_COST = "cloud.cost"
 
 
 def process_working_set_bytes() -> int:

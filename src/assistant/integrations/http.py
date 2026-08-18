@@ -22,6 +22,10 @@ class AccessTokenProvider(Protocol):
     async def access_token(self, *, force_refresh: bool = False) -> str: ...
 
 
+class ExternalRequestCancelled(RuntimeError):
+    """Raised when a bounded external request is cancelled by its caller."""
+
+
 @dataclass(frozen=True)
 class _ExternalHttpFailure(Exception):
     status: int
@@ -80,11 +84,13 @@ class ExternalJsonClient:
         body: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
         safe_to_retry: bool | None = None,
+        cancel_event: asyncio.Event | None = None,
     ) -> dict[str, Any]:
         normalized_method = method.strip().upper()
         if not normalized_method.isalpha():
             raise ValueError("External API method is invalid")
         _validate_relative_path(path)
+        _raise_if_cancelled(cancel_event)
         retryable = (
             normalized_method in _IDEMPOTENT_METHODS
             if safe_to_retry is None
@@ -95,16 +101,19 @@ class ExternalJsonClient:
         attempt = 1
         while True:
             try:
-                return await asyncio.to_thread(
-                    self._request_once,
+                return await self._request_with_cancellation(
                     normalized_method,
                     path,
                     token,
                     dict(query or {}),
                     dict(body) if body is not None else None,
                     dict(headers or {}),
+                    cancel_event,
                 )
+            except ExternalRequestCancelled:
+                raise
             except _ExternalHttpFailure as error:
+                _raise_if_cancelled(cancel_event)
                 if error.status == 401 and not refreshed:
                     token = await self.tokens.access_token(force_refresh=True)
                     refreshed = True
@@ -118,13 +127,75 @@ class ExternalJsonClient:
                         delay = min(max(0, delay), self.max_retry_delay_seconds)
                     attempt += 1
                     if delay:
-                        await self.sleep(delay)
+                        await self._sleep_with_cancellation(delay, cancel_event)
                     continue
                 raise self.error_factory(
                     error.status,
                     error.reason[:200],
                     error.recoverable,
                 ) from None
+
+    async def _request_with_cancellation(
+        self,
+        method: str,
+        path: str,
+        token: str,
+        query: dict[str, Any],
+        body: dict[str, Any] | None,
+        headers: dict[str, str],
+        cancel_event: asyncio.Event | None,
+    ) -> dict[str, Any]:
+        _raise_if_cancelled(cancel_event)
+        request_task = asyncio.create_task(
+            asyncio.to_thread(
+                self._request_once,
+                method,
+                path,
+                token,
+                query,
+                body,
+                headers,
+                cancel_event,
+            )
+        )
+        if cancel_event is None:
+            return await request_task
+
+        cancellation_task = asyncio.create_task(cancel_event.wait())
+        done, _pending = await asyncio.wait(
+            {request_task, cancellation_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if cancellation_task in done and cancel_event.is_set():
+            request_task.cancel()
+            await asyncio.gather(request_task, return_exceptions=True)
+            raise ExternalRequestCancelled("External request cancelled")
+        cancellation_task.cancel()
+        await asyncio.gather(cancellation_task, return_exceptions=True)
+        return await request_task
+
+    async def _sleep_with_cancellation(
+        self,
+        delay: float,
+        cancel_event: asyncio.Event | None,
+    ) -> None:
+        if cancel_event is None:
+            await self.sleep(delay)
+            return
+        _raise_if_cancelled(cancel_event)
+        sleep_task = asyncio.create_task(self.sleep(delay))
+        cancellation_task = asyncio.create_task(cancel_event.wait())
+        done, _pending = await asyncio.wait(
+            {sleep_task, cancellation_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if cancellation_task in done and cancel_event.is_set():
+            sleep_task.cancel()
+            await asyncio.gather(sleep_task, return_exceptions=True)
+            raise ExternalRequestCancelled("External request cancelled")
+        cancellation_task.cancel()
+        await asyncio.gather(cancellation_task, return_exceptions=True)
+        await sleep_task
 
     def _request_once(
         self,
@@ -134,6 +205,7 @@ class ExternalJsonClient:
         query: dict[str, Any],
         body: dict[str, Any] | None,
         headers: dict[str, str],
+        cancel_event: asyncio.Event | None,
     ) -> dict[str, Any]:
         pairs: list[tuple[str, Any]] = []
         for key, value in query.items():
@@ -166,10 +238,28 @@ class ExternalJsonClient:
         )
         try:
             with self.opener(request, timeout=self.timeout_seconds) as response:
-                payload = response.read(self.max_response_bytes + 1)
+                payload = _read_bounded_response(
+                    response,
+                    max_bytes=self.max_response_bytes,
+                    cancel_event=cancel_event,
+                )
+        except ExternalRequestCancelled:
+            raise
         except urllib.error.HTTPError as error:
             raise _failure_from_http_error(error, self.provider_name) from None
+        except PermissionError as error:
+            raise _ExternalHttpFailure(
+                0,
+                "Outbound network access is blocked by offline mode.",
+                False,
+            ) from error
         except (urllib.error.URLError, OSError, TimeoutError) as error:
+            if _is_offline_error(error):
+                raise _ExternalHttpFailure(
+                    0,
+                    "Outbound network access is blocked by offline mode.",
+                    False,
+                ) from error
             raise _ExternalHttpFailure(
                 503,
                 f"{self.provider_name} could not be reached.",
@@ -278,3 +368,37 @@ def _failure_from_http_error(
         error.code in _RETRYABLE_STATUSES,
         retry_after,
     )
+
+
+def _raise_if_cancelled(cancel_event: asyncio.Event | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise ExternalRequestCancelled("External request cancelled")
+
+
+def _is_offline_error(error: BaseException) -> bool:
+    reason = getattr(error, "reason", None)
+    return isinstance(reason, PermissionError) or "offline mode" in str(reason).casefold()
+
+
+def _read_bounded_response(
+    response: Any,
+    *,
+    max_bytes: int,
+    cancel_event: asyncio.Event | None,
+) -> bytes:
+    """Read in bounded chunks so cancellation is observed during large bodies."""
+
+    chunks: list[bytes] = []
+    total = 0
+    chunk_size = min(64 * 1024, max_bytes + 1)
+    while total <= max_bytes:
+        _raise_if_cancelled(cancel_event)
+        chunk = response.read(min(chunk_size, max_bytes + 1 - total))
+        if not chunk:
+            break
+        if not isinstance(chunk, bytes):
+            chunk = bytes(chunk)
+        chunks.append(chunk)
+        total += len(chunk)
+    _raise_if_cancelled(cancel_event)
+    return b"".join(chunks)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -25,7 +26,7 @@ from assistant.integrations.connections import (
     ConnectionState,
     ConnectionStatus,
 )
-from assistant.integrations.http import ExternalJsonClient
+from assistant.integrations.http import ExternalJsonClient, ExternalRequestCancelled
 from assistant.integrations.oauth import (
     OAuthLoopbackMessages,
     OAuthSecretNames,
@@ -513,6 +514,37 @@ async def test_external_json_client_blocks_unsafe_paths_and_oversized_responses(
             await client.request("GET", unsafe_path)
     with pytest.raises(_ProviderError, match="safety limit"):
         await client.request("GET", "/items")
+
+
+@pytest.mark.asyncio
+async def test_external_json_client_cancellation_is_bounded_while_opener_is_blocked():
+    class Tokens:
+        async def access_token(self, *, force_refresh=False):
+            return "token"
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def opener(request, timeout):
+        started.set()
+        release.wait(30)
+        return _Response({})
+
+    cancel_event = asyncio.Event()
+    client = ExternalJsonClient(
+        "https://api.example.test/v1",
+        Tokens(),
+        provider_name="Example",
+        opener=opener,
+    )
+    request = asyncio.create_task(client.request("GET", "/items", cancel_event=cancel_event))
+    try:
+        assert await asyncio.to_thread(started.wait, 2)
+        cancel_event.set()
+        with pytest.raises(ExternalRequestCancelled):
+            await asyncio.wait_for(request, timeout=1)
+    finally:
+        release.set()
 
 
 @pytest.mark.asyncio

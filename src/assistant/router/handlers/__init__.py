@@ -19,6 +19,7 @@ from assistant.router.handlers.openai import OpenAIHandler
 from assistant.router.handlers.outlook_calendar import OutlookCalendarHandler
 from assistant.router.handlers.outlook_mail import OutlookMailHandler
 from assistant.router.handlers.productivity import ProductivityHandler
+from assistant.router.handlers.settings import AssistantSettingsHandler
 from assistant.router.handlers.slack import SlackHandler
 from assistant.router.handlers.visualization import VisualizationHandler
 from assistant.router.types import RouteHandler
@@ -38,6 +39,7 @@ DEFAULT_ROUTE_HANDLERS: tuple[RouteHandler, ...] = (
     OpenAIHandler(),
     AnthropicHandler(),
     ProductivityHandler(),
+    AssistantSettingsHandler(),
     VisualizationHandler(),
     NetworkHandler(),
     DeviceStatusHandler(),

@@ -3,12 +3,13 @@ from __future__ import annotations
 import base64
 import logging
 import re
+from contextlib import suppress
 from dataclasses import dataclass
 
 from assistant.audio.capture import AudioCapture
 from assistant.audio.focus import AudioFocusCoordinator
 from assistant.audio.wakeword import OpenWakeWordProvider
-from assistant.config import Settings
+from assistant.config import DEFAULT_CODEX_MODEL, LEGACY_CODEX_MODEL_DEFAULTS, Settings
 from assistant.context.providers import (
     DesktopContextProvider,
     DeviceContextProvider,
@@ -44,6 +45,7 @@ from assistant.integrations.anthropic import (
     AnthropicConnectionService,
 )
 from assistant.integrations.api_token import ApiTokenProvider
+from assistant.integrations.cloud import CloudPricing
 from assistant.integrations.connections import ConnectionBinding
 from assistant.integrations.github import GitHubAdapter, GitHubConnectionService
 from assistant.integrations.gmail import (
@@ -120,6 +122,7 @@ from assistant.scheduling.runner import BackgroundRunner
 from assistant.scheduling.runtime import BackgroundRuntime
 from assistant.scheduling.service import SchedulerService
 from assistant.scheduling.store import ScheduleStore
+from assistant.settings_service import ApplicationSettingsService
 from assistant.skills.anthropic import AnthropicSkill
 from assistant.skills.builtin import (
     CalculatorSkill,
@@ -164,6 +167,7 @@ from assistant.skills.productivity import (
 )
 from assistant.skills.registry import SkillRegistry
 from assistant.skills.scheduling import ScheduleSkill
+from assistant.skills.settings import AssistantSettingSkill
 from assistant.skills.slack import SlackSkill
 from assistant.skills.vision import OllamaVisionProvider, VisualUnderstandingSkill
 from assistant.skills.visualize import VisualizeSkill
@@ -246,6 +250,107 @@ class Container:
     media_cache: RemoteMediaCache
 
 
+def _apply_application_settings(container: Container, updated: Settings) -> None:
+    current = container.settings
+    scheduler_was_enabled = current.scheduler_enabled
+    for field_name in Settings.model_fields:
+        setattr(current, field_name, getattr(updated, field_name))
+
+    pricing = CloudPricing.from_mapping(current.cloud_pricing) if current.cloud_pricing else None
+    container.dashboard.set_offline_lock(current.offline_lock)
+    container.dashboard.set_history_retention_days(current.dashboard_history_retention_days)
+    container.extension_hub.configure(
+        current.extension_catalog_url,
+        timeout_seconds=current.extension_catalog_timeout_seconds,
+    )
+    container.extension_hub.set_offline_lock(current.offline_lock)
+    container.extension_hub.set_cloud_pricing(pricing)
+    container.media_cache.set_offline_lock(current.offline_lock)
+
+    container.scheduler.enabled = current.scheduler_enabled
+    container.scheduler.runner.background_actions_enabled = current.background_actions_enabled
+    container.scheduler.runner.pause_while_locked = current.pause_background_while_locked
+    container.scheduler.runner.notify_on_success = current.notify_on_background_success
+    container.scheduler.runner.notify_on_failure = current.notify_on_background_failure
+    container.scheduler.max_concurrency = current.max_background_concurrency
+    if (
+        current.scheduler_enabled
+        and not scheduler_was_enabled
+        and not container.background_runtime.running
+    ):
+        container.background_runtime.start()
+    if current.automations_paused:
+        container.scheduler.pause()
+    else:
+        container.scheduler.resume()
+    container.scheduler.wake()
+
+    container.orchestrator.speech_mode = current.speech_mode
+    container.orchestrator.response_detail = current.response_detail
+    container.orchestrator.show_reasoning_steps = current.show_reasoning_steps
+    container.orchestrator.terminal_debug = current.terminal_debug
+    container.orchestrator.allow_sensitive_speech = current.allow_sensitive_speech
+    container.orchestrator.hide_sensitive_display = current.hide_sensitive_display
+    container.orchestrator.history.retention_days = current.retain_transcripts_days
+    container.engine.confirmation_overrides = dict(current.confirmation_overrides)
+
+    planner = container.orchestrator.planner
+    if planner is not None:
+        planner.response_detail = current.response_detail
+        provider = getattr(planner, "provider", None)
+        if provider is not None:
+            if hasattr(provider, "model"):
+                provider.model = current.llm_model
+            if hasattr(provider, "keep_alive"):
+                provider.keep_alive = current.llm_keep_alive
+
+    for provider in container.orchestrator.context_providers:
+        if hasattr(provider, "include_open_applications"):
+            provider.include_open_applications = current.context_include_open_applications
+        if hasattr(provider, "include_connected_devices"):
+            provider.include_connected_devices = current.context_include_connected_devices
+        if hasattr(provider, "allow_file_contents"):
+            provider.allow_file_contents = current.context_allow_file_contents
+
+    container.audio_capture.noise_suppression = current.noise_suppression
+    container.audio_capture.automatic_gain_control = current.automatic_gain_control
+    container.audio_capture.clap_detector.threshold = current.voice_activation_clap_threshold
+    tts = container.orchestrator.tts
+    if tts is not None:
+        if hasattr(tts, "speed"):
+            tts.speed = current.tts_speed
+        if hasattr(tts, "volume"):
+            tts.volume = current.tts_volume
+        setter = getattr(tts, "set_offline_lock", None)
+        if callable(setter):
+            setter(current.offline_lock or current.tts_provider != "elevenlabs")
+
+    with suppress(KeyError):
+        container.registry.inspect("web.search").provider = current.search_provider
+
+    model_defaults = {
+        "cloud.ask": {"default_model": current.openai_codex_model},
+        "integration.openai": {
+            "default_model": current.openai_model,
+            "default_codex_model": current.openai_codex_model,
+            "default_anthropic_model": current.anthropic_model,
+        },
+        "integration.anthropic": {
+            "default_model": current.anthropic_model,
+            "default_openai_model": current.openai_model,
+            "default_codex_model": current.openai_codex_model,
+        },
+    }
+    for skill_id, defaults in model_defaults.items():
+        try:
+            skill = container.registry.inspect(skill_id)
+        except KeyError:
+            continue
+        for attribute, value in defaults.items():
+            if hasattr(skill, attribute):
+                setattr(skill, attribute, value)
+
+
 def _decode_trusted_keys(encoded_keys: dict[str, str]) -> dict[str, bytes]:
     return {key_id: base64.b64decode(value) for key_id, value in encoded_keys.items()}
 
@@ -254,6 +359,9 @@ def _settings_with_persisted_values(settings: Settings, database: Database) -> S
     persisted = SettingsStore(database).get("application_settings", {})
     if not persisted:
         return settings
+    persisted = dict(persisted)
+    if persisted.get("openai_codex_model") in LEGACY_CODEX_MODEL_DEFAULTS:
+        persisted["openai_codex_model"] = DEFAULT_CODEX_MODEL
     return Settings.model_validate(
         {**settings.model_dump(), **persisted, "data_dir": settings.data_dir}
     )
@@ -443,7 +551,9 @@ def _register_network_skills(
     registry.register(
         HeadlessReadSkill(PlaywrightHeadlessBrowser(offline_mode=settings.offline_lock))
     )
-    registry.register(CodexAskSkill(settings.openai_codex_model))
+    registry.register(
+        CodexAskSkill(settings.openai_codex_model, offline_lock=settings.offline_lock)
+    )
 
 
 def _google_calendar_skill_factory(secret_vault: SecretVault):
@@ -510,8 +620,10 @@ def _managed_extension_registry(
     secret_vault: SecretVault,
     *,
     openai_model: str = "gpt-5.5",
-    codex_model: str = "gpt-5.5",
+    codex_model: str = DEFAULT_CODEX_MODEL,
     anthropic_model: str = "claude-sonnet-4-6",
+    offline_lock: bool = False,
+    pricing: CloudPricing | None = None,
 ) -> ManagedExtensionRegistry:
     _migrate_cloud_api_key(secret_vault, OPENAI_API_KEY_SECRET, OPENAI_LEGACY_SECRET_NAMES)
     _migrate_cloud_api_key(
@@ -533,18 +645,38 @@ def _managed_extension_registry(
     slack_connection = SlackConnectionService(secret_vault)
     notion_connection = NotionConnectionService(secret_vault)
     github_connection = GitHubConnectionService(secret_vault)
-    openai_connection = OpenAIConnectionService(secret_vault)
-    anthropic_connection = AnthropicConnectionService(secret_vault)
+    openai_connection = OpenAIConnectionService(
+        secret_vault,
+        offline_lock=offline_lock,
+        pricing=pricing,
+    )
+    anthropic_connection = AnthropicConnectionService(
+        secret_vault,
+        offline_lock=offline_lock,
+        pricing=pricing,
+    )
 
     def openai_factory():
         return OpenAISkill(
             openai_connection.adapter,
             default_model=openai_model,
             default_codex_model=codex_model,
+            anthropic_adapter=anthropic_connection.adapter,
+            default_anthropic_model=anthropic_model,
+            offline_lock=offline_lock,
+            pricing=pricing,
         )
 
     def anthropic_factory():
-        return AnthropicSkill(anthropic_connection.adapter, default_model=anthropic_model)
+        return AnthropicSkill(
+            anthropic_connection.adapter,
+            default_model=anthropic_model,
+            openai_adapter=openai_connection.adapter,
+            default_openai_model=openai_model,
+            default_codex_model=codex_model,
+            offline_lock=offline_lock,
+            pricing=pricing,
+        )
 
     return ManagedExtensionRegistry(
         (
@@ -959,6 +1091,7 @@ def build_container(settings: Settings | None = None) -> Container:
     database = Database(settings.database_url)
     database.migrate()
     settings = _settings_with_persisted_values(settings, database)
+    pricing = CloudPricing.from_mapping(settings.cloud_pricing) if settings.cloud_pricing else None
     configure_logging(
         settings.data_dir,
         developer_mode=settings.profile == "development",
@@ -972,6 +1105,8 @@ def build_container(settings: Settings | None = None) -> Container:
         openai_model=settings.openai_model,
         codex_model=settings.openai_codex_model,
         anthropic_model=settings.anthropic_model,
+        offline_lock=settings.offline_lock,
+        pricing=pricing,
     )
     registry, macro_store, media_sessions, media_cache = _build_registry(
         settings,
@@ -991,6 +1126,8 @@ def build_container(settings: Settings | None = None) -> Container:
         audit=storage.audit,
         managed_registry=managed_extensions,
     )
+    extension_hub.set_offline_lock(settings.offline_lock)
+    extension_hub.set_cloud_pricing(pricing)
     context_providers = _build_context_providers(settings, storage)
     confirmations = ConfirmationManager()
     engine = ExecutionEngine(
@@ -1111,26 +1248,7 @@ def build_container(settings: Settings | None = None) -> Container:
     audio = _build_audio_services(settings, storage.secret_vault)
     orchestrator.tts = audio.tts
     orchestrator.speech_mode = settings.speech_mode
-    registry.register(
-        DiagnosticSkill(
-            registry,
-            {
-                "stt": audio.stt,
-                "llm": llm,
-                "tts": audio.tts,
-                "scheduler": scheduler,
-            },
-            media_cache=media_cache,
-            media_sessions=media_sessions,
-        )
-    )
-    for skill_id, error in registry.load_all_installed().items():
-        logging.getLogger(__name__).warning(
-            "Installed extension could not be loaded",
-            extra={"skill_id": skill_id, "outcome": error},
-        )
-    extension_hub.sync_connected_extensions()
-    return Container(
+    container = Container(
         settings=settings,
         database=database,
         audit=storage.audit,
@@ -1170,3 +1288,32 @@ def build_container(settings: Settings | None = None) -> Container:
         media_sessions=media_sessions,
         media_cache=media_cache,
     )
+    registry.register(
+        AssistantSettingSkill(
+            ApplicationSettingsService(
+                SettingsStore(database),
+                lambda: container.settings,
+                lambda updated: _apply_application_settings(container, updated),
+            )
+        )
+    )
+    registry.register(
+        DiagnosticSkill(
+            registry,
+            {
+                "stt": audio.stt,
+                "llm": llm,
+                "tts": audio.tts,
+                "scheduler": scheduler,
+            },
+            media_cache=media_cache,
+            media_sessions=media_sessions,
+        )
+    )
+    for skill_id, error in registry.load_all_installed().items():
+        logging.getLogger(__name__).warning(
+            "Installed extension could not be loaded",
+            extra={"skill_id": skill_id, "outcome": error},
+        )
+    extension_hub.sync_connected_extensions()
+    return container

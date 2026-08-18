@@ -9,6 +9,7 @@ from pydantic import BaseModel, ValidationError
 
 from assistant.contracts import (
     PipelineEvent,
+    ResultStatus,
     RiskLevel,
     SkillCall,
     SkillManifest,
@@ -37,6 +38,8 @@ class Skill(ABC):
         return self.output_model.model_json_schema()
 
     def validate_result(self, result: SkillResult) -> None:
+        if result.status != ResultStatus.COMPLETED:
+            return
         self.output_model.model_validate(result.data)
 
     def required_permissions(self, call: SkillCall):

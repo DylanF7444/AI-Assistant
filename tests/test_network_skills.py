@@ -5,6 +5,7 @@ import io
 import json
 import os
 import ssl
+import subprocess
 from urllib.error import URLError
 from urllib.request import Request
 
@@ -15,6 +16,7 @@ from assistant.integrations.headless_browser import PlaywrightHeadlessBrowser, R
 from assistant.integrations.web import (
     CloudModelClient,
     CodexExecClient,
+    CodexSetupService,
     WebClient,
     _open_request,
 )
@@ -552,11 +554,20 @@ def test_codex_exec_prefers_user_profile_binary(monkeypatch, tmp_path):
     assert CodexExecClient()._resolve_executable() == str(new)
 
 
-def test_codex_exec_uses_current_noninteractive_approval_config(monkeypatch):
+def test_codex_exec_uses_stdin_and_current_noninteractive_safety_defaults(monkeypatch):
     commands = []
+    prompts = []
+
+    class FakeStdin:
+        def write(self, value):
+            prompts.append(value)
+
+        def close(self):
+            return None
 
     class FakeProcess:
         returncode = 0
+        stdin = FakeStdin()
 
         def poll(self):
             return 0
@@ -589,12 +600,86 @@ def test_codex_exec_uses_current_noninteractive_approval_config(monkeypatch):
             'approval_policy="never"',
             "--sandbox",
             "read-only",
+            "--ephemeral",
+            "--skip-git-repo-check",
             "--model",
             "gpt-5.3-codex",
-            "Review this",
+            "-",
         ]
     ]
-    assert "--ask-for-approval" not in commands[0]
+    assert prompts == ["Review this"]
+
+
+def test_codex_exec_rejects_non_positive_timeout():
+    with pytest.raises(ValueError, match="timeout"):
+        CodexExecClient(timeout_seconds=0)
+
+
+def test_codex_exec_missing_binary_explains_chatgpt_login(monkeypatch):
+    monkeypatch.setattr(
+        "assistant.integrations.web.CodexExecClient._resolve_executable",
+        lambda _self: "codex",
+    )
+
+    def missing_process(*_args, **_kwargs):
+        raise FileNotFoundError("codex")
+
+    monkeypatch.setattr("assistant.integrations.web.subprocess.Popen", missing_process)
+
+    with pytest.raises(RuntimeError, match="codex login"):
+        CodexExecClient()._ask_sync("Review this", model=None, cancel_event=None)
+
+
+def test_codex_setup_reports_missing_cli(tmp_path):
+    missing = tmp_path / "missing-codex.exe"
+
+    status = CodexSetupService(CodexExecClient(missing)).status()
+
+    assert status.installed is False
+    assert status.authenticated is False
+    assert "install guide" in status.message.casefold()
+
+
+def test_codex_setup_reports_installed_chatgpt_session(monkeypatch):
+    service = CodexSetupService()
+    monkeypatch.setattr(service.client, "find_executable", lambda: "codex.exe")
+
+    def run(command, *, timeout):
+        assert timeout == service.status_timeout_seconds
+        output = "codex-cli 1.2.3" if command[-1] == "--version" else "Logged in using ChatGPT"
+        return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+
+    monkeypatch.setattr(service, "_run", run)
+
+    status = service.status()
+
+    assert status.installed is True
+    assert status.authenticated is True
+    assert status.usable is True
+    assert status.version == "codex-cli 1.2.3"
+    assert "Logged in using ChatGPT" in status.message
+
+
+def test_codex_setup_sign_in_runs_browser_flow_then_rechecks(monkeypatch):
+    service = CodexSetupService()
+    monkeypatch.setattr(service.client, "find_executable", lambda: "codex.exe")
+    commands = []
+
+    def run(command, *, timeout):
+        commands.append((command, timeout))
+        output = "codex-cli 1.2.3" if command[-1] == "--version" else "Logged in using ChatGPT"
+        return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+
+    monkeypatch.setattr(service, "_run", run)
+
+    status = asyncio.run(service.sign_in())
+
+    assert status.authenticated is True
+    assert commands[0] == (("codex.exe", "login"), service.login_timeout_seconds)
+    assert commands[-1] == (
+        ("codex.exe", "login", "status"),
+        service.status_timeout_seconds,
+    )
 
 
 class ReversibleCipher:
