@@ -22,7 +22,7 @@ if ($LASTEXITCODE -ne 0) { throw "Regression tests failed with exit code $LASTEX
 python -m pytest learning_tests -q --cov=assistant --cov-branch --cov-append --cov-report=
 if ($LASTEXITCODE -ne 0) { throw "Learning tests failed with exit code $LASTEXITCODE" }
 $env:QT_QPA_PLATFORM = "offscreen"
-python -m pytest -m ui tests/ui -q --cov=assistant --cov-branch --cov-append --cov-report=
+python -m pytest tests/ui -q --cov=assistant --cov-branch --cov-append --cov-report=
 if ($LASTEXITCODE -ne 0) { throw "UI tests failed with exit code $LASTEXITCODE" }
 python -m coverage json -o .benchmark-data/coverage.json
 if ($LASTEXITCODE -ne 0) { throw "Coverage report failed with exit code $LASTEXITCODE" }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 from datetime import timedelta
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from assistant.contracts import (
@@ -26,6 +27,7 @@ from assistant.scheduling.clock import Clock
 from assistant.scheduling.contracts import (
     ApprovalConfirmation,
     ApprovalReview,
+    CommandCenterBriefAction,
     FixedSkillAction,
     FrozenPlanAction,
     LogicWorkflowAction,
@@ -42,6 +44,9 @@ from assistant.skills.registry import SkillRegistry
 from assistant.storage.database import AuditStore, MetricsStore
 from assistant.windows.session import is_session_unlocked
 
+if TYPE_CHECKING:
+    from assistant.command_center.service import CommandCenterService
+
 
 class BackgroundRunner:
     def __init__(
@@ -55,6 +60,7 @@ class BackgroundRunner:
         engine: ExecutionEngine | None = None,
         registry: SkillRegistry | None = None,
         logic_state: LogicStateStore | None = None,
+        command_center: CommandCenterService | None = None,
         background_actions_enabled: bool = False,
         pause_while_locked: bool = True,
         session_unlocked: Callable[[], bool] = is_session_unlocked,
@@ -69,6 +75,7 @@ class BackgroundRunner:
         self.metrics = metrics
         self.engine = engine
         self.registry = registry
+        self.command_center = command_center
         self.logic_runner = (
             LogicWorkflowRunner(
                 engine,
@@ -172,6 +179,12 @@ class BackgroundRunner:
                 return await self._execute_fixed(schedule, running, correlation_id)
             if isinstance(schedule.action, FrozenPlanAction):
                 return await self._execute_plan(schedule, running, correlation_id)
+            if isinstance(schedule.action, CommandCenterBriefAction):
+                return await self._execute_command_center_brief(
+                    schedule,
+                    running,
+                    correlation_id,
+                )
             if isinstance(schedule.action, LogicWorkflowAction):
                 return await self._execute_logic(schedule, running, correlation_id)
             return self._blocked(running, correlation_id, "Unsupported scheduled action type")
@@ -532,6 +545,121 @@ class BackgroundRunner:
         )
         return completed
 
+    async def _execute_command_center_brief(
+        self,
+        schedule: ScheduleDefinition,
+        run: ScheduleRun,
+        correlation_id,
+    ) -> ScheduleRun:
+        assert isinstance(schedule.action, CommandCenterBriefAction)
+        assert self.engine is not None
+        assert self.command_center is not None
+        occurrence_calls = dict(self._occurrence_calls(schedule, run))
+        steps = tuple(
+            PlanStep(
+                step_id=f"brief-{source.binding_id.hex}",
+                call=occurrence_calls[f"brief-{source.binding_id.hex}"],
+                timeout_seconds=min(30, schedule.autonomy_policy.max_runtime_seconds),
+            )
+            for source in schedule.action.sources
+        )
+        results = await asyncio.wait_for(
+            self.engine.execute_plan(
+                ExecutionPlan(
+                    steps=steps,
+                    timeout_seconds=schedule.autonomy_policy.max_runtime_seconds,
+                )
+            ),
+            timeout=schedule.autonomy_policy.max_runtime_seconds,
+        )
+        stored_statuses = {
+            step_id: {
+                "status": result.status.value,
+                "error_code": result.error.code if result.error else None,
+                "content_omitted": True,
+            }
+            for step_id, result in results.items()
+        }
+        if any(result.status == ResultStatus.DENIED for result in results.values()):
+            blocked = self.store.transition_run(
+                run.run_id,
+                expected=(ScheduleRunState.RUNNING,),
+                state=ScheduleRunState.BLOCKED,
+                correlation_id=correlation_id,
+                result_status=ResultStatus.DENIED.value,
+                result={"sources": stored_statuses},
+                blocked_reason="A briefing input no longer has permission to run in background.",
+            )
+            self._audit(blocked, "schedule_run_blocked", "blocked")
+            return blocked
+
+        successful = {ResultStatus.COMPLETED, ResultStatus.PARTIAL}
+        if (
+            not any(result.status in successful for result in results.values())
+            and run.attempt < schedule.run_policy.max_attempts
+            and self._all_safe_to_retry(schedule)
+        ):
+            return self._schedule_retry(
+                schedule,
+                run,
+                correlation_id,
+                ResultStatus.FAILED.value,
+                {"sources": stored_statuses},
+            )
+
+        normalized = tuple(
+            self.command_center.normalize_scheduled_source(
+                source.binding_id,
+                results[f"brief-{source.binding_id.hex}"],
+            )
+            for source in schedule.action.sources
+        )
+        brief = self.command_center.build_brief(normalized, title=schedule.action.title)
+        artifact = self.command_center.save_brief(
+            brief,
+            retention_days=schedule.action.retention_days,
+            origin_run_id=run.run_id,
+        )
+        self.command_center.publish_scheduled_brief(
+            brief,
+            artifact,
+            schedule_id=schedule.schedule_id,
+            run_id=run.run_id,
+        )
+        pending = None
+        if schedule.action.destination_binding_id is not None:
+            pending = self.command_center.queue_scheduled_delivery(
+                artifact,
+                schedule.action.destination_binding_id,
+            )
+        state = (
+            ScheduleRunState.SUCCEEDED
+            if brief.status in {ResultStatus.COMPLETED, ResultStatus.PARTIAL}
+            else ScheduleRunState.FAILED
+        )
+        completed = self.store.transition_run(
+            run.run_id,
+            expected=(ScheduleRunState.RUNNING,),
+            state=state,
+            correlation_id=correlation_id,
+            result_status=brief.status.value,
+            result={
+                "artifact_id": str(artifact.artifact_id),
+                "artifact_revision": artifact.revision,
+                "delivery_id": str(pending.delivery_id) if pending else None,
+                "sources": stored_statuses,
+                "content_omitted": True,
+            },
+        )
+        self._audit(
+            completed,
+            "schedule_run_completed"
+            if state == ScheduleRunState.SUCCEEDED
+            else "schedule_run_failed",
+            brief.status.value,
+        )
+        return completed
+
     async def _execute_logic(
         self,
         schedule: ScheduleDefinition,
@@ -619,6 +747,21 @@ class BackgroundRunner:
                     ),
                 )
                 for step in schedule.action.plan.steps
+            )
+        if isinstance(schedule.action, CommandCenterBriefAction):
+            return tuple(
+                (
+                    f"brief-{source.binding_id.hex}",
+                    source.call.model_copy(
+                        update={
+                            "correlation_id": correlation_id,
+                            "idempotency_key": (
+                                f"{run.idempotency_key}:brief-{source.binding_id.hex}"
+                            ),
+                        }
+                    ),
+                )
+                for source in schedule.action.sources
             )
         assert isinstance(schedule.action, LogicWorkflowAction)
         return tuple(
@@ -752,7 +895,15 @@ class BackgroundRunner:
                 "Background authorization expired",
             )
             return "Background authorization expired"
-        if isinstance(schedule.action, (FixedSkillAction, FrozenPlanAction, LogicWorkflowAction)):
+        if isinstance(
+            schedule.action,
+            (
+                FixedSkillAction,
+                FrozenPlanAction,
+                CommandCenterBriefAction,
+                LogicWorkflowAction,
+            ),
+        ):
             calls = self._template_calls(schedule)
             if calls and not self.background_actions_enabled:
                 return "Background skill actions are disabled in settings"
@@ -762,6 +913,13 @@ class BackgroundRunner:
             if snapshot_reason:
                 self.store.revoke_authorization(schedule.schedule_id, snapshot_reason)
                 return snapshot_reason
+            if isinstance(schedule.action, CommandCenterBriefAction):
+                if self.command_center is None:
+                    return "Command-center scheduling service is unavailable"
+                binding_reason = self.command_center.scheduled_binding_denial(schedule.action)
+                if binding_reason:
+                    self.store.revoke_authorization(schedule.schedule_id, binding_reason)
+                    return binding_reason
             compatibility_reason = self._background_compatibility_reason(schedule)
             if compatibility_reason:
                 return compatibility_reason
@@ -868,6 +1026,8 @@ class BackgroundRunner:
             return (schedule.action.call,)
         if isinstance(schedule.action, FrozenPlanAction):
             return tuple(step.call for step in schedule.action.plan.steps)
+        if isinstance(schedule.action, CommandCenterBriefAction):
+            return tuple(source.call for source in schedule.action.sources)
         if isinstance(schedule.action, LogicWorkflowAction):
             return tuple(call for _step_id, call in workflow_calls(schedule.action.workflow))
         return ()

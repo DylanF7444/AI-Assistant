@@ -5,6 +5,29 @@ from assistant.router.normalization import command_text, normalize_text, spoken_
 
 
 @pytest.mark.parametrize(
+    ("text", "delivery"),
+    (
+        ("brief me", "assistant"),
+        ("show me my work brief", "assistant"),
+        ("brief me and save it to my inbox", "inbox"),
+    ),
+)
+def test_work_brief_routes_without_planner(text, delivery):
+    result = DeterministicRouter().route(text)
+
+    assert result.intent.name == "core.work_brief"
+    assert result.intent.arguments == {"delivery": delivery}
+
+
+def test_explicitly_saved_work_brief_routes_without_implicit_persistence():
+    ordinary = DeterministicRouter().route("brief me")
+    saved = DeterministicRouter().route("brief me and save it")
+
+    assert ordinary.intent.arguments == {"delivery": "assistant"}
+    assert saved.intent.arguments == {"delivery": "assistant", "save": True}
+
+
+@pytest.mark.parametrize(
     ("text", "name"),
     [
         ("cancel", "control.cancel"),

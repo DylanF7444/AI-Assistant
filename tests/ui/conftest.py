@@ -19,3 +19,12 @@ def isolate_desktop_single_instance(monkeypatch):
         "assistant.ui.desktop.app.acquire_single_instance",
         lambda: _TestSingleInstance(),
     )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def shut_down_qt_cleanly(qapp):
+    """Release native Qt resources before the Windows interpreter shuts down."""
+    yield
+    qapp.closeAllWindows()
+    qapp.processEvents()
+    qapp.quit()

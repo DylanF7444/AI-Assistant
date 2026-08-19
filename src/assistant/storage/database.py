@@ -349,8 +349,71 @@ class BackgroundAuthorizationRow(Base):
     )
 
 
+class CommandCenterArtifactRow(Base):
+    __tablename__ = "command_center_artifacts"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    current_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    origin_run_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, unique=True, index=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CommandCenterArtifactRevisionRow(Base):
+    __tablename__ = "command_center_artifact_revisions"
+    artifact_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, primary_key=True)
+    title: Mapped[str] = mapped_column(String(120), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    digest: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    sources_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CommandCenterDeliveryRow(Base):
+    __tablename__ = "command_center_deliveries"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    artifact_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    artifact_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    artifact_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    destination_binding_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    destination_snapshot_json: Mapped[str] = mapped_column(Text, nullable=False)
+    destination_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_preview: Mapped[str] = mapped_column(String(1000), nullable=False)
+    state: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    correlation_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    result_status: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    error: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CommandCenterObservationCursorRow(Base):
+    __tablename__ = "command_center_observation_cursors"
+    schedule_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    schedule_revision: Mapped[int] = mapped_column(Integer, primary_key=True)
+    binding_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    provider_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    failure_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    last_polled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_poll_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class Database:
-    CURRENT_SCHEMA_VERSION = 12
+    CURRENT_SCHEMA_VERSION = 15
 
     def __init__(self, url: str) -> None:
         self.url = url
@@ -441,6 +504,39 @@ class Database:
                             "ADD COLUMN dimensions_json TEXT NOT NULL DEFAULT '{}'"
                         )
                     )
+            if version == 12:
+                CommandCenterArtifactRow.__table__.create(self.engine, checkfirst=True)
+                CommandCenterArtifactRevisionRow.__table__.create(
+                    self.engine,
+                    checkfirst=True,
+                )
+                CommandCenterDeliveryRow.__table__.create(self.engine, checkfirst=True)
+            if version == 13:
+                columns = {
+                    column["name"]
+                    for column in inspect(self.engine).get_columns(
+                        CommandCenterArtifactRow.__tablename__
+                    )
+                }
+                if "origin_run_id" not in columns:
+                    session.execute(
+                        text(
+                            "ALTER TABLE command_center_artifacts "
+                            "ADD COLUMN origin_run_id VARCHAR(36)"
+                        )
+                    )
+                session.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS "
+                        "ix_command_center_artifacts_origin_run_id "
+                        "ON command_center_artifacts (origin_run_id)"
+                    )
+                )
+            if version == 14:
+                CommandCenterObservationCursorRow.__table__.create(
+                    self.engine,
+                    checkfirst=True,
+                )
             version += 1
         session.get(SchemaVersionRow, 1).version = version  # type: ignore[union-attr]
 

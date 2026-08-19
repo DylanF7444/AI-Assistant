@@ -31,6 +31,7 @@ the relevant setting, credential, local service, or device to be configured.
 | Core | `core.timer` | Implemented | Low | None | Run a cancellable local timer. |
 | Core | `core.unit_conversion` | Implemented | Low | None | Convert common distance, weight, volume, and temperature units locally. |
 | Core | `core.visualize` | Implemented | Low | None | Create local charts, flowcharts, timelines, and tables from natural typed/dictated language or typed specs, with accessible text fallbacks. |
+| Core | `core.work_brief` | Implemented | Low | Per configured source | Collect bounded, independent read-only Inputs into a provenance-bearing Work Brief; optionally save an explicit revisioned artifact or copy a report to the local Inbox. |
 | Documents | `documents.read` | Implemented/Optional formats | Low | `filesystem.content.read` | Extract, summarize, compare, find action items in, or answer questions from up to five explicitly selected TXT, Markdown, CSV, PDF, DOCX, XLSX, or PPTX files with source locators. |
 | Documents | `documents.content_search` | Implemented/Optional formats | Medium | `filesystem.content.read`, `filesystem.content.index` | Build, inspect, search, or clear a bounded persistent content index for one approved folder, with modification and deletion reconciliation. |
 | Vision | `vision.understand_image` | Implemented/Optional OCR | Low | `filesystem.content.read` | Read text, describe an image, explain a chart, or explain an error dialog from one explicitly selected local image; never captures the screen or performs input. |

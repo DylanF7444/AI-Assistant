@@ -6,7 +6,11 @@ from uuid import UUID, uuid4
 
 from pydantic import JsonValue, ValidationError
 
-from assistant.integrations.connections import ConnectionProfile, normalize_scopes
+from assistant.integrations.connections import (
+    ConnectionProfile,
+    ConnectionReference,
+    normalize_scopes,
+)
 from assistant.storage.database import SettingsStore
 from assistant.storage.secrets import SecretVault
 
@@ -164,6 +168,17 @@ class ConnectionProfileStore:
             if profile is not None and profile.provider_id == provider_id and profile.enabled:
                 return profile
         return next((item for item in self.list(provider_id) if item.enabled), None)
+
+    def resolve(self, reference: ConnectionReference) -> ConnectionProfile | None:
+        """Resolve an explicit or active profile without exposing credentials."""
+
+        validated = ConnectionReference.model_validate(reference)
+        if validated.profile_id is None:
+            return self.active(validated.provider_id)
+        profile = self.get(validated.profile_id)
+        if profile.provider_id != validated.provider_id:
+            raise ValueError("Connection profile belongs to a different provider")
+        return profile if profile.enabled else None
 
     def set_active(self, provider_id: str, profile_id: UUID) -> ConnectionProfile:
         profile = self.get(profile_id)

@@ -452,6 +452,7 @@ class SkillCall(StrictModel):
     permission_context: PermissionContext
     correlation_id: UUID = Field(default_factory=uuid4)
     idempotency_key: str = Field(default_factory=lambda: str(uuid4()))
+    retain_audit_content: bool = True
 
     @model_validator(mode="after")
     def _scheduler_calls_require_background_context(self) -> SkillCall:

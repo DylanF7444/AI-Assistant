@@ -131,7 +131,7 @@ class RecurrenceTrigger(StrictModel):
 
 class EventTrigger(StrictModel):
     kind: Literal["event"] = "event"
-    observation_type: Literal["file", "calendar", "process", "device", "web"]
+    observation_type: Literal["file", "calendar", "process", "device", "web", "integration"]
     target: str = Field(min_length=1, max_length=2_000)
     events: tuple[str, ...] = Field(min_length=1, max_length=10)
     minimum_interval_seconds: int = Field(default=30, ge=1, le=86_400)
@@ -153,6 +153,7 @@ class EventTrigger(StrictModel):
             "process": {"started", "stopped"},
             "device": {"changed", "connected", "disconnected"},
             "web": {"changed"},
+            "integration": {"changed"},
         }[self.observation_type]
         unsupported = set(self.events) - allowed
         if unsupported:
@@ -173,6 +174,11 @@ class EventTrigger(StrictModel):
                 "target",
                 urlunsplit(("https", parsed.hostname.casefold(), parsed.path or "/", "", "")),
             )
+        if self.observation_type == "integration":
+            try:
+                object.__setattr__(self, "target", str(UUID(self.target)))
+            except ValueError as exc:
+                raise ValueError("integration event targets must be source binding IDs") from exc
         return self
 
 
@@ -247,8 +253,37 @@ class WebObservation(StrictModel):
         return _require_aware(value, "occurred_at")
 
 
+class IntegrationObservation(StrictModel):
+    observation_type: Literal["integration"] = "integration"
+    observation_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]+$", max_length=100)
+    occurred_at: datetime
+    target: str = Field(pattern=r"^[a-fA-F0-9-]{36}$")
+    event: Literal["changed"] = "changed"
+    provider_id: str = Field(pattern=r"^[a-z][a-z0-9_.-]+$")
+    binding_id: UUID
+    safe_category: Literal["calendar", "mail"]
+    content_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    resource_id: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @field_validator("occurred_at")
+    @classmethod
+    def _occurred_at_is_aware(cls, value: datetime) -> datetime:
+        return _require_aware(value, "occurred_at")
+
+    @model_validator(mode="after")
+    def _target_matches_binding(self) -> IntegrationObservation:
+        if self.target.casefold() != str(self.binding_id).casefold():
+            raise ValueError("integration observation target must be its binding ID")
+        return self
+
+
 EventObservation = Annotated[
-    FileObservation | CalendarObservation | ProcessObservation | DeviceObservation | WebObservation,
+    FileObservation
+    | CalendarObservation
+    | ProcessObservation
+    | DeviceObservation
+    | WebObservation
+    | IntegrationObservation,
     Field(discriminator="observation_type"),
 ]
 OBSERVATION_ADAPTER = TypeAdapter(EventObservation)
@@ -276,13 +311,44 @@ class FrozenPlanAction(StrictModel):
     plan: ExecutionPlan
 
 
+class ScheduledBriefSource(StrictModel):
+    binding_id: UUID
+    binding_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    call: SkillCall
+
+
+class CommandCenterBriefAction(StrictModel):
+    kind: Literal["command_center_brief"] = "command_center_brief"
+    title: str = Field(default="Work Brief", min_length=1, max_length=120)
+    sources: tuple[ScheduledBriefSource, ...] = Field(min_length=1, max_length=20)
+    retention_days: int = Field(default=30, ge=1, le=365)
+    destination_binding_id: UUID | None = None
+    destination_digest: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    destination_target_preview: str | None = Field(default=None, min_length=1, max_length=1_000)
+
+    @model_validator(mode="after")
+    def _destination_snapshot_is_complete(self) -> CommandCenterBriefAction:
+        values = (
+            self.destination_binding_id,
+            self.destination_digest,
+            self.destination_target_preview,
+        )
+        if any(value is not None for value in values) and any(value is None for value in values):
+            raise ValueError("Scheduled brief destination snapshot is incomplete")
+        return self
+
+
 class LogicWorkflowAction(StrictModel):
     kind: Literal["logic_workflow"] = "logic_workflow"
     workflow: LogicWorkflow
 
 
 ScheduledAction = Annotated[
-    NotificationAction | FixedSkillAction | FrozenPlanAction | LogicWorkflowAction,
+    NotificationAction
+    | FixedSkillAction
+    | FrozenPlanAction
+    | CommandCenterBriefAction
+    | LogicWorkflowAction,
     Field(discriminator="kind"),
 ]
 ACTION_ADAPTER = TypeAdapter(ScheduledAction)

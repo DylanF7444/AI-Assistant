@@ -23,6 +23,7 @@ from assistant.extensions.platform import (
 from assistant.integrations.connections import (
     ConnectionBinding,
     ConnectionProfile,
+    ConnectionReference,
     ConnectionState,
     ConnectionStatus,
 )
@@ -277,6 +278,21 @@ def test_connection_profile_store_supports_multiple_profiles_and_secret_cleanup(
     )
     store.set_active("example", personal.profile_id)
     assert store.active("example").profile_id == personal.profile_id
+    assert store.resolve(ConnectionReference(provider_id="example")) == personal
+    assert (
+        store.resolve(ConnectionReference(provider_id="example", profile_id=personal.profile_id))
+        == personal
+    )
+    with pytest.raises(ValueError, match="different provider"):
+        store.resolve(ConnectionReference(provider_id="another", profile_id=work.profile_id))
+
+    disabled = store.save(personal.model_copy(update={"enabled": False}))
+    assert disabled.enabled is False
+    assert (
+        store.resolve(ConnectionReference(provider_id="example", profile_id=personal.profile_id))
+        is None
+    )
+    personal = store.save(personal.model_copy(update={"enabled": True}))
 
     reference = personal.secret_references["refresh_token"]
     deleted = store.delete(personal.profile_id)
@@ -284,6 +300,7 @@ def test_connection_profile_store_supports_multiple_profiles_and_secret_cleanup(
     assert deleted.profile_id == personal.profile_id
     assert vault.get(reference) is None
     assert store.active("example").profile_id == work.profile_id
+    assert store.resolve(ConnectionReference(provider_id="example")) == work
 
 
 class _MemoryVault:

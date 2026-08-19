@@ -36,7 +36,7 @@ python -m ruff format --check .
 python -m ruff check .
 python -m pytest
 python -m pytest learning_tests -q
-python -m pytest -m ui tests/ui -q
+python -m pytest tests/ui -q
 powershell -ExecutionPolicy Bypass -File scripts/build.ps1
 ```
 

@@ -25,6 +25,7 @@ from assistant.contracts import (
     SkillCall,
 )
 from assistant.diagnostics import hardware_report, model_recommendations
+from assistant.execution.engine import ExecutionOutcome
 from assistant.integrations.cloud import CloudPricing
 from assistant.models import ModelManifest
 from assistant.onboarding import OnboardingStore, SetupStep, outcome_guidance, recovery_issues
@@ -786,6 +787,7 @@ def run_desktop(container: Container) -> int:
                 self._active_scripts_tab,
                 self._skills_tab,
                 self._extension_hub_tab,
+                self._connections_tab,
                 self._permissions_tab,
                 self._file_access_tab,
                 self._audit_tab,
@@ -1106,9 +1108,14 @@ def run_desktop(container: Container) -> int:
             self.dashboard_page.refresh_due_requested.connect(self._refresh_dashboard)
             self.dashboard_page.customize_requested.connect(self._customize_dashboard)
             self.dashboard_page.connections_requested.connect(self._manage_dashboard_connections)
+            self.dashboard_page.work_brief_requested.connect(self._run_work_brief)
             self.dashboard_page.permission_requested.connect(self._grant_dashboard_permission)
             self.dashboard_page.became_visible.connect(self._refresh_dashboard)
             return self.dashboard_page
+
+        def _run_work_brief(self) -> None:
+            self._show_primary_screen("assistant")
+            self._run_text_command("brief me")
 
         def _manage_dashboard_connections(self) -> None:
             dialog = DashboardConnectionsDialog(controller, self)
@@ -1323,6 +1330,8 @@ def run_desktop(container: Container) -> int:
 
         def _full_tab_changed(self, index: int) -> None:
             label = self.tabs.tabText(index)
+            if label == "Connections":
+                self.connections_page.reload()
             screen = {
                 "Dashboard": "dashboard",
                 "Assistant": "assistant",
@@ -1847,7 +1856,13 @@ def run_desktop(container: Container) -> int:
                     self.scheduled_scripts,
                     row,
                     [
-                        "Reminder" if schedule.action.kind == "notify_only" else "Automation",
+                        (
+                            "Reminder"
+                            if schedule.action.kind == "notify_only"
+                            else "Work brief"
+                            if schedule.action.kind == "command_center_brief"
+                            else "Automation"
+                        ),
                         schedule.name,
                         due_text,
                         status,
@@ -1868,6 +1883,9 @@ def run_desktop(container: Container) -> int:
                 )
                 id_item = self.scheduled_scripts.item(row, 0)
                 id_item.setData(Qt.ItemDataRole.UserRole, str(schedule.schedule_id))
+                reason = schedule.review_reason or schedule.paused_reason
+                if reason:
+                    self.scheduled_scripts.item(row, 3).setToolTip(reason)
                 if selected_schedule_id == str(schedule.schedule_id):
                     self.scheduled_scripts.selectRow(row)
 
@@ -2878,6 +2896,160 @@ def run_desktop(container: Container) -> int:
             self.extension_hub_page.installed.connect(self._extension_installed)
             self.extension_hub_page.uninstalled.connect(self._extension_uninstalled)
             return self.extension_hub_page
+
+        def _connections_tab(self) -> QWidget:
+            from assistant.ui.desktop.connections import ConnectionsPage
+
+            self.connections_page = ConnectionsPage(controller)
+            self.connections_page.extension_hub_requested.connect(
+                self._open_extension_hub_from_connections
+            )
+            self.connections_page.work_brief_requested.connect(self._build_and_save_work_brief)
+            self.connections_page.delivery_prepare_requested.connect(
+                self._prepare_command_center_delivery
+            )
+            return self.connections_page
+
+        def _build_and_save_work_brief(self) -> None:
+            self._show_primary_screen("assistant")
+            self._run_text_command("brief me and save it")
+
+        def _prepare_command_center_delivery(self, delivery_id: UUID) -> None:
+            worker = AsyncWorker(controller.prepare_command_center_delivery(delivery_id))
+            worker.complete.connect(
+                lambda payload: self._show_command_center_delivery_outcome(
+                    delivery_id,
+                    payload[1],
+                    recorded_pending=payload[0],
+                )
+            )
+            worker.failed.connect(
+                lambda message: QMessageBox.warning(
+                    self,
+                    "Delivery could not continue",
+                    message,
+                )
+            )
+            worker.finished.connect(lambda: self._discard_worker(worker))
+            self._workers.append(worker)
+            worker.start()
+
+        def _show_command_center_delivery_outcome(
+            self,
+            delivery_id: UUID,
+            outcome: Any,
+            *,
+            recorded_pending: Any | None = None,
+        ) -> None:
+            pending = recorded_pending or controller.finalize_command_center_delivery(
+                delivery_id,
+                outcome,
+            )
+            self.connections_page.reload()
+            if outcome.registration_requests:
+                self._request_registrations(
+                    outcome,
+                    continuation=lambda continued: self._show_command_center_delivery_outcome(
+                        delivery_id,
+                        continued,
+                    ),
+                    cancelled=lambda: controller.cancel_command_center_delivery(delivery_id),
+                )
+            elif outcome.permission_requests:
+                self._request_permissions(
+                    outcome,
+                    continuation=lambda payload: self._show_command_center_delivery_outcome(
+                        delivery_id,
+                        payload[1],
+                        recorded_pending=payload[0],
+                    ),
+                    cancelled=lambda: controller.cancel_command_center_delivery(delivery_id),
+                    resume=lambda: controller.prepare_command_center_delivery(delivery_id),
+                )
+            elif outcome.confirmation:
+                self._confirm_command_center_delivery(delivery_id, outcome)
+            elif outcome.result:
+                label = pending.state.value.replace("_", " ")
+                self.statusBar().showMessage(f"Reviewed delivery {label}.", 8000)
+
+        def _finish_command_center_delivery(
+            self,
+            delivery_id: UUID,
+            result: Any,
+            *,
+            recorded_pending: Any | None = None,
+        ) -> None:
+            if recorded_pending is None:
+                controller.finalize_command_center_delivery(
+                    delivery_id,
+                    ExecutionOutcome(result=result),
+                )
+            self.connections_page.reload()
+            self._show_skill_result(result)
+
+        def _confirm_command_center_delivery(self, delivery_id: UUID, outcome: Any) -> None:
+            request = outcome.confirmation
+            decision = self._voice_prompt_choice(
+                title="Confirm Reviewed Delivery",
+                text=request.exact_action,
+                informative_text="The artifact revision and exact target were revalidated.",
+                kind="approval",
+                buttons=[
+                    ("approve", "Deliver", QMessageBox.ButtonRole.AcceptRole),
+                    ("deny", "Cancel", QMessageBox.ButtonRole.RejectRole),
+                ],
+                default_choice="deny",
+            )
+            if decision != "approve":
+                controller.cancel_command_center_delivery(
+                    delivery_id,
+                    confirmation_id=request.confirmation_id,
+                )
+                self.connections_page.reload()
+                return
+            typed_token = None
+            if request.requires_typed_token:
+                expected = str(request.confirmation_id)[-6:]
+                typed_token, accepted = QInputDialog.getText(
+                    self,
+                    "Critical Delivery Confirmation",
+                    f"Type {expected} to continue.",
+                )
+                if not accepted or typed_token != expected:
+                    controller.cancel_command_center_delivery(
+                        delivery_id,
+                        confirmation_id=request.confirmation_id,
+                    )
+                    self.connections_page.reload()
+                    return
+            worker = AsyncWorker(
+                controller.confirm_command_center_delivery(
+                    delivery_id,
+                    request.confirmation_id,
+                    typed_token=typed_token,
+                )
+            )
+            worker.complete.connect(
+                lambda payload: self._finish_command_center_delivery(
+                    delivery_id,
+                    payload[1],
+                    recorded_pending=payload[0],
+                )
+            )
+            worker.failed.connect(
+                lambda message: QMessageBox.warning(self, "Delivery failed", message)
+            )
+            worker.finished.connect(lambda: self._discard_worker(worker))
+            self._workers.append(worker)
+            worker.start()
+
+        def _open_extension_hub_from_connections(self, provider_id: str) -> None:
+            self.tabs.setCurrentIndex(TAB_LABELS.index("Extension Hub"))
+            label = provider_id.replace("_", " ").replace("-", " ").title()
+            self.statusBar().showMessage(
+                f"Manage {label} accounts and extensions in Extension Hub.",
+                8000,
+            )
 
         def _extension_installed(self, skill_id: str) -> None:
             self._reload_skills()
@@ -5494,6 +5666,7 @@ def run_desktop(container: Container) -> int:
             *,
             continuation: Any | None = None,
             cancelled: Any | None = None,
+            resume: Any | None = None,
         ) -> None:
             details = []
             for request in outcome.permission_requests:
@@ -5608,6 +5781,8 @@ def run_desktop(container: Container) -> int:
             worker = AsyncWorker(
                 controller.continue_replanning(outcome)
                 if resumes_plan
+                else resume()
+                if resume is not None
                 else container.engine.prepare(outcome.call)
             )
             worker.complete.connect(

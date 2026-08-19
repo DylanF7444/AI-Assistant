@@ -3,7 +3,16 @@ from __future__ import annotations
 from uuid import UUID
 
 from assistant.bootstrap import Container
-from assistant.contracts import PipelineState, Response
+from assistant.command_center import (
+    BindingStatus,
+    DestinationBinding,
+    DestinationDefinition,
+    PendingDelivery,
+    SourceBinding,
+    SourceDefinition,
+    WorkArtifact,
+)
+from assistant.contracts import PermissionContext, PipelineState, Response
 from assistant.dashboard.contracts import (
     DashboardLayout,
     DashboardPermissionRequest,
@@ -13,8 +22,10 @@ from assistant.dashboard.contracts import (
     ProviderHealth,
 )
 from assistant.execution.engine import ExecutionOutcome
+from assistant.integrations.connections import ConnectionProfile
 from assistant.policy.permissions import GrantType
 from assistant.presentation.session import MediaSessionRegistry
+from assistant.scheduling.contracts import ScheduleDefinition, ScheduledTrigger
 
 
 class DesktopController:
@@ -138,3 +149,154 @@ class DesktopController:
 
     def set_dashboard_pipeline_state(self, state: PipelineState) -> None:
         self.container.dashboard.set_pipeline_state(state)
+
+    def command_center_source_definitions(self) -> tuple[SourceDefinition, ...]:
+        return self.container.command_center.source_definitions()
+
+    def command_center_destination_definitions(self) -> tuple[DestinationDefinition, ...]:
+        return self.container.command_center.destination_definitions()
+
+    def command_center_source_bindings(self) -> tuple[SourceBinding, ...]:
+        return self.container.command_center.source_bindings()
+
+    def command_center_destination_bindings(self) -> tuple[DestinationBinding, ...]:
+        return self.container.command_center.destination_bindings()
+
+    def command_center_source_schema(self, source_id: str) -> dict:
+        contribution = self.container.command_center.registry.source(source_id)
+        return contribution.configuration_model.model_json_schema()
+
+    def command_center_destination_schema(self, destination_id: str) -> dict:
+        contribution = self.container.command_center.registry.destination(destination_id)
+        return contribution.configuration_model.model_json_schema()
+
+    def save_command_center_source(self, binding: SourceBinding) -> SourceBinding:
+        return self.container.command_center.save_source(binding)
+
+    def save_command_center_destination(
+        self,
+        binding: DestinationBinding,
+    ) -> DestinationBinding:
+        return self.container.command_center.save_destination(binding)
+
+    def delete_command_center_source(self, binding_id: UUID) -> SourceBinding:
+        return self.container.command_center.delete_source(binding_id)
+
+    def delete_command_center_destination(self, binding_id: UUID) -> DestinationBinding:
+        return self.container.command_center.delete_destination(binding_id)
+
+    def command_center_source_status(self, binding: SourceBinding) -> BindingStatus:
+        return self.container.command_center.source_status(binding)
+
+    def command_center_destination_status(self, binding: DestinationBinding) -> BindingStatus:
+        return self.container.command_center.destination_status(binding)
+
+    def connection_profiles(
+        self,
+        provider_id: str | None = None,
+    ) -> tuple[ConnectionProfile, ...]:
+        return self.container.connection_profiles.list(provider_id)
+
+    def command_center_artifacts(self) -> tuple[WorkArtifact, ...]:
+        return self.container.command_center.work_artifacts()
+
+    def edit_command_center_artifact(
+        self,
+        artifact_id: UUID,
+        *,
+        expected_revision: int,
+        title: str,
+        body: str,
+    ) -> WorkArtifact:
+        return self.container.command_center.edit_artifact(
+            artifact_id,
+            expected_revision=expected_revision,
+            title=title,
+            body=body,
+        )
+
+    def delete_command_center_artifact(self, artifact_id: UUID) -> WorkArtifact:
+        return self.container.command_center.delete_artifact(artifact_id)
+
+    def clear_command_center_artifact_data(self) -> tuple[int, int]:
+        return self.container.command_center.clear_artifact_data()
+
+    def clear_command_center_observation_data(self) -> int:
+        return self.container.command_center.clear_observation_data()
+
+    def command_center_pending_deliveries(self) -> tuple[PendingDelivery, ...]:
+        return self.container.command_center.pending_deliveries()
+
+    def schedule_command_center_brief(
+        self,
+        *,
+        name: str,
+        trigger: ScheduledTrigger,
+        title: str = "Work Brief",
+        retention_days: int = 30,
+        destination_binding_id: UUID | None = None,
+    ) -> ScheduleDefinition:
+        schedule = self.container.command_center_authoring.create_command_center_brief(
+            command_center=self.container.command_center,
+            name=name,
+            trigger=trigger,
+            title=title,
+            retention_days=retention_days,
+            destination_binding_id=destination_binding_id,
+        )
+        self.container.scheduler.wake()
+        return schedule
+
+    def queue_command_center_delivery(
+        self,
+        artifact_id: UUID,
+        destination_binding_id: UUID,
+    ) -> PendingDelivery:
+        return self.container.command_center.queue_delivery(
+            artifact_id,
+            destination_binding_id,
+        )
+
+    async def prepare_command_center_delivery(
+        self,
+        delivery_id: UUID,
+        *,
+        session_id: str = "desktop-command-center",
+    ) -> tuple[PendingDelivery, ExecutionOutcome]:
+        return await self.container.command_center.prepare_delivery(
+            delivery_id,
+            PermissionContext(session_id=session_id),
+        )
+
+    async def confirm_command_center_delivery(
+        self,
+        delivery_id: UUID,
+        confirmation_id: UUID,
+        *,
+        typed_token: str | None = None,
+        session_id: str = "desktop-command-center",
+    ):
+        return await self.container.command_center.confirm_delivery(
+            delivery_id,
+            confirmation_id,
+            PermissionContext(session_id=session_id),
+            typed_token=typed_token,
+        )
+
+    def finalize_command_center_delivery(
+        self,
+        delivery_id: UUID,
+        outcome: ExecutionOutcome,
+    ) -> PendingDelivery:
+        return self.container.command_center.finalize_delivery_outcome(delivery_id, outcome)
+
+    def cancel_command_center_delivery(
+        self,
+        delivery_id: UUID,
+        *,
+        confirmation_id: UUID | None = None,
+    ) -> PendingDelivery:
+        return self.container.command_center.cancel_delivery(
+            delivery_id,
+            confirmation_id=confirmation_id,
+        )

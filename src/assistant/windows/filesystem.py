@@ -27,7 +27,8 @@ class LocalFileSystemAdapter:
 
     async def create_text_file(self, path: Path, content: str) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        with path.open("x", encoding="utf-8") as stream:
+            stream.write(content)
         return path
 
     async def move(self, source: Path, destination: Path) -> Path:

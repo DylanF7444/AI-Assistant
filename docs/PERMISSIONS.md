@@ -40,6 +40,10 @@ Permissions are denied by default and granted to one stable skill ID.
   calendar connector and calendar target.
 - `automation.observe.web`: poll one sanitized public HTTPS target and retain
   only a bounded text fingerprint; offline lock stops polling before network.
+- `automation.observe.integration`: poll one exact reviewed source binding for
+  a typed provider change and retain only opaque IDs, timestamps, category, and
+  a content fingerprint. The backing source's read/network scopes are still
+  required separately.
 
 Grant modes are one-time, current session, always, and deny. Targets can narrow
 grants to folders, applications, contacts, or devices. Medium, high, and
@@ -115,3 +119,17 @@ that request interactive or device-changing capabilities such as
 cannot run unattended on the user's active desktop. New packaged skills default
 to foreground-only until their execution mode is explicitly reviewed. See
 `docs/BACKGROUND_EXECUTION.md` for the complete compatibility policy.
+
+## Command-center authority
+
+A configured source or destination is not a permission grant. It selects a
+reviewed adapter and exact account/target configuration. Manual collection uses
+the current interactive permission context. Scheduled collection uses a
+schedule-specific background authorization containing the exact compiled read
+calls and binding fingerprints. Editing, disabling, deleting, or losing the
+connection behind a binding blocks collection or moves the schedule to review.
+
+Source content is data only. It cannot add a skill, permission, destination, or
+confirmation. External delivery requires an explicitly saved artifact and a
+pending-delivery review. Artifact edits or destination-binding edits invalidate
+the older review. Scheduled output always stops at this pending state.

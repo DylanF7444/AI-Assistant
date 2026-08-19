@@ -142,6 +142,30 @@ class SlowSkill(CountingSkill):
         )
 
 
+class SensitiveSkill(CountingSkill):
+    def __init__(self):
+        super().__init__(risk=RiskLevel.LOW)
+        self.manifest = self.manifest.model_copy(
+            update={
+                "skill_id": "test.sensitive",
+                "risk": RiskLevel.LOW,
+                "permissions": (),
+            }
+        )
+
+    async def execute(self, call, cancel_event):
+        return SkillResult(
+            status=ResultStatus.COMPLETED,
+            summary="Private summary alpha.",
+            display_text="Private display beta.",
+            speech_text="Private speech gamma.",
+            data={"count": 1, "subject": "Private subject delta."},
+            items=(),
+            rollback_token="private-rollback",
+            sensitive=True,
+        )
+
+
 def engine_for(tmp_path: Path, *skills: Skill):
     database = Database(f"sqlite:///{tmp_path / 'data.db'}")
     database.migrate()
@@ -224,6 +248,35 @@ async def test_permission_confirmation_and_idempotency(tmp_path):
     assert duplicate == result
     assert skill.count == 1
     assert audit.query(event_type="skill_execution")
+
+
+@pytest.mark.asyncio
+async def test_sensitive_execution_audit_omits_arguments_and_result_content(tmp_path):
+    engine, _, audit = engine_for(tmp_path, SensitiveSkill())
+    call = make_call(
+        "test.sensitive",
+        {
+            "target": "private-target@example.com",
+        },
+        key="sensitive-audit",
+    )
+
+    result = await engine.execute(call)
+    entry = audit.query(event_type="skill_execution")[0]
+    details = entry["details"]
+
+    assert result.summary == "Private summary alpha."
+    assert details["arguments"] == {
+        "argument_keys": ["target"],
+        "values_omitted": True,
+    }
+    assert details["result"]["summary"] == "[SENSITIVE_RESULT_OMITTED]"
+    assert details["result"]["display_text"] == "[SENSITIVE_RESULT_OMITTED]"
+    assert details["result"]["speech_text"] == "[SENSITIVE_RESULT_OMITTED]"
+    assert details["result"]["data"] == {"redacted": True}
+    assert details["result"]["items"] is None
+    assert details["result"]["rollback_token"] is None
+    assert "private" not in str(details).casefold()
 
 
 @pytest.mark.asyncio

@@ -828,6 +828,30 @@ lane.
 6. For all sources, change the monitor or action digest and verify authority is
    revoked before the frozen action executes.
 
+## Work command center
+
+1. Configure local tasks plus fake Gmail and Calendar Inputs; leave one provider
+   unavailable and verify `brief me` returns a partial, provenance-bearing report
+   without persisting source content in audit or metrics.
+2. Explicitly save the report, edit it to a new revision, queue an exact output,
+   then edit the artifact/output and verify the older review is invalidated.
+3. Grant the exact export scope, approve one new-file export, and verify a second
+   attempt refuses overwrite. For provider output, verify draft and send remain
+   separate reviewed operations.
+4. Schedule a recurring local brief, restart before its occurrence, and verify
+   one run ID creates one artifact and one Inbox report. Configure an output and
+   verify the run stops at a pending delivery.
+5. Edit or disable a source binding and verify the schedule moves to review
+   before collection. Enable Offline lock and verify local sources continue
+   while remote source adapters are not called.
+6. Enable reviewed Gmail/Calendar Observation use. Verify the first poll creates
+   only a fingerprint baseline, one changed typed item creates one occurrence,
+   a duplicate creates none, and clearing the cursor does not replay old work.
+7. Put action-like instructions in source titles/bodies and verify they render
+   only as report data; no output call is compiled or executed.
+8. Clear observation state and saved work independently and verify provider
+   credentials, unrelated Inbox/history, and connection profiles remain intact.
+
 ## Guided UX and accessibility
 
 Complete the resumable ten-step setup; force configuration, permission,

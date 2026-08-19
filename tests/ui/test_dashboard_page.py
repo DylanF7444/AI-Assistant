@@ -12,6 +12,22 @@ from assistant.ui.desktop.state import DesktopWindowState
 
 
 @pytest.mark.ui
+def test_dashboard_exposes_manual_work_brief_action(qtbot, settings):
+    from assistant.ui.desktop.controller import DesktopController
+    from assistant.ui.desktop.dashboard import DashboardPage
+
+    page = DashboardPage(DesktopController(build_container(settings)))
+    qtbot.addWidget(page)
+    requested = []
+    page.work_brief_requested.connect(lambda: requested.append(True))
+
+    page.work_brief_button.click()
+
+    assert requested == [True]
+    assert "configured inputs" in page.work_brief_button.accessibleName().casefold()
+
+
+@pytest.mark.ui
 def test_dashboard_is_a_persisted_primary_screen(qtbot, settings, monkeypatch):
     from PySide6.QtWidgets import QApplication, QMessageBox
 

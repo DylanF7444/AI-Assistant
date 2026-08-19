@@ -4,6 +4,10 @@ from sqlalchemy import inspect, text
 
 from assistant.storage.database import (
     AuditStore,
+    CommandCenterArtifactRevisionRow,
+    CommandCenterArtifactRow,
+    CommandCenterDeliveryRow,
+    CommandCenterObservationCursorRow,
     DashboardMetricSampleRow,
     Database,
     KnowledgeBaseRow,
@@ -57,7 +61,7 @@ def test_upgrade_from_schema_version_one(tmp_path: Path):
     MacroRow.__table__.drop(database.engine)
     database.migrate()
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 12
+        assert session.get(SchemaVersionRow, 1).version == Database.CURRENT_SCHEMA_VERSION
     assert inspect(database.engine).has_table("macros")
 
 
@@ -115,7 +119,7 @@ def test_upgrade_from_schema_version_three_adds_knowledge_bases(tmp_path: Path):
 
     assert inspect(database.engine).has_table("knowledge_bases")
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 12
+        assert session.get(SchemaVersionRow, 1).version == Database.CURRENT_SCHEMA_VERSION
 
 
 def test_upgrade_from_schema_version_four_adds_vector_items(tmp_path: Path):
@@ -129,7 +133,7 @@ def test_upgrade_from_schema_version_four_adds_vector_items(tmp_path: Path):
 
     assert inspect(database.engine).has_table("vector_items")
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 12
+        assert session.get(SchemaVersionRow, 1).version == Database.CURRENT_SCHEMA_VERSION
 
 
 def test_upgrade_from_schema_version_five_adds_memory_items(tmp_path: Path):
@@ -143,7 +147,7 @@ def test_upgrade_from_schema_version_five_adds_memory_items(tmp_path: Path):
 
     assert inspect(database.engine).has_table("memory_items")
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 12
+        assert session.get(SchemaVersionRow, 1).version == Database.CURRENT_SCHEMA_VERSION
 
 
 def test_upgrade_from_schema_version_eight_adds_dashboard_metric_samples(
@@ -159,7 +163,7 @@ def test_upgrade_from_schema_version_eight_adds_dashboard_metric_samples(
 
     assert inspect(database.engine).has_table("dashboard_metric_samples")
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 12
+        assert session.get(SchemaVersionRow, 1).version == Database.CURRENT_SCHEMA_VERSION
 
 
 def test_upgrade_from_schema_version_nine_adds_notification_inbox(tmp_path: Path):
@@ -173,7 +177,7 @@ def test_upgrade_from_schema_version_nine_adds_notification_inbox(tmp_path: Path
 
     assert inspect(database.engine).has_table("notifications")
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 12
+        assert session.get(SchemaVersionRow, 1).version == Database.CURRENT_SCHEMA_VERSION
 
 
 def test_upgrade_from_schema_version_eleven_adds_metric_dimensions(tmp_path: Path):
@@ -190,4 +194,70 @@ def test_upgrade_from_schema_version_eleven_adds_metric_dimensions(tmp_path: Pat
     }
     assert "dimensions_json" in columns
     with database.session() as session:
-        assert session.get(SchemaVersionRow, 1).version == 12
+        assert session.get(SchemaVersionRow, 1).version == Database.CURRENT_SCHEMA_VERSION
+
+
+def test_upgrade_from_schema_version_twelve_adds_command_center_artifacts(tmp_path: Path):
+    database = Database(f"sqlite:///{tmp_path / 'old.db'}")
+    database.migrate()
+    for row in (
+        CommandCenterDeliveryRow,
+        CommandCenterArtifactRevisionRow,
+        CommandCenterArtifactRow,
+    ):
+        row.__table__.drop(database.engine)
+    with database.session() as session:
+        session.get(SchemaVersionRow, 1).version = 12
+
+    database.migrate()
+
+    inspector = inspect(database.engine)
+    assert inspector.has_table("command_center_artifacts")
+    assert inspector.has_table("command_center_artifact_revisions")
+    assert inspector.has_table("command_center_deliveries")
+    with database.session() as session:
+        assert session.get(SchemaVersionRow, 1).version == Database.CURRENT_SCHEMA_VERSION
+
+
+def test_upgrade_from_schema_version_thirteen_adds_artifact_run_origin(tmp_path: Path):
+    database = Database(f"sqlite:///{tmp_path / 'old.db'}")
+    database.migrate()
+    with database.engine.begin() as connection:
+        connection.execute(text("DROP INDEX ix_command_center_artifacts_origin_run_id"))
+        connection.execute(
+            text(
+                "CREATE TABLE command_center_artifacts_legacy AS "
+                "SELECT id, current_revision, sensitive, expires_at, created_at, updated_at "
+                "FROM command_center_artifacts"
+            )
+        )
+        connection.execute(text("DROP TABLE command_center_artifacts"))
+        connection.execute(
+            text("ALTER TABLE command_center_artifacts_legacy RENAME TO command_center_artifacts")
+        )
+    with database.session() as session:
+        session.get(SchemaVersionRow, 1).version = 13
+
+    database.migrate()
+
+    columns = {
+        column["name"]
+        for column in inspect(database.engine).get_columns("command_center_artifacts")
+    }
+    assert "origin_run_id" in columns
+    with database.session() as session:
+        assert session.get(SchemaVersionRow, 1).version == Database.CURRENT_SCHEMA_VERSION
+
+
+def test_upgrade_from_schema_version_fourteen_adds_observation_cursors(tmp_path: Path):
+    database = Database(f"sqlite:///{tmp_path / 'old.db'}")
+    database.migrate()
+    CommandCenterObservationCursorRow.__table__.drop(database.engine)
+    with database.session() as session:
+        session.get(SchemaVersionRow, 1).version = 14
+
+    database.migrate()
+
+    assert inspect(database.engine).has_table("command_center_observation_cursors")
+    with database.session() as session:
+        assert session.get(SchemaVersionRow, 1).version == Database.CURRENT_SCHEMA_VERSION

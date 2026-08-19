@@ -9,6 +9,12 @@ from dataclasses import dataclass
 from assistant.audio.capture import AudioCapture
 from assistant.audio.focus import AudioFocusCoordinator
 from assistant.audio.wakeword import OpenWakeWordProvider
+from assistant.command_center.artifacts import CommandCenterArtifactStore
+from assistant.command_center.builtins import register_builtin_command_center_contributions
+from assistant.command_center.observations import CommandCenterObservationStore
+from assistant.command_center.registry import CommandCenterRegistry
+from assistant.command_center.service import CommandCenterService
+from assistant.command_center.storage import CommandCenterBindingStore
 from assistant.config import DEFAULT_CODEX_MODEL, LEGACY_CODEX_MODEL_DEFAULTS, Settings
 from assistant.context.providers import (
     DesktopContextProvider,
@@ -112,6 +118,7 @@ from assistant.providers import EmbeddingProvider, TTSProvider
 from assistant.router.deterministic import DeterministicRouter
 from assistant.scheduling.authoring import ScheduleAuthoringService
 from assistant.scheduling.event_sources import (
+    CommandCenterEventSource,
     DeviceEventSource,
     FileEventSource,
     ProcessEventSource,
@@ -182,6 +189,7 @@ from assistant.skills.windows import (
     WindowsDeviceControlSkill,
     WindowsSettingSkill,
 )
+from assistant.skills.work_brief import WorkBriefSkill
 from assistant.storage.aliases import AliasStore
 from assistant.storage.connections import ConnectionProfileStore
 from assistant.storage.database import AuditStore, Database, MetricsStore, SettingsStore
@@ -244,6 +252,8 @@ class Container:
     scheduler: SchedulerService
     background_runtime: BackgroundRuntime
     dashboard: DashboardService
+    command_center: CommandCenterService
+    command_center_authoring: ScheduleAuthoringService
     secret_vault: SecretVault
     connection_profiles: ConnectionProfileStore
     media_sessions: MediaSessionRegistry
@@ -1140,6 +1150,26 @@ def build_container(settings: Settings | None = None) -> Container:
         confirmation_overrides=settings.confirmation_overrides,
     )
     notification_center = NotificationCenter(storage.notification_store)
+    command_center_registry = CommandCenterRegistry()
+    register_builtin_command_center_contributions(command_center_registry)
+    command_center_observations = CommandCenterObservationStore(database)
+    command_center = CommandCenterService(
+        command_center_registry,
+        CommandCenterBindingStore(SettingsStore(database)),
+        registry,
+        storage.connection_profiles,
+        engine,
+        notification_center,
+        CommandCenterArtifactStore(database),
+        storage.audit,
+        command_center_observations,
+    )
+    command_center_authoring = ScheduleAuthoringService(
+        storage.schedule_store,
+        registry,
+        macro_store,
+    )
+    registry.register(WorkBriefSkill(command_center))
     scheduler = SchedulerService(
         storage.schedule_store,
         BackgroundRunner(
@@ -1150,6 +1180,7 @@ def build_container(settings: Settings | None = None) -> Container:
             engine=engine,
             registry=registry,
             logic_state=storage.logic_state,
+            command_center=command_center,
             background_actions_enabled=settings.background_actions_enabled,
             pause_while_locked=settings.pause_background_while_locked,
             notify_on_success=settings.notify_on_background_success,
@@ -1162,6 +1193,12 @@ def build_container(settings: Settings | None = None) -> Container:
             ProcessEventSource(storage.schedule_store, WindowsProcessAdapter()),
             DeviceEventSource(storage.schedule_store, LocalWindowsDeviceAdapter()),
             WebEventSource(storage.schedule_store),
+            CommandCenterEventSource(
+                storage.schedule_store,
+                command_center,
+                command_center_observations,
+                offline_lock=lambda: settings.offline_lock,
+            ),
         ),
     )
     if settings.automations_paused:
@@ -1283,6 +1320,8 @@ def build_container(settings: Settings | None = None) -> Container:
         scheduler=scheduler,
         background_runtime=background_runtime,
         dashboard=dashboard,
+        command_center=command_center,
+        command_center_authoring=command_center_authoring,
         secret_vault=storage.secret_vault,
         connection_profiles=storage.connection_profiles,
         media_sessions=media_sessions,

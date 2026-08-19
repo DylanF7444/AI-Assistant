@@ -48,5 +48,14 @@ def test_domain_layer_import_boundaries_are_stable():
     assert violations == []
 
 
+def test_command_center_domain_does_not_depend_on_router_or_provider_adapters():
+    violations = []
+    for path in (SOURCE_ROOT / "command_center").rglob("*.py"):
+        for imported in _imports(path):
+            if imported.startswith(("assistant.router", "assistant.ui")):
+                violations.append(f"{path.relative_to(SOURCE_ROOT)} -> {imported}")
+    assert violations == []
+
+
 def test_extracted_planner_contract_keeps_legacy_public_import():
     assert planner.PlannerDecision is PlannerDecision

@@ -2,15 +2,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
+from datetime import timedelta
 from pathlib import Path
 from typing import Protocol
+from uuid import UUID, uuid4
 
+from assistant.command_center.contracts import BindingAvailability, SourceUseMode
+from assistant.command_center.observations import CommandCenterObservationStore
+from assistant.command_center.service import CommandCenterService
+from assistant.contracts import ResultStatus
 from assistant.integrations.web import WebClient
 from assistant.policy.file_access import FileAccessPolicyStore
 from assistant.scheduling.contracts import (
+    CommandCenterBriefAction,
     DeviceObservation,
     EventTrigger,
     FileObservation,
+    IntegrationObservation,
     ProcessObservation,
     ScheduleStatus,
     WebObservation,
@@ -208,6 +217,194 @@ class DeviceEventSource:
         return materialized
 
 
+class CommandCenterEventSource:
+    """Poll reviewed integration bindings and persist only bounded fingerprints."""
+
+    def __init__(
+        self,
+        store: ScheduleStore,
+        command_center: CommandCenterService,
+        cursors: CommandCenterObservationStore,
+        *,
+        offline_lock: Callable[[], bool] = lambda: False,
+        cursor_expiry_days: int = 30,
+    ) -> None:
+        self.store = store
+        self.command_center = command_center
+        self.cursors = cursors
+        self.offline_lock = offline_lock
+        self.cursor_expiry = timedelta(days=max(1, min(cursor_expiry_days, 365)))
+
+    async def poll(self) -> int:
+        if self.command_center.engine is None:
+            return 0
+        materialized = 0
+        active_keys: set[tuple[str, int, str]] = set()
+        now = aware_utc(self.store.clock.now())
+        for schedule in self.store.list(statuses=(ScheduleStatus.ACTIVE,)):
+            trigger = schedule.trigger
+            action = schedule.action
+            if (
+                not isinstance(trigger, EventTrigger)
+                or trigger.observation_type != "integration"
+                or not isinstance(action, CommandCenterBriefAction)
+            ):
+                continue
+            try:
+                binding_id = UUID(trigger.target)
+                source = next(item for item in action.sources if item.binding_id == binding_id)
+                binding = self.command_center.bindings.get_source(binding_id)
+                definition = self.command_center.registry.source(binding.source_id).definition
+            except (KeyError, StopIteration, TypeError, ValueError):
+                continue
+            if (
+                not binding.enabled
+                or SourceUseMode.OBSERVATION not in binding.use_modes
+                or "changed" not in definition.observation_events
+            ):
+                continue
+            key = (str(schedule.schedule_id), schedule.revision, str(binding_id))
+            active_keys.add(key)
+            cursor = self.cursors.get(schedule.schedule_id, schedule.revision, binding_id)
+            if cursor is not None and cursor.next_poll_at > now:
+                continue
+            interval = max(
+                trigger.minimum_interval_seconds,
+                definition.observation_minimum_interval_seconds,
+                binding.minimum_freshness_seconds or 0,
+            )
+            if (
+                self.command_center.source_status(binding).availability
+                != BindingAvailability.AVAILABLE
+            ):
+                self._failure(
+                    schedule,
+                    binding,
+                    definition.provider_id,
+                    "connection_unavailable",
+                    interval,
+                    now,
+                )
+                continue
+            if definition.remote and self.offline_lock():
+                self._failure(
+                    schedule, binding, definition.provider_id, "offline_lock", interval, now
+                )
+                continue
+            denial = self.command_center.scheduled_binding_denial(action)
+            if denial:
+                self.store.revoke_authorization(schedule.schedule_id, denial)
+                self._failure(
+                    schedule,
+                    binding,
+                    definition.provider_id,
+                    "binding_invalid",
+                    interval,
+                    now,
+                )
+                continue
+            call = source.call.model_copy(
+                update={
+                    "correlation_id": uuid4(),
+                    "idempotency_key": (
+                        f"observe:{schedule.schedule_id}:{schedule.revision}:"
+                        f"{binding_id}:{int(now.timestamp())}"
+                    ),
+                    "retain_audit_content": False,
+                }
+            )
+            try:
+                outcome = await self.command_center.engine.prepare(call)
+            except (OSError, RuntimeError, TimeoutError, ValueError):
+                self._failure(
+                    schedule,
+                    binding,
+                    definition.provider_id,
+                    "provider_error",
+                    interval,
+                    now,
+                )
+                continue
+            if outcome.permission_requests or outcome.registration_requests:
+                self._failure(
+                    schedule,
+                    binding,
+                    definition.provider_id,
+                    "permission_required",
+                    interval,
+                    now,
+                )
+                continue
+            result = outcome.result
+            if result is None or result.status not in {
+                ResultStatus.COMPLETED,
+                ResultStatus.PARTIAL,
+            }:
+                self._failure(
+                    schedule,
+                    binding,
+                    definition.provider_id,
+                    result.status.value if result is not None else "provider_error",
+                    interval,
+                    now,
+                )
+                continue
+            fingerprint = _typed_result_fingerprint(result)
+            _stored, previous = self.cursors.record_success(
+                schedule_id=schedule.schedule_id,
+                schedule_revision=schedule.revision,
+                binding_id=binding_id,
+                provider_id=definition.provider_id,
+                fingerprint=fingerprint,
+                interval_seconds=interval,
+                now=now,
+            )
+            if cursor is not None and cursor.updated_at + self.cursor_expiry <= now:
+                previous = None
+            if previous is None or previous == fingerprint:
+                continue
+            identity = _event_identity(
+                schedule.schedule_id,
+                schedule.revision,
+                binding_id,
+                fingerprint,
+            )
+            assert definition.observation_category is not None
+            runs = self.store.observe(
+                IntegrationObservation(
+                    observation_id=f"integration:{identity}",
+                    occurred_at=now,
+                    target=str(binding_id),
+                    provider_id=definition.provider_id,
+                    binding_id=binding_id,
+                    safe_category=definition.observation_category,
+                    content_fingerprint=fingerprint,
+                )
+            )
+            materialized += len(runs)
+        self.cursors.clear_inactive(active_keys)
+        return materialized
+
+    def _failure(
+        self,
+        schedule,
+        binding,
+        provider_id: str,
+        error_code: str,
+        interval: int,
+        now,
+    ) -> None:
+        self.cursors.record_failure(
+            schedule_id=schedule.schedule_id,
+            schedule_revision=schedule.revision,
+            binding_id=binding.binding_id,
+            provider_id=provider_id,
+            error_code=error_code,
+            minimum_interval_seconds=interval,
+            now=now,
+        )
+
+
 class WebEventSource:
     """Observe a bounded normalized text fingerprint for exact public HTTPS targets."""
 
@@ -284,6 +481,20 @@ def _snapshot(root: Path, limit: int) -> dict[str, tuple[int, int]]:
 def _event_identity(*values: object) -> str:
     payload = "|".join(str(value) for value in values)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:48]
+
+
+def _typed_result_fingerprint(result) -> str:
+    items = tuple(result.items or ())[:200]
+    metadata = [
+        {
+            "item_id": item.item_id[:100],
+            "kind": item.kind[:80],
+            "metadata": item.metadata,
+        }
+        for item in items
+    ]
+    payload = json.dumps(metadata, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _remove_inactive(snapshots: dict, active_keys: set[tuple[str, int]]) -> None:

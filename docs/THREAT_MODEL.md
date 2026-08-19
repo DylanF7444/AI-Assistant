@@ -93,6 +93,19 @@ transcripts, permissions, and the integrity of audit records.
   lines. Public-HTTPS checks reject credentials and private targets, discard
   query/fragment before persistence, obey offline lock, and cannot execute an
   action outside the frozen schedule authorization.
+- Command-center prompt injection and confused deputy: source definitions are
+  code-reviewed and read-only; collected text is normalized as bounded data and
+  cannot construct a destination call. Saved artifacts and destination targets
+  have independent immutable digests. Every write is compiled only from the
+  reviewed artifact plus the configured destination and is reauthorized just
+  before execution. Scheduled output creates a pending review instead of
+  sending unattended.
+- Integration cursor disclosure and replay: Gmail/Calendar observers persist
+  only provider/binding IDs, safe category, poll/backoff times, and SHA-256
+  fingerprints. They do not store titles, bodies, headers, attachments, or
+  arbitrary webhook fields. Cursor reset/expiry establishes a fresh baseline,
+  provider events deduplicate by typed identity, disabled bindings clear cursor
+  state, and offline lock stops remote polling before adapter execution.
 
 ## Non-guarantees
 

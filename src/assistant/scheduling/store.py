@@ -22,6 +22,7 @@ from assistant.scheduling.contracts import (
     TRIGGER_ADAPTER,
     AutonomyPolicy,
     BackgroundAuthorization,
+    CommandCenterBriefAction,
     DeliveryPolicy,
     EventObservation,
     EventTrigger,
@@ -1247,6 +1248,14 @@ class ScheduleStore:
             return action.model_copy(
                 update={"plan": action.plan.model_copy(update={"steps": steps})}
             )
+        if isinstance(action, CommandCenterBriefAction):
+            sources = tuple(
+                source.model_copy(
+                    update={"call": revised_call(source.call, f"brief-{source.binding_id.hex}")}
+                )
+                for source in action.sources
+            )
+            return action.model_copy(update={"sources": sources})
         if isinstance(action, LogicWorkflowAction):
             workflow = action.workflow
             check = (

@@ -177,6 +177,18 @@ class ConnectionProfile(StrictModel):
         return value
 
 
+class ConnectionReference(StrictModel):
+    """Stable non-secret reference shared by features that use a provider account.
+
+    A missing ``profile_id`` selects the provider's active profile. This also
+    preserves compatibility with managed single-account services while they
+    migrate to explicit profile identifiers.
+    """
+
+    provider_id: str = Field(pattern=r"^[a-z][a-z0-9_.-]+$")
+    profile_id: UUID | None = None
+
+
 @runtime_checkable
 class ConnectionService(Protocol):
     def status(self, **kwargs: Any) -> Any: ...

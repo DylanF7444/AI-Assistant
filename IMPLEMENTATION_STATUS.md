@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated August 6, 2026. The product checklist is the specification; this file
+Updated August 19, 2026. The product checklist is the specification; this file
 records implementation evidence and release gates that cannot be honestly
 closed by source code or unit tests alone.
 
@@ -8,7 +8,7 @@ closed by source code or unit tests alone.
 
 - Python 3.12/PySide6 architecture with typed provider boundaries, event-driven
   orchestration, Windows adapters, testing/production profiles, and SQLite
-  schema version 12 migrations, WAL, recovery, backup, and corruption checks.
+  schema version 15 migrations, WAL, recovery, backup, and corruption checks.
 - Immutable Pydantic contracts for audio, transcripts, intents, manifests,
   calls, plans, results, confirmations, responses, and pipeline events.
 - Responsive tray UI with push-to-talk/cancel hotkeys, pipeline states, partial
@@ -72,6 +72,21 @@ closed by source code or unit tests alone.
   delete, pending approval review/reject/approve, recent history, completed
   history deletion, risk/status visibility, and settings that keep background
   skill actions disabled by default.
+- Command-center Inputs, Outputs, Accounts, and Reviewed work over shared
+  connection profiles; schema-reviewed bindings remain separate from runtime
+  permissions and never expose credentials in the desktop or audit log.
+- Manual Work Brief collection through ordinary low-risk skill calls with
+  independent concurrency/timeouts, typed provenance, partial failure, explicit
+  save, revisioned/retention-bounded artifacts, and local Assistant/Inbox output.
+- Exact reviewed delivery with artifact and destination digests, sensitive-data
+  opt-in, stale-review invalidation, non-overwriting local export, and ordinary
+  provider permission/confirmation enforcement. Scheduled output stops at a
+  pending delivery rather than sending unattended.
+- Scheduled Work Brief actions reuse durable recurrence, leases, background
+  authorization, skill snapshots, drift review, run-id idempotency, Inbox, and
+  Automations. Reviewed Gmail/Calendar observations retain only metadata
+  fingerprints and backoff state, deduplicate events, establish no-replay
+  baselines, and stop before adapters under Offline lock.
 - Resumable ten-step onboarding, categorized diagnostics/recovery, 100–175%
   text scaling, high contrast, reduced motion, accessible control labels, and
   inspect/copy controls for response sources.
@@ -92,7 +107,7 @@ closed by source code or unit tests alone.
   data/model uninstall choices. The workflow now runs static/type/docs/evaluation/
   dependency checks, packaged media verification, CycloneDX SBOM generation,
   source/artifact hashing, and a commit/dirty-state release manifest.
-- 1,143 regression tests, 29 guided learning tests, and 52 marked offscreen UI
+- 1,215 regression tests, 29 guided learning tests, and 70 offscreen UI
   tests pass. Combined branch coverage is 81.25% overall and 88.24% across the
   execution, policy, and scheduling layers. Coverage also includes a
   1,500-command sustained run, bounded

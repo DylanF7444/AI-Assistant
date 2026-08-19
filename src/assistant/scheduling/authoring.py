@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from uuid import UUID, uuid4
 
+from assistant.command_center.artifacts import destination_digest, source_binding_digest
+from assistant.command_center.contracts import SourceUseMode
 from assistant.contracts import (
     ExecutionPlan,
     PermissionContext,
@@ -21,12 +23,14 @@ from assistant.logic.contracts import (
 from assistant.policy.background import background_compatibility
 from assistant.scheduling.contracts import (
     AutonomyPolicy,
+    CommandCenterBriefAction,
     DeliveryPolicy,
     EventTrigger,
     FixedSkillAction,
     FrozenPlanAction,
     LogicWorkflowAction,
     RunPolicy,
+    ScheduledBriefSource,
     ScheduleDefinition,
     ScheduledTrigger,
     ScheduleStatus,
@@ -164,6 +168,129 @@ class ScheduleAuthoringService:
                 max_steps=len(calls),
             ),
             run_policy=run_policy or RunPolicy(),
+            delivery_policy=delivery_policy or DeliveryPolicy(),
+            skill_snapshot=tuple(snapshots),
+            created_at=now,
+            updated_at=now,
+        )
+        return self.store.create(definition, authorize=True)
+
+    def create_command_center_brief(
+        self,
+        *,
+        command_center,
+        name: str,
+        trigger: ScheduledTrigger,
+        binding_ids: tuple[UUID, ...] | None = None,
+        destination_binding_id: UUID | None = None,
+        title: str = "Work Brief",
+        retention_days: int = 30,
+        user_id: str = "local-user",
+        description: str = "",
+        delivery_policy: DeliveryPolicy | None = None,
+        run_policy: RunPolicy | None = None,
+    ) -> ScheduleDefinition:
+        schedule_id = uuid4()
+        sources = []
+        snapshots = []
+        capabilities: set[str] = set()
+        targets: set[str] = set()
+        risks: list[RiskLevel] = []
+        bindings = command_center.briefing_source_bindings(binding_ids)
+        if not bindings:
+            raise ValueError("At least one enabled briefing input is required")
+        if isinstance(trigger, EventTrigger) and trigger.observation_type == "integration":
+            try:
+                observed_binding_id = UUID(trigger.target)
+                observed_binding = next(
+                    binding for binding in bindings if binding.binding_id == observed_binding_id
+                )
+            except (StopIteration, ValueError) as exc:
+                raise ValueError(
+                    "Integration trigger must target one selected briefing input"
+                ) from exc
+            definition = command_center.registry.source(observed_binding.source_id).definition
+            if SourceUseMode.OBSERVATION not in observed_binding.use_modes:
+                raise ValueError("Observed input has not enabled Observation use")
+            if set(trigger.events).difference(definition.observation_events):
+                raise ValueError("Integration trigger requests an unsupported provider event")
+        for binding in bindings:
+            preview_context = PermissionContext(
+                user_id=user_id,
+                session_id=f"scheduler:{schedule_id}",
+                invocation="background",
+                schedule_id=schedule_id,
+                schedule_revision=1,
+            )
+            compiled = command_center.compile_source_call(binding, preview_context)
+            command_center.validate_source_call_read_only(compiled)
+            call, snapshot, call_capabilities, call_targets, risk = self._prepared_call(
+                schedule_id,
+                1,
+                compiled.skill_id,
+                compiled.arguments,
+                step_id=f"brief-{binding.binding_id.hex}",
+                user_id=user_id,
+            )
+            sources.append(
+                ScheduledBriefSource(
+                    binding_id=binding.binding_id,
+                    binding_digest=source_binding_digest(binding),
+                    call=call.model_copy(update={"retain_audit_content": False}),
+                )
+            )
+            snapshots.append(snapshot)
+            capabilities.update(call_capabilities)
+            targets.update(call_targets)
+            risks.append(risk)
+
+        destination_digest_value = None
+        destination_preview = None
+        if destination_binding_id is not None:
+            destination = command_center.bindings.get_destination(destination_binding_id)
+            status = command_center.destination_status(destination)
+            if status.availability.value != "available":
+                raise PermissionError(status.message or "Briefing output is unavailable")
+            if not destination.allow_sensitive:
+                raise ValueError(
+                    "Scheduled briefing outputs must explicitly allow sensitive artifacts"
+                )
+            destination_digest_value = destination_digest(destination)
+            destination_preview = command_center.destination_target_preview(destination)
+
+        effective_risk = max(risks, key=_RISK_ORDER.get, default=RiskLevel.LOW)
+        if effective_risk != RiskLevel.LOW:
+            raise ValueError("Scheduled briefing inputs must remain low risk")
+        capabilities, targets = self._with_trigger_authority(trigger, capabilities, targets)
+        now = self.store.clock.now()
+        definition = ScheduleDefinition(
+            schedule_id=schedule_id,
+            user_id=user_id,
+            name=name,
+            description=description or "Frozen command-center work brief",
+            status=ScheduleStatus.PENDING_AUTHORIZATION,
+            trigger=trigger,
+            action=CommandCenterBriefAction(
+                title=title,
+                sources=tuple(sources),
+                retention_days=retention_days,
+                destination_binding_id=destination_binding_id,
+                destination_digest=destination_digest_value,
+                destination_target_preview=destination_preview,
+            ),
+            autonomy_policy=self._policy(
+                tuple(source.call.skill_id for source in sources),
+                capabilities,
+                targets,
+                effective_risk,
+                max_steps=len(sources),
+            ),
+            run_policy=run_policy
+            or RunPolicy(
+                misfire="skip",
+                max_lateness_seconds=3_600,
+                max_attempts=2,
+            ),
             delivery_policy=delivery_policy or DeliveryPolicy(),
             skill_snapshot=tuple(snapshots),
             created_at=now,

@@ -7,6 +7,7 @@ TAB_LABELS = (
     "Automations",
     "Skills",
     "Extension Hub",
+    "Connections",
     "Permissions",
     "File Access",
     "Audit Log",
@@ -24,7 +25,7 @@ TAB_LABELS = (
 TAB_GROUPS = {
     "main": ("Dashboard", "Assistant"),
     "assistant": ("Inbox", "Automations"),
-    "extensions": ("Skills", "Extension Hub", "Macros", "Playbooks"),
+    "extensions": ("Skills", "Extension Hub", "Connections", "Macros", "Playbooks"),
     "security": ("Permissions", "File Access", "Audit Log", "Privacy"),
     "knowledge": ("Knowledge", "Memories"),
     "configuration": ("Settings", "Models", "Applications"),

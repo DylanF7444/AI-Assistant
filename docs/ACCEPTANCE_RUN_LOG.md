@@ -214,3 +214,13 @@ real permission or privacy settings to bypass that isolation boundary.
 | Extension security | PASS for shipping policy | Archive/signature/revocation/classification tests pass. Downloaded Python and native execution are blocked by default; public marketplace execution remains BLOCKED until an OS sandbox exists. |
 | Release provenance | PASS (internal candidate) | 1,143 regression, 29 learning, and 52 UI tests pass; coverage is 81.25% overall/88.24% critical; both final 100-case evaluations pass 100/100; isolated production audit reports no known vulnerabilities; the 243.3 MiB executable, current Inno installer, packaged media check, isolated calculator smoke, CycloneDX SBOM, artifact hashes, and dirty-worktree source identity are complete. A clean commit/tag and signing remain external public-release gates. |
 | Public distribution | BLOCKED | Requires a clean release commit, protected Authenticode certificate, licensed speech assets, clean Windows install/upgrade/uninstall run, physical mic/speaker and toast/sleep checks, and 24-hour soak. |
+
+## Work Command Center — August 19, 2026
+
+| ID | Workflow | Result | Evidence |
+| --- | --- | --- | --- |
+| CC-01 | Inputs, outputs, accounts, and reviewed work | PASS | Contract, catalog, persistence, schema-driven Connections UI, non-secret account display, artifact revision, exact target, cancellation, and invalidation tests pass. |
+| CC-02 | Manual and scheduled Work Brief | PASS | Read-only enforcement, 20-source concurrency, partial results, run-id idempotency, Inbox reporting, binding drift, scheduler authorization, and pending-output tests pass. |
+| CC-03 | Typed Gmail/Calendar observations | PASS | Metadata-only fingerprint, baseline, deduplication, minimum interval, backoff, offline-before-adapter, injection text exclusion, and disabled-binding cursor cleanup tests pass. |
+| CC-04 | Security and release automation | PASS | Ruff, selected strict MyPy, documentation consistency, architecture boundaries, dependency audit, 100/100 evaluation including prompt injection, 29 learning tests, and the complete 1,285-test suite passed with a clean process exit. The 1,215 core and 70 offscreen UI release lanes also passed independently; the final changed-domain gate passed 31 tests. An isolated PyInstaller build and packaged media runtime verification passed. |
+| CC-05 | Live provider and physical UI acceptance | BLOCKED | Requires user-owned Gmail/Calendar/provider test accounts plus an interactive packaged Windows session. No live messages, drafts, sends, or credentials were created for automated acceptance. |

@@ -407,6 +407,8 @@ class PermissionManager:
             templates = tuple(
                 step.get("call", {}) for step in action.get("plan", {}).get("steps", ())
             )
+        elif action.get("kind") == "command_center_brief":
+            templates = tuple(source.get("call", {}) for source in action.get("sources", ()))
         elif action.get("kind") == "logic_workflow":
             workflow = action.get("workflow", {})
             templates_list = []

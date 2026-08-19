@@ -17,6 +17,35 @@
 8. Structured results produce display and optional speech responses.
 9. Permission decisions and outcomes are written to a separate audit log.
 
+## Command center
+
+The command center is a composition layer, not a second execution engine.
+`CommandCenterRegistry` owns reviewed source/destination definitions;
+`CommandCenterBindingStore` persists non-secret user bindings that reference the
+shared connection-profile store. Source reads compile to ordinary `SkillCall`
+objects and pass through the existing registry, permission manager, execution
+engine, cancellation, offline lock, and audit controls.
+
+Manual Work Briefs collect independent low-risk source calls concurrently and
+normalize typed `SkillResult.items` into bounded provenance-bearing sections.
+They are transient unless explicitly saved. Saved `WorkArtifact` rows are
+retention-bounded and revisioned with immutable digests. A `PendingDelivery`
+freezes the artifact revision, destination binding digest, and exact target;
+all three are revalidated immediately before normal destination execution.
+
+Scheduled briefs use `CommandCenterBriefAction` inside the durable scheduler.
+The action freezes each source call and binding digest plus the ordinary skill
+version/schema/permission/risk snapshots. One schedule run creates at most one
+artifact by durable run ID, posts an idempotent Inbox report, and queues any
+configured output for review rather than executing a dynamic write.
+
+Reviewed Gmail and Google Calendar observation bindings use typed integration
+events. The poller runs only through an active schedule's frozen source call and
+stores a SHA-256 fingerprint, provider/binding IDs, poll times, and backoff
+state. Message/event text, headers, bodies, attachments, and destination calls
+are never cursor data. A first or expired cursor establishes a baseline without
+replaying an event.
+
 ## Request results and selection
 
 `SkillResult.items` is the shared result-item envelope for any skill that

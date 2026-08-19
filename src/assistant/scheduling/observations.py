@@ -18,6 +18,7 @@ def trigger_permissions(trigger: EventTrigger) -> tuple[PermissionScope, ...]:
         "process": "system.apps",
         "device": "device.read",
         "web": "network",
+        "integration": "integration.read",
     }[trigger.observation_type]
     return (
         PermissionScope(

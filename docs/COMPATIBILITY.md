@@ -14,7 +14,7 @@
 | Ollama | local `/api/generate` with JSON Schema format |
 | Piper | maintained CLI accepting ONNX voice models |
 | ElevenLabs | HTTPS text-to-speech API with selectable voice and model IDs |
-| Database | SQLite schema version 12 |
+| Database | SQLite schema version 15 |
 
 Codec availability can differ by Windows edition and Qt release. The application
 does not promise playback based only on a filename extension; Diagnostics is

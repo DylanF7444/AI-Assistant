@@ -732,8 +732,15 @@ class ExecutionEngine:
             decision=result.status.value,
             permissions=[item.capability for item in required_permissions],
             details={
-                "arguments": self._audit_arguments(call),
-                "result": self._audit_result(result, skill_id=call.skill_id),
+                "arguments": self._audit_arguments(
+                    call,
+                    sensitive=result.sensitive or not call.retain_audit_content,
+                ),
+                "result": self._audit_result(
+                    result,
+                    skill_id=call.skill_id,
+                    redact_content=not call.retain_audit_content,
+                ),
                 "attempts": attempts,
             },
         )
@@ -958,7 +965,7 @@ class ExecutionEngine:
         return results
 
     @staticmethod
-    def _audit_arguments(call: SkillCall) -> dict[str, Any]:
+    def _audit_arguments(call: SkillCall, *, sensitive: bool = False) -> dict[str, Any]:
         if call.skill_id in {"cloud.ask", "integration.openai", "integration.anthropic"}:
             safe_keys = {
                 "provider",
@@ -971,6 +978,13 @@ class ExecutionEngine:
                 **{key: call.arguments[key] for key in safe_keys if key in call.arguments},
                 "prompt_omitted": True,
             }
+        if sensitive:
+            safe_keys = {"operation", "provider"}
+            return {
+                **{key: call.arguments[key] for key in safe_keys if key in call.arguments},
+                "argument_keys": tuple(sorted(call.arguments)),
+                "values_omitted": True,
+            }
         if call.skill_id != "core.visualize":
             return dict(call.arguments)
         spec = call.arguments.get("spec")
@@ -981,7 +995,12 @@ class ExecutionEngine:
         }
 
     @staticmethod
-    def _audit_result(result: SkillResult, *, skill_id: str | None = None) -> dict[str, Any]:
+    def _audit_result(
+        result: SkillResult,
+        *,
+        skill_id: str | None = None,
+        redact_content: bool = False,
+    ) -> dict[str, Any]:
         payload = result.model_dump(mode="json")
         if skill_id in {"cloud.ask", "integration.openai", "integration.anthropic"}:
             payload["summary"] = "[CLOUD_RESULT_OMITTED]"
@@ -1008,6 +1027,23 @@ class ExecutionEngine:
                 payload["data"] = safe_data or {"redacted": True}
             else:
                 payload["data"] = {"redacted": True}
+            return payload
+        if result.sensitive or redact_content:
+            payload["summary"] = "[SENSITIVE_RESULT_OMITTED]"
+            payload["display_text"] = "[SENSITIVE_RESULT_OMITTED]"
+            payload["speech_text"] = "[SENSITIVE_RESULT_OMITTED]"
+            payload["data"] = {"redacted": True}
+            payload["items"] = None
+            payload["rollback_token"] = None
+            payload["media_directive"] = None
+            payload["visual_artifact"] = None
+            error = payload.get("error")
+            if isinstance(error, dict):
+                payload["error"] = {
+                    "code": error.get("code", "sensitive_error"),
+                    "message": "[SENSITIVE_ERROR_OMITTED]",
+                    "recoverable": bool(error.get("recoverable", False)),
+                }
             return payload
         if result.visual_artifact is None:
             return payload
