@@ -391,6 +391,7 @@ def run_desktop(container: Container) -> int:
             QHeaderView,
             QInputDialog,
             QLabel,
+            QLayout,
             QLineEdit,
             QListWidget,
             QListWidgetItem,
@@ -1606,7 +1607,12 @@ def run_desktop(container: Container) -> int:
         def _active_scripts_tab(self) -> QWidget:
             page = QWidget()
             page.setObjectName("activeScriptsPage")
+            page.setSizePolicy(
+                QSizePolicy.Policy.Preferred,
+                QSizePolicy.Policy.Preferred,
+            )
             layout = QVBoxLayout(page)
+            layout.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
             layout.setContentsMargins(28, 24, 28, 24)
             layout.setSpacing(12)
 
@@ -1638,7 +1644,7 @@ def run_desktop(container: Container) -> int:
             self.running_scripts.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
             self.running_scripts.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
             self.running_scripts.setAlternatingRowColors(True)
-            self.running_scripts.horizontalHeader().setStretchLastSection(True)
+            self._configure_automation_table(self.running_scripts, stretch_columns=(1, 2))
             cancel = QPushButton("Cancel selected")
             cancel.setObjectName("dangerButton")
             cancel.clicked.connect(self._cancel_selected_script)
@@ -1652,7 +1658,7 @@ def run_desktop(container: Container) -> int:
             self.scheduled_scripts.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
             self.scheduled_scripts.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
             self.scheduled_scripts.setAlternatingRowColors(True)
-            self.scheduled_scripts.horizontalHeader().setStretchLastSection(True)
+            self._configure_automation_table(self.scheduled_scripts, stretch_columns=(1,))
             schedule_controls = QHBoxLayout()
             self.schedule_pause_resume = QPushButton("Pause / resume")
             self.schedule_pause_resume.clicked.connect(self._pause_or_resume_schedule)
@@ -1681,7 +1687,7 @@ def run_desktop(container: Container) -> int:
             self.pending_approvals.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
             self.pending_approvals.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
             self.pending_approvals.setAlternatingRowColors(True)
-            self.pending_approvals.horizontalHeader().setStretchLastSection(True)
+            self._configure_automation_table(self.pending_approvals, stretch_columns=(0, 4))
             approval_controls = QHBoxLayout()
             approve = QPushButton("Review and approve")
             approve.clicked.connect(self._review_selected_approval)
@@ -1700,7 +1706,7 @@ def run_desktop(container: Container) -> int:
             )
             self.schedule_history.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
             self.schedule_history.setAlternatingRowColors(True)
-            self.schedule_history.horizontalHeader().setStretchLastSection(True)
+            self._configure_automation_table(self.schedule_history, stretch_columns=(0, 4))
             clear_history = QPushButton("Clear completed history")
             clear_history.clicked.connect(self._clear_completed_schedule_history)
 
@@ -1710,30 +1716,67 @@ def run_desktop(container: Container) -> int:
             self.script_hooks.setHorizontalHeaderLabels(["Hook", "Trigger", "Status"])
             self.script_hooks.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
             self.script_hooks.setAlternatingRowColors(True)
-            self.script_hooks.horizontalHeader().setStretchLastSection(True)
+            self._configure_automation_table(self.script_hooks, stretch_columns=(1,))
 
             layout.addWidget(running_label)
-            layout.addWidget(self.running_scripts, 2)
+            layout.addWidget(self.running_scripts)
             layout.addWidget(cancel)
             layout.addWidget(scheduled_label)
-            layout.addWidget(self.scheduled_scripts, 2)
+            layout.addWidget(self.scheduled_scripts)
             layout.addLayout(schedule_controls)
             layout.addWidget(approvals_label)
-            layout.addWidget(self.pending_approvals, 2)
+            layout.addWidget(self.pending_approvals)
             layout.addLayout(approval_controls)
             layout.addWidget(history_label)
-            layout.addWidget(self.schedule_history, 2)
+            layout.addWidget(self.schedule_history)
             layout.addWidget(clear_history)
             layout.addWidget(hooks_label)
-            layout.addWidget(self.script_hooks, 1)
+            layout.addWidget(self.script_hooks)
             self._refresh_active_scripts()
-            return page
+
+            scroll = QScrollArea()
+            scroll.setObjectName("activeScriptsScroll")
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setWidget(page)
+            self.automations_scroll = scroll
+            return scroll
+
+        @staticmethod
+        def _configure_automation_table(
+            table: QTableWidget,
+            *,
+            stretch_columns: tuple[int, ...],
+        ) -> None:
+            """Keep automation rows readable while allowing the page to scroll."""
+            table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            table.setAlternatingRowColors(True)
+            table.setWordWrap(False)
+            table.setTextElideMode(Qt.TextElideMode.ElideRight)
+            table.setMinimumHeight(112)
+            table.verticalHeader().setDefaultSectionSize(32)
+            header = table.horizontalHeader()
+            header.setStretchLastSection(False)
+            stretch = set(stretch_columns)
+            for column in range(table.columnCount()):
+                header.setSectionResizeMode(
+                    column,
+                    (
+                        QHeaderView.ResizeMode.Stretch
+                        if column in stretch
+                        else QHeaderView.ResizeMode.ResizeToContents
+                    ),
+                )
 
         @staticmethod
         def _set_table_row(table: QTableWidget, row: int, values: list[str]) -> None:
             table.insertRow(row)
             for column, value in enumerate(values):
-                table.setItem(row, column, QTableWidgetItem(value))
+                item = QTableWidgetItem(value)
+                item.setToolTip(value)
+                item.setStatusTip(value)
+                table.setItem(row, column, item)
 
         def _refresh_active_scripts(self) -> None:
             if not hasattr(self, "running_scripts"):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -410,6 +411,55 @@ def test_compact_companion_switches_views_renders_and_hides_to_tray(
     window.shutdown()
     window.shutdown()
     assert window._shutdown_started is True
+    window.hide()
+
+
+@pytest.mark.ui
+def test_automations_tab_scrolls_and_preserves_full_cell_values(qtbot, settings, monkeypatch):
+    from PySide6.QtWidgets import QApplication, QHeaderView, QMessageBox, QScrollArea
+
+    monkeypatch.setattr(QMessageBox, "information", lambda *args: None)
+    monkeypatch.setattr(QMessageBox, "critical", lambda *args: None)
+    captured_windows = []
+    existing_windows = {id(widget) for widget in QApplication.topLevelWidgets()}
+
+    def capture_window(self):
+        captured_windows.extend(
+            widget
+            for widget in QApplication.topLevelWidgets()
+            if widget.objectName() == "localAssistantWindow" and id(widget) not in existing_windows
+        )
+        return 0
+
+    monkeypatch.setattr(QApplication, "exec", capture_window)
+    container = build_container(settings)
+    full_name = "Quarterly automation with a deliberately long saved name"
+    container.schedule_store.create_notification(
+        name=full_name,
+        message="A full message that should remain available to the automation view.",
+        run_at=datetime.now(UTC) + timedelta(days=1),
+    )
+    SettingsStore(container.database).set("first_run_complete", True)
+
+    assert run_desktop(container) == 0
+    window = captured_windows[-1]
+    qtbot.addWidget(window)
+    window._switch_window_mode("full")
+    window.resize(820, 600)
+    window.tabs.setCurrentIndex(TAB_LABELS.index("Automations"))
+    window.show()
+    qtbot.waitUntil(lambda: window.automations_scroll.verticalScrollBar().maximum() > 0)
+
+    assert isinstance(window.tabs.currentWidget(), QScrollArea)
+    assert window.tabs.currentWidget() is window.automations_scroll
+    assert window.automations_scroll.widget().objectName() == "activeScriptsPage"
+    assert window.scheduled_scripts.item(0, 1).toolTip() == full_name
+    assert (
+        window.scheduled_scripts.horizontalHeader().sectionResizeMode(1)
+        == QHeaderView.ResizeMode.Stretch
+    )
+
+    window.shutdown()
     window.hide()
 
 
