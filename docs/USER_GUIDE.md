@@ -95,11 +95,13 @@ sample counters are shown under Diagnostics.
 
 ## Work command center
 
-Open **Connections** to manage command-center **Inputs**, **Outputs**, account
-profiles, and **Reviewed work**. Inputs select bounded places the assistant may
-read; Outputs select exact places reviewed work may go. Neither creates a
-permission grant. Connect or reauthorize provider accounts in Extension Hub,
-then separately enable the source/output binding and approve runtime access.
+Open **Connections** to manage command-center **Inputs**, **Outputs**, and
+**Reviewed work**. Inputs select bounded places the assistant may read; Outputs
+select exact places reviewed work may go. Neither creates a permission grant.
+New binding dialogs show only capabilities built into the app or supplied by an
+installed extension. Choose **Manage extensions & accounts** to install a
+missing platform or connect, reauthorize, and disconnect its account in the
+Extension Hub; returning to Connections refreshes the available capabilities.
 
 Use `brief me` or the Dashboard Work Brief action to collect enabled Briefing
 inputs. Independent sources run with bounded timeouts, so one unavailable input
@@ -114,11 +116,13 @@ Local export creates a new file and refuses overwrite. Provider destinations
 use their ordinary permissions and confirmations; draft and send remain
 separate operations.
 
-Choose **Schedule brief** for hourly, daily, or weekly reports. Every run saves
-one artifact and posts an Inbox summary. An optional configured output becomes
-a pending delivery—it is not sent unattended. Schedules appear as **Work
-brief** in Automations, where binding drift or revoked authority is visible as a
-review state.
+Choose **Create brief automation** in Connections, or **New work brief** in
+Automations, for hourly, daily, weekly, or observed-change reports. Both buttons
+use the same reviewed authoring dialog. After creation, the app opens
+Automations and selects the new schedule. Every run saves one artifact and
+posts an Inbox summary. An optional configured output becomes a pending
+delivery—it is not sent unattended. Binding drift or revoked authority appears
+there as a review state.
 
 Gmail and Google Calendar inputs can also enable **Observation**. Select **When
 an observed input changes** when scheduling. The assistant polls no faster than

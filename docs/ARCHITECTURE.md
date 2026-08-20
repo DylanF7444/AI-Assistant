@@ -26,6 +26,14 @@ shared connection-profile store. Source reads compile to ordinary `SkillCall`
 objects and pass through the existing registry, permission manager, execution
 engine, cancellation, offline lock, and audit controls.
 
+The desktop catalog is availability-aware: new binding editors include a
+skill-backed definition only when that skill is built in or installed. Existing
+bindings are never hidden after uninstall; they become unavailable and retain
+an exact Extension Hub repair link. Extension Hub owns package and account
+management, while Connections owns bindings and reviewed work. The shared Work
+Brief authoring dialog creates a durable schedule and hands its exact ID to the
+Automations view.
+
 Manual Work Briefs collect independent low-risk source calls concurrently and
 normalize typed `SkillResult.items` into bounded provenance-bearing sections.
 They are transient unless explicitly saved. Saved `WorkArtifact` rows are

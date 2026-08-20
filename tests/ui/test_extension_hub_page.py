@@ -130,6 +130,11 @@ def test_first_party_extension_is_visible_without_platform_catalog(qtbot):
     assert page.detail_title.text() == "Google Calendar"
     assert page.install_button.isEnabled()
     assert "first-party" in page.install_status.text().casefold()
+    assert page.focus_extension("integration.google_calendar") is True
+    assert (
+        page.extension_list.currentItem().data(Qt.ItemDataRole.UserRole)
+        == "integration.google_calendar"
+    )
 
 
 @pytest.mark.ui
@@ -189,6 +194,8 @@ def test_connection_dialog_is_loaded_from_registered_entry_point(qtbot, monkeypa
     )
     page = ExtensionHubPage(service, offline=False)
     qtbot.addWidget(page)
+    changed = []
+    page.connection_changed.connect(changed.append)
 
     page.configure_connection()
 
@@ -196,3 +203,4 @@ def test_connection_dialog_is_loaded_from_registered_entry_point(qtbot, monkeypa
     assert len(opened) == 1
     assert opened[0].parent is page
     assert synced == [extension.extension_id]
+    assert changed == [extension.extension_id]

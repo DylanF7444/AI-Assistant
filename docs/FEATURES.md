@@ -120,6 +120,9 @@ the relevant setting, credential, local service, or device to be configured.
   reviewing publisher/risk/permission metadata, and installing compatible
   packages only after digest, archive, trusted-signature, API, and manifest
   verification. Catalog installations remain disabled and permissionless.
+  Connections lists only built-in or installed capabilities for new bindings,
+  deep-links exact Hub entries for setup or repair, and reuses one Work Brief
+  authoring flow with Automations.
 - User-authored Markdown playbooks with validated YAML frontmatter, natural
   language workflow instructions, per-skill-ID guidance, enable/disable and
   import/edit/delete controls, semantic retrieval, and unavailable-skill

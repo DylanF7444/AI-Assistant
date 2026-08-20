@@ -72,9 +72,12 @@ closed by source code or unit tests alone.
   delete, pending approval review/reject/approve, recent history, completed
   history deletion, risk/status visibility, and settings that keep background
   skill actions disabled by default.
-- Command-center Inputs, Outputs, Accounts, and Reviewed work over shared
-  connection profiles; schema-reviewed bindings remain separate from runtime
-  permissions and never expose credentials in the desktop or audit log.
+- Command-center Inputs, Outputs, and Reviewed work over shared connection
+  profiles. New bindings expose only built-in or installed capabilities;
+  Extension Hub is the single installation/account surface, and Work Brief
+  authoring hands off to the exact Automations schedule. Schema-reviewed
+  bindings remain separate from runtime permissions and never expose
+  credentials in the desktop or audit log.
 - Manual Work Brief collection through ordinary low-risk skill calls with
   independent concurrency/timeouts, typed provenance, partial failure, explicit
   save, revisioned/retention-bounded artifacts, and local Assistant/Inbox output.
@@ -107,7 +110,7 @@ closed by source code or unit tests alone.
   data/model uninstall choices. The workflow now runs static/type/docs/evaluation/
   dependency checks, packaged media verification, CycloneDX SBOM generation,
   source/artifact hashing, and a commit/dirty-state release manifest.
-- 1,215 regression tests, 29 guided learning tests, and 70 offscreen UI
+- 1,215 regression tests, 29 guided learning tests, and 72 offscreen UI
   tests pass. Combined branch coverage is 81.25% overall and 88.24% across the
   execution, policy, and scheduling layers. Coverage also includes a
   1,500-command sustained run, bounded

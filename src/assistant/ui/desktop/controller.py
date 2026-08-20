@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Literal
 from uuid import UUID
 
 from assistant.bootstrap import Container
@@ -150,11 +151,53 @@ class DesktopController:
     def set_dashboard_pipeline_state(self, state: PipelineState) -> None:
         self.container.dashboard.set_pipeline_state(state)
 
-    def command_center_source_definitions(self) -> tuple[SourceDefinition, ...]:
-        return self.container.command_center.source_definitions()
+    def command_center_source_definitions(
+        self,
+        *,
+        configurable_only: bool = False,
+    ) -> tuple[SourceDefinition, ...]:
+        definitions = self.container.command_center.source_definitions()
+        if not configurable_only:
+            return definitions
+        return tuple(
+            definition
+            for definition in definitions
+            if self.command_center_skill_availability(definition.skill_id) != "unavailable"
+        )
 
-    def command_center_destination_definitions(self) -> tuple[DestinationDefinition, ...]:
-        return self.container.command_center.destination_definitions()
+    def command_center_destination_definitions(
+        self,
+        *,
+        configurable_only: bool = False,
+    ) -> tuple[DestinationDefinition, ...]:
+        definitions = self.container.command_center.destination_definitions()
+        if not configurable_only:
+            return definitions
+        return tuple(
+            definition
+            for definition in definitions
+            if self.command_center_skill_availability(definition.skill_id) != "unavailable"
+        )
+
+    def command_center_skill_availability(
+        self,
+        skill_id: str | None,
+    ) -> Literal["enabled", "disabled", "unavailable"]:
+        if skill_id is None:
+            return "enabled"
+        return self.container.registry.availability(skill_id)
+
+    def command_center_extension_id(self, skill_id: str | None) -> str:
+        if skill_id is None:
+            return ""
+        return next(
+            (
+                extension.extension_id
+                for extension in self.container.extension_hub.catalog.extensions
+                if extension.extension_id == skill_id
+            ),
+            "",
+        )
 
     def command_center_source_bindings(self) -> tuple[SourceBinding, ...]:
         return self.container.command_center.source_bindings()

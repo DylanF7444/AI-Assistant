@@ -1637,9 +1637,12 @@ def run_desktop(container: Container) -> int:
             heading.addWidget(subtitle)
             refresh = QPushButton("Refresh")
             refresh.clicked.connect(self._refresh_active_scripts)
+            self.new_work_brief_automation = QPushButton("New work brief")
+            self.new_work_brief_automation.clicked.connect(self._create_work_brief_automation)
             self.pause_automations = QPushButton("Pause all")
             self.pause_automations.clicked.connect(self._toggle_automation_pause)
             header.addLayout(heading, 1)
+            header.addWidget(self.new_work_brief_automation)
             header.addWidget(self.pause_automations)
             header.addWidget(refresh)
             layout.addLayout(header)
@@ -2895,6 +2898,9 @@ def run_desktop(container: Container) -> int:
             )
             self.extension_hub_page.installed.connect(self._extension_installed)
             self.extension_hub_page.uninstalled.connect(self._extension_uninstalled)
+            self.extension_hub_page.connection_changed.connect(
+                lambda _extension_id: self.connections_page.reload()
+            )
             return self.extension_hub_page
 
         def _connections_tab(self) -> QWidget:
@@ -2904,11 +2910,33 @@ def run_desktop(container: Container) -> int:
             self.connections_page.extension_hub_requested.connect(
                 self._open_extension_hub_from_connections
             )
+            self.connections_page.automation_requested.connect(
+                self._open_automation_from_connections
+            )
             self.connections_page.work_brief_requested.connect(self._build_and_save_work_brief)
             self.connections_page.delivery_prepare_requested.connect(
                 self._prepare_command_center_delivery
             )
             return self.connections_page
+
+        def _create_work_brief_automation(self) -> None:
+            self.connections_page.create_work_brief_automation()
+
+        def _open_automation_from_connections(self, schedule_id: UUID | None) -> None:
+            self.tabs.setCurrentIndex(TAB_LABELS.index("Automations"))
+            self._refresh_active_scripts()
+            if schedule_id is None:
+                return
+            for row in range(self.scheduled_scripts.rowCount()):
+                item = self.scheduled_scripts.item(row, 0)
+                if item is not None and item.data(Qt.ItemDataRole.UserRole) == str(schedule_id):
+                    self.scheduled_scripts.selectRow(row)
+                    self.scheduled_scripts.scrollToItem(item)
+                    break
+            self.statusBar().showMessage(
+                "Work brief automation created and selected.",
+                8000,
+            )
 
         def _build_and_save_work_brief(self) -> None:
             self._show_primary_screen("assistant")
@@ -3043,16 +3071,24 @@ def run_desktop(container: Container) -> int:
             self._workers.append(worker)
             worker.start()
 
-        def _open_extension_hub_from_connections(self, provider_id: str) -> None:
+        def _open_extension_hub_from_connections(self, extension_id: str) -> None:
             self.tabs.setCurrentIndex(TAB_LABELS.index("Extension Hub"))
-            label = provider_id.replace("_", " ").replace("-", " ").title()
+            self.extension_hub_page.focus_extension(extension_id)
+            label = (
+                extension_id.replace("integration.", "").replace("_", " ").replace("-", " ").title()
+            )
             self.statusBar().showMessage(
-                f"Manage {label} accounts and extensions in Extension Hub.",
+                (
+                    f"Manage {label} in Extension Hub."
+                    if label
+                    else "Install extensions and manage their accounts here."
+                ),
                 8000,
             )
 
         def _extension_installed(self, skill_id: str) -> None:
             self._reload_skills()
+            self.connections_page.reload()
             self.statusBar().showMessage(
                 f"Installed {skill_id} disabled. Review it in Skills before enabling.",
                 8000,
@@ -3060,6 +3096,7 @@ def run_desktop(container: Container) -> int:
 
         def _extension_uninstalled(self, skill_id: str) -> None:
             self._reload_skills()
+            self.connections_page.reload()
             self.statusBar().showMessage(f"Uninstalled {skill_id}.", 8000)
 
         def _skills_tab(self) -> QWidget:

@@ -31,6 +31,7 @@ class ExtensionHubPage(QWidget):
 
     installed = Signal(str)
     uninstalled = Signal(str)
+    connection_changed = Signal(str)
 
     def __init__(
         self,
@@ -221,6 +222,20 @@ class ExtensionHubPage(QWidget):
                 "The global offline lock is active. Disable it in Settings and restart to "
                 "connect to the extension platform."
             )
+
+    def focus_extension(self, extension_id: str) -> bool:
+        """Select the exact extension requested by another settings surface."""
+        self.search_input.clear()
+        if not extension_id:
+            return False
+        for row in range(self.extension_list.count()):
+            item = self.extension_list.item(row)
+            if str(item.data(Qt.ItemDataRole.UserRole)) == extension_id:
+                self.extension_list.setCurrentItem(item)
+                self.extension_list.scrollToItem(item)
+                return True
+        self.search_input.setText(extension_id.replace("integration.", "").replace("_", " "))
+        return False
 
     def refresh(self) -> None:
         if self._busy or self.offline or not self.service.catalog_url:
@@ -510,16 +525,18 @@ class ExtensionHubPage(QWidget):
             self._operation_failed("The account configuration dialog is invalid.")
             return
         dialog.connection_changed.connect(
-            lambda: self._sync_connection_state(extension.extension_id)
+            lambda: self._sync_connection_state(extension.extension_id, notify=False)
         )
         dialog.exec()
         self._sync_connection_state(extension.extension_id)
 
-    def _sync_connection_state(self, extension_id: str) -> None:
+    def _sync_connection_state(self, extension_id: str, *, notify: bool = True) -> None:
         sync = getattr(self.service, "sync_connection_state", None)
         if callable(sync):
             sync(extension_id)
         self._show_selected()
+        if notify:
+            self.connection_changed.emit(extension_id)
 
     def _connection_service(self, extension_id: str) -> Any | None:
         resolver = getattr(self.service, "connection_service", None)

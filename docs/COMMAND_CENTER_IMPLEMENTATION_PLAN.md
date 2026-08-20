@@ -44,6 +44,10 @@ status table and implementation notes as slices land.
   adversarial evaluation, and an isolated PyInstaller build with packaged media
   verification. Live provider accounts and physical Windows UI checks remain
   external acceptance lanes.
+- The August 20 integration refinement made new-binding catalogs runtime-aware,
+  consolidated account management in Extension Hub, added exact extension
+  repair links, and made Connections and Automations share one schedule editor
+  with exact-schedule navigation.
 
 ## Product Outcome
 
@@ -88,14 +92,15 @@ without losing its current metrics behavior:
 
 Add a **Connections** page with three views:
 
-1. **Sources** — places from which the assistant may retrieve information.
-2. **Destinations** — places to which reviewed work may be delivered.
-3. **Accounts** — provider profiles, connection health, scopes, and test or
-   reconnect actions.
+1. **Inputs** — places from which the assistant may retrieve information.
+2. **Outputs** — places to which reviewed work may be delivered.
+3. **Reviewed work** — saved artifacts and exact pending deliveries.
 
-Use *Sources* and *Destinations* in the UI rather than *Inputs* and *Outputs* so
-the feature is not confused with microphone, keyboard, speaker, and display
-configuration.
+Extension Hub remains the single installation and account-management surface.
+New-binding pickers show only built-in or installed capabilities and deep-link
+the exact missing or selected extension; existing bindings remain visible when
+their extension is later removed. Connections and Automations share one Work
+Brief schedule editor and navigate to the exact created schedule.
 
 A provider may appear in both views while using one connection profile. For
 example, Gmail may provide an unread-mail source and a draft-email destination.
@@ -469,7 +474,8 @@ with invented behavior.
    `ui/desktop/app.py`.
 3. Expose catalog, bindings, profiles, health, and CRUD through
    `DesktopController`.
-4. Deep-link managed extension installation/account setup.
+4. Filter new bindings by runtime extension availability and deep-link exact
+   managed extension installation/account setup.
 5. Display exact scope summaries, source modes, destination delivery behavior,
    freshness, last result state, and permission readiness.
 6. Add accessible labels, keyboard navigation, empty/error/offline states, and

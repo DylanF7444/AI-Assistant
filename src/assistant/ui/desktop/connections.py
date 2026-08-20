@@ -167,6 +167,8 @@ class _ConfigurationForm(QWidget):
 
 
 class _BindingDialog(QDialog):
+    extension_hub_requested = Signal(str)
+
     def __init__(
         self,
         controller: DesktopController,
@@ -184,9 +186,11 @@ class _BindingDialog(QDialog):
         self.setMinimumWidth(560)
 
         definitions = (
-            controller.command_center_source_definitions()
+            controller.command_center_source_definitions(configurable_only=binding is None)
             if kind == "source"
-            else controller.command_center_destination_definitions()
+            else controller.command_center_destination_definitions(
+                configurable_only=binding is None
+            )
         )
         self.definitions = {
             self._definition_id(definition): definition for definition in definitions
@@ -200,22 +204,38 @@ class _BindingDialog(QDialog):
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
+        extension_controls = QHBoxLayout()
+        extension_note = QLabel(
+            "Only capabilities provided by this app or an installed extension appear here."
+        )
+        extension_note.setWordWrap(True)
+        self.browse_extensions_button = QPushButton("Get more from Extension Hub")
+        self.browse_extensions_button.clicked.connect(self._open_extension_hub)
+        extension_controls.addWidget(extension_note, 1)
+        extension_controls.addWidget(self.browse_extensions_button)
+        layout.addLayout(extension_controls)
+
         basics = QFormLayout()
         self.definition_input = QComboBox()
         for definition in definitions:
+            availability = controller.command_center_skill_availability(definition.skill_id)
+            state = "" if availability == "enabled" else f" · {_friendly(availability)}"
             self.definition_input.addItem(
-                f"{definition.display_name} — {_friendly(definition.provider_id)}",
+                f"{definition.display_name} — {_friendly(definition.provider_id)}{state}",
                 self._definition_id(definition),
             )
         self.name_input = QLineEdit()
         self.enabled_input = QCheckBox("Enabled")
         self.enabled_input.setChecked(True)
         self.account_input = QComboBox()
+        self.manage_account_button = QPushButton("Manage account in Extension Hub")
+        self.manage_account_button.clicked.connect(self._open_extension_hub)
         self.description = QLabel()
         self.description.setWordWrap(True)
         basics.addRow("Type", self.definition_input)
         basics.addRow("Name", self.name_input)
         basics.addRow("Account", self.account_input)
+        basics.addRow("", self.manage_account_button)
         basics.addRow("State", self.enabled_input)
         basics.addRow("Purpose", self.description)
         layout.addLayout(basics)
@@ -272,6 +292,16 @@ class _BindingDialog(QDialog):
         if binding is not None:
             self._load(binding)
 
+    def _open_extension_hub(self) -> None:
+        definition = self._definition()
+        extension_id = (
+            ""
+            if self.sender() is self.browse_extensions_button
+            else self.controller.command_center_extension_id(definition.skill_id)
+        )
+        self.extension_hub_requested.emit(extension_id)
+        self.reject()
+
     def value(self) -> SourceBinding | DestinationBinding:
         definition = self._definition()
         connection = self._connection_reference(definition)
@@ -311,6 +341,7 @@ class _BindingDialog(QDialog):
     def _definition_changed(self, _index: int = 0) -> None:
         definition = self._definition()
         self.description.setText(definition.description)
+        self.manage_account_button.setVisible(definition.requires_connection)
         if self.original is None:
             self.name_input.setText(definition.display_name)
         self._load_accounts(definition)
@@ -553,6 +584,7 @@ class ConnectionsPage(QWidget):
     """User-facing catalog and binding editor for command-center I/O."""
 
     extension_hub_requested = Signal(str)
+    automation_requested = Signal(object)
     work_brief_requested = Signal()
     delivery_prepare_requested = Signal(object)
 
@@ -575,10 +607,19 @@ class ConnectionsPage(QWidget):
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
+        navigation = QHBoxLayout()
+        self.extension_hub_button = QPushButton("Manage extensions & accounts")
+        self.extension_hub_button.clicked.connect(lambda: self.extension_hub_requested.emit(""))
+        self.automations_button = QPushButton("View automations")
+        self.automations_button.clicked.connect(lambda: self.automation_requested.emit(None))
+        navigation.addWidget(self.extension_hub_button)
+        navigation.addWidget(self.automations_button)
+        navigation.addStretch()
+        layout.addLayout(navigation)
+
         self.tabs = QTabWidget()
         self.source_table = self._table(("Name", "Input", "Account", "Use", "Status"))
         self.destination_table = self._table(("Name", "Output", "Account", "Delivery", "Status"))
-        self.account_table = self._table(("Provider", "Name", "Account", "State"))
         self.artifact_table = self._table(
             ("Title", "Revision", "Sources", "Sensitivity", "Expires")
         )
@@ -591,7 +632,6 @@ class ConnectionsPage(QWidget):
             self._binding_panel("destination", self.destination_table),
             "Outputs",
         )
-        self.tabs.addTab(self._accounts_panel(), "Accounts")
         self.tabs.addTab(self._work_panel(), "Reviewed work")
         layout.addWidget(self.tabs, 1)
         self.reload()
@@ -622,7 +662,11 @@ class ConnectionsPage(QWidget):
                     _friendly(status.availability.value),
                 ),
                 binding.binding_id,
-                definition.provider_id if definition else "",
+                (
+                    self.controller.command_center_extension_id(definition.skill_id)
+                    if definition
+                    else ""
+                ),
                 status.message,
             )
         self.destination_table.setRowCount(len(destinations))
@@ -640,23 +684,12 @@ class ConnectionsPage(QWidget):
                     _friendly(status.availability.value),
                 ),
                 binding.binding_id,
-                definition.provider_id if definition else "",
-                status.message,
-            )
-        profiles = self.controller.connection_profiles()
-        self.account_table.setRowCount(len(profiles))
-        for row, profile in enumerate(profiles):
-            self._set_row(
-                self.account_table,
-                row,
                 (
-                    _friendly(profile.provider_id),
-                    profile.display_name,
-                    profile.account or "—",
-                    "Enabled" if profile.enabled else "Disabled",
+                    self.controller.command_center_extension_id(definition.skill_id)
+                    if definition
+                    else ""
                 ),
-                profile.profile_id,
-                profile.provider_id,
+                status.message,
             )
         artifacts = self.controller.command_center_artifacts()
         self.artifact_table.setRowCount(len(artifacts))
@@ -704,7 +737,7 @@ class ConnectionsPage(QWidget):
         add_button = QPushButton("Add input" if kind == "source" else "Add output")
         edit_button = QPushButton("Edit")
         remove_button = QPushButton("Remove")
-        manage_button = QPushButton("Manage accounts")
+        manage_button = QPushButton("Manage extension / account")
         refresh_button = QPushButton("Refresh")
         add_button.clicked.connect(lambda: self._add(kind))
         edit_button.clicked.connect(lambda: self._edit(kind))
@@ -722,27 +755,6 @@ class ConnectionsPage(QWidget):
         table.doubleClicked.connect(lambda _index: self._edit(kind))
         return panel
 
-    def _accounts_panel(self) -> QWidget:
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        note = QLabel(
-            "This list contains non-secret account metadata. Connect, reauthorize, or "
-            "disconnect provider accounts in Extension Hub."
-        )
-        note.setWordWrap(True)
-        controls = QHBoxLayout()
-        manage = QPushButton("Open Extension Hub")
-        manage.clicked.connect(lambda: self._manage_selected(self.account_table))
-        refresh = QPushButton("Refresh")
-        refresh.clicked.connect(self.reload)
-        controls.addStretch()
-        controls.addWidget(manage)
-        controls.addWidget(refresh)
-        layout.addWidget(note)
-        layout.addLayout(controls)
-        layout.addWidget(self.account_table, 1)
-        return panel
-
     def _work_panel(self) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel)
@@ -757,17 +769,20 @@ class ConnectionsPage(QWidget):
         artifact_label.setObjectName("sectionLabel")
         artifact_controls = QHBoxLayout()
         build = QPushButton("Build & save brief")
-        schedule = QPushButton("Schedule brief")
+        schedule = QPushButton("Create brief automation")
+        view_automations = QPushButton("View automations")
         edit = QPushButton("Edit selected")
         queue = QPushButton("Queue delivery")
         remove = QPushButton("Delete")
         build.clicked.connect(self.work_brief_requested.emit)
-        schedule.clicked.connect(self._schedule_brief)
+        schedule.clicked.connect(self.create_work_brief_automation)
+        view_automations.clicked.connect(lambda: self.automation_requested.emit(None))
         edit.clicked.connect(self._edit_artifact)
         queue.clicked.connect(self._queue_delivery)
         remove.clicked.connect(self._delete_artifact)
         artifact_controls.addWidget(build)
         artifact_controls.addWidget(schedule)
+        artifact_controls.addWidget(view_automations)
         artifact_controls.addWidget(edit)
         artifact_controls.addWidget(queue)
         artifact_controls.addWidget(remove)
@@ -804,7 +819,7 @@ class ConnectionsPage(QWidget):
         layout.addLayout(privacy_controls)
         return panel
 
-    def _schedule_brief(self) -> None:
+    def create_work_brief_automation(self) -> None:
         dialog = _ScheduleBriefDialog(self.controller, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -813,11 +828,7 @@ class ConnectionsPage(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, "Brief not scheduled", str(exc))
             return
-        QMessageBox.information(
-            self,
-            "Work brief scheduled",
-            f"{schedule.name} is active. Its next run is shown in Automations.",
-        )
+        self.automation_requested.emit(schedule.schedule_id)
 
     def _clear_observation_data(self) -> None:
         answer = QMessageBox.question(
@@ -989,6 +1000,7 @@ class ConnectionsPage(QWidget):
         binding: SourceBinding | DestinationBinding | None,
     ) -> None:
         dialog = _BindingDialog(self.controller, kind, binding, self)
+        dialog.extension_hub_requested.connect(self.extension_hub_requested.emit)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         try:
@@ -1035,8 +1047,8 @@ class ConnectionsPage(QWidget):
 
     def _manage_selected(self, table: QTableWidget) -> None:
         item = table.item(table.currentRow(), 0) if table.currentRow() >= 0 else None
-        provider_id = str(item.data(Qt.ItemDataRole.UserRole + 1) or "") if item else ""
-        self.extension_hub_requested.emit(provider_id)
+        extension_id = str(item.data(Qt.ItemDataRole.UserRole + 1) or "") if item else ""
+        self.extension_hub_requested.emit(extension_id)
 
     def _account_label(self, reference: ConnectionReference | None) -> str:
         if reference is None:
@@ -1075,7 +1087,7 @@ class ConnectionsPage(QWidget):
         row: int,
         values: tuple[str, ...],
         item_id: UUID,
-        provider_id: str,
+        extension_id: str,
         tooltip: str = "",
     ) -> None:
         for column, value in enumerate(values):
@@ -1084,7 +1096,7 @@ class ConnectionsPage(QWidget):
                 item.setToolTip(tooltip)
             if column == 0:
                 item.setData(Qt.ItemDataRole.UserRole, str(item_id))
-                item.setData(Qt.ItemDataRole.UserRole + 1, provider_id)
+                item.setData(Qt.ItemDataRole.UserRole + 1, extension_id)
             table.setItem(row, column, item)
 
     @staticmethod

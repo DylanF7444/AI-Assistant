@@ -416,6 +416,7 @@ def test_compact_companion_switches_views_renders_and_hides_to_tray(
 
 @pytest.mark.ui
 def test_automations_tab_scrolls_and_preserves_full_cell_values(qtbot, settings, monkeypatch):
+    from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication, QHeaderView, QMessageBox, QScrollArea
 
     monkeypatch.setattr(QMessageBox, "information", lambda *args: None)
@@ -434,7 +435,7 @@ def test_automations_tab_scrolls_and_preserves_full_cell_values(qtbot, settings,
     monkeypatch.setattr(QApplication, "exec", capture_window)
     container = build_container(settings)
     full_name = "Quarterly automation with a deliberately long saved name"
-    container.schedule_store.create_notification(
+    schedule = container.schedule_store.create_notification(
         name=full_name,
         message="A full message that should remain available to the automation view.",
         run_at=datetime.now(UTC) + timedelta(days=1),
@@ -458,6 +459,20 @@ def test_automations_tab_scrolls_and_preserves_full_cell_values(qtbot, settings,
         window.scheduled_scripts.horizontalHeader().sectionResizeMode(1)
         == QHeaderView.ResizeMode.Stretch
     )
+    assert window.new_work_brief_automation.text() == "New work brief"
+
+    window._open_extension_hub_from_connections("integration.gmail")
+    assert window.tabs.tabText(window.tabs.currentIndex()) == "Extension Hub"
+    assert (
+        window.extension_hub_page.extension_list.currentItem().data(Qt.ItemDataRole.UserRole)
+        == "integration.gmail"
+    )
+
+    window._open_automation_from_connections(schedule.schedule_id)
+    assert window.tabs.tabText(window.tabs.currentIndex()) == "Automations"
+    assert window.scheduled_scripts.item(window.scheduled_scripts.currentRow(), 0).data(
+        Qt.ItemDataRole.UserRole
+    ) == str(schedule.schedule_id)
 
     window.shutdown()
     window.hide()
