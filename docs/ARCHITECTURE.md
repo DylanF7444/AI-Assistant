@@ -308,6 +308,15 @@ only timestamp, connection ID, generic metric ID, a SHA-256 series key, finite
 numeric value, and state. Text values are rejected, retention is bounded to
 1–90 days, and connection deletion clears samples and vault references.
 
+The dashboard calendar is a separate provider-neutral read surface under
+`assistant.calendar`. `CalendarProviderRegistry` and `CalendarService` own
+bounded, timezone-aware event queries, scoped dashboard permissions, remote
+concurrency, transient last-good snapshots, and explicit connection/offline
+states. `CalendarLayoutWidget` consumes only typed snapshots, so the Qt layout
+does not depend on Google OAuth or any provider API. The first-party Google
+provider reuses the shared Google connection and fixed-origin Calendar adapter;
+its event bodies never enter numeric dashboard history or audit details.
+
 The implemented context-aware routing and planning roadmap is documented in
 `docs/SMART_ASSISTANT_IMPLEMENTATION_PLAN.md`. It records the design history
 for semantic retrieval, context snapshots, intent interpretation, preference

@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
 from assistant.bootstrap import Container
+from assistant.calendar.contracts import (
+    CalendarLayout,
+    CalendarPermissionRequest,
+    CalendarProviderDefinition,
+    CalendarQuery,
+    CalendarSnapshot,
+)
 from assistant.command_center import (
     BindingStatus,
     DestinationBinding,
@@ -78,6 +86,44 @@ class DesktopController:
 
     def dashboard_catalog(self) -> tuple[MetricDefinition, ...]:
         return self.container.dashboard.catalog()
+
+    def calendar_layout(self) -> CalendarLayout:
+        return self.container.calendar.layout()
+
+    def save_calendar_layout(self, layout: CalendarLayout) -> CalendarLayout:
+        return self.container.calendar.save_layout(layout)
+
+    def calendar_provider_definitions(self) -> tuple[CalendarProviderDefinition, ...]:
+        return self.container.calendar.provider_definitions()
+
+    def calendar_query(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        layout: CalendarLayout | None = None,
+    ) -> CalendarQuery:
+        return self.container.calendar.query(start=start, end=end, layout=layout)
+
+    def calendar_permission_request(self) -> CalendarPermissionRequest:
+        return self.container.calendar.permission_request()
+
+    def grant_calendar_permission(self, grant_type: GrantType) -> None:
+        self.container.calendar.grant_permissions(grant_type)
+
+    async def refresh_calendar(self, query: CalendarQuery) -> CalendarSnapshot:
+        return await self.container.calendar.refresh(query)
+
+    def calendar_refresh_seconds(self) -> int:
+        definitions = self.container.calendar.provider_definitions()
+        layout = self.container.calendar.layout()
+        for definition in definitions:
+            if definition.provider_id == layout.provider_id:
+                return definition.minimum_refresh_seconds
+        return 300
+
+    def hide_sensitive_display(self) -> bool:
+        return bool(self.container.orchestrator.hide_sensitive_display)
 
     def dashboard_default_layout(self) -> DashboardLayout:
         return self.container.dashboard.default_layout()

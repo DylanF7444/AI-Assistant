@@ -4,6 +4,11 @@ For a contributor walkthrough covering first-party managed integrations,
 signed catalog packages, connection services, registration, tests, and release
 checks, see `docs/ADDING_EXTENSIONS.md`.
 
+The dashboard calendar is documented separately in `docs/CALENDAR_SURFACE.md`.
+It is a provider-neutral read surface populated by the installed calendar
+extension; adding the surface does not change the stable Google Calendar skill
+ID or its existing CRUD behavior.
+
 The desktop **Extension Hub** browses a configured HTTPS catalog and reviews
 compatible signed skill packages. Configure the catalog URL in **Settings**,
 disable the global offline lock, restart the application, and open the hub.

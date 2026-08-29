@@ -9,6 +9,9 @@ from dataclasses import dataclass
 from assistant.audio.capture import AudioCapture
 from assistant.audio.focus import AudioFocusCoordinator
 from assistant.audio.wakeword import OpenWakeWordProvider
+from assistant.calendar.google import GoogleCalendarProvider
+from assistant.calendar.registry import CalendarProviderRegistry
+from assistant.calendar.service import CalendarService
 from assistant.command_center.artifacts import CommandCenterArtifactStore
 from assistant.command_center.builtins import register_builtin_command_center_contributions
 from assistant.command_center.observations import CommandCenterObservationStore
@@ -252,6 +255,7 @@ class Container:
     scheduler: SchedulerService
     background_runtime: BackgroundRuntime
     dashboard: DashboardService
+    calendar: CalendarService
     command_center: CommandCenterService
     command_center_authoring: ScheduleAuthoringService
     secret_vault: SecretVault
@@ -268,6 +272,7 @@ def _apply_application_settings(container: Container, updated: Settings) -> None
 
     pricing = CloudPricing.from_mapping(current.cloud_pricing) if current.cloud_pricing else None
     container.dashboard.set_offline_lock(current.offline_lock)
+    container.calendar.set_offline_lock(current.offline_lock)
     container.dashboard.set_history_retention_days(current.dashboard_history_retention_days)
     container.extension_hub.configure(
         current.extension_catalog_url,
@@ -1138,6 +1143,25 @@ def build_container(settings: Settings | None = None) -> Container:
     )
     extension_hub.set_offline_lock(settings.offline_lock)
     extension_hub.set_cloud_pricing(pricing)
+    calendar_registry = CalendarProviderRegistry()
+    google_calendar_connection = extension_hub.connection_service("integration.google_calendar")
+    calendar_registry.register(
+        GoogleCalendarProvider(
+            storage.secret_vault,
+            connection_service=google_calendar_connection,
+            extension_installed=lambda: extension_hub.is_installed("integration.google_calendar"),
+            extension_availability=lambda: extension_hub.skill_availability(
+                "integration.google_calendar"
+            ),
+        )
+    )
+    calendar = CalendarService(
+        calendar_registry,
+        SettingsStore(database),
+        permissions=storage.permissions,
+        offline_lock=settings.offline_lock,
+        max_external_concurrency=2,
+    )
     context_providers = _build_context_providers(settings, storage)
     confirmations = ConfirmationManager()
     engine = ExecutionEngine(
@@ -1320,6 +1344,7 @@ def build_container(settings: Settings | None = None) -> Container:
         scheduler=scheduler,
         background_runtime=background_runtime,
         dashboard=dashboard,
+        calendar=calendar,
         command_center=command_center,
         command_center_authoring=command_center_authoring,
         secret_vault=storage.secret_vault,

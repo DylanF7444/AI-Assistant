@@ -15,6 +15,7 @@ from uuid import UUID
 from assistant.audio.activation import parse_voice_prompt_response
 from assistant.audio.capture import display_audio_devices
 from assistant.bootstrap import Container
+from assistant.calendar.contracts import CalendarState
 from assistant.contracts import (
     PermissionContext,
     PipelineEvent,
@@ -1106,10 +1107,21 @@ def run_desktop(container: Container) -> int:
             self.dashboard_page = DashboardPage(controller)
             self.dashboard_page.refresh_requested.connect(self._refresh_dashboard)
             self.dashboard_page.refresh_due_requested.connect(self._refresh_dashboard)
+            self.dashboard_page.calendar_refresh_requested.connect(self._refresh_dashboard_calendar)
+            self.dashboard_page.calendar_refresh_due_requested.connect(
+                self._refresh_dashboard_calendar
+            )
             self.dashboard_page.customize_requested.connect(self._customize_dashboard)
             self.dashboard_page.connections_requested.connect(self._manage_dashboard_connections)
             self.dashboard_page.work_brief_requested.connect(self._run_work_brief)
             self.dashboard_page.permission_requested.connect(self._grant_dashboard_permission)
+            self.dashboard_page.calendar_permission_requested.connect(
+                self._grant_calendar_permission
+            )
+            self.dashboard_page.calendar_extension_requested.connect(
+                self._open_calendar_extension_hub
+            )
+            self.dashboard_page.calendar_layout_changed.connect(self._save_calendar_layout)
             self.dashboard_page.became_visible.connect(self._refresh_dashboard)
             return self.dashboard_page
 
@@ -1300,6 +1312,81 @@ def run_desktop(container: Container) -> int:
             )
             self._refresh_dashboard()
 
+        def _grant_calendar_permission(self) -> None:
+            try:
+                request = controller.calendar_permission_request()
+            except (KeyError, RuntimeError, ValueError) as error:
+                QMessageBox.critical(self, "Calendar Permission Error", str(error))
+                return
+            details = "\n".join(
+                f"{capability_name(scope.capability)}: {scope.reason}\n"
+                f"Targets: {target_summary(scope.targets)}"
+                for scope in request.scopes
+            )
+            decision = self._voice_prompt_choice(
+                title="Calendar Dashboard Access",
+                text=(
+                    f"{request.display_name} needs bounded read access for "
+                    f"{', '.join(request.calendar_ids)}."
+                ),
+                informative_text=details,
+                kind="approval",
+                buttons=[
+                    ("approve", "Grant Access", QMessageBox.ButtonRole.AcceptRole),
+                    ("deny", "Not Now", QMessageBox.ButtonRole.RejectRole),
+                ],
+                default_choice="deny",
+            )
+            if decision != "approve":
+                return
+            modes = {
+                "once": GrantType.ONCE,
+                "session": GrantType.SESSION,
+                "always": GrantType.ALWAYS,
+            }
+            mode = self._voice_prompt_choice(
+                title="Calendar Access Duration",
+                text="How long should this read-only calendar access last?",
+                informative_text="The grant remains limited to the exact calendar targets shown above.",
+                kind="permission_duration",
+                buttons=[
+                    ("once", "Just once", QMessageBox.ButtonRole.AcceptRole),
+                    ("session", "This session", QMessageBox.ButtonRole.AcceptRole),
+                    ("always", "Always", QMessageBox.ButtonRole.AcceptRole),
+                    ("deny", "Cancel", QMessageBox.ButtonRole.RejectRole),
+                ],
+                default_choice="deny",
+            )
+            if mode not in modes:
+                return
+            try:
+                controller.grant_calendar_permission(modes[mode])
+            except (KeyError, RuntimeError, ValueError) as error:
+                QMessageBox.critical(self, "Calendar Permission Error", str(error))
+                return
+            self._reload_permissions()
+            self.statusBar().showMessage(
+                f"Calendar access granted for {request.display_name}.",
+                4000,
+            )
+            self._refresh_dashboard_calendar()
+
+        def _open_calendar_extension_hub(self, provider_id: str) -> None:
+            extension_id = {
+                "google": "integration.google_calendar",
+            }.get(provider_id, provider_id)
+            self._open_extension_hub_from_connections(extension_id)
+
+        def _save_calendar_layout(self, layout) -> None:
+            try:
+                controller.save_calendar_layout(layout)
+            except (KeyError, RuntimeError, ValueError) as error:
+                QMessageBox.critical(self, "Calendar Layout Not Saved", str(error))
+                self.dashboard_page.calendar.set_layout(controller.calendar_layout())
+                return
+            self.dashboard_page.calendar.set_layout(layout)
+            self._refresh_dashboard_calendar()
+
         def _customize_dashboard(self) -> None:
             dialog = DashboardEditor(controller, self)
             if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -1323,6 +1410,21 @@ def run_desktop(container: Container) -> int:
             worker = AsyncWorker(controller.refresh_dashboard(card_ids))
             worker.complete.connect(self.dashboard_page.apply_snapshots)
             worker.failed.connect(self.dashboard_page.fail_refresh)
+            worker.finished.connect(lambda: self._discard_dashboard_worker(worker))
+            self._workers.append(worker)
+            self._dashboard_workers.append(worker)
+            worker.start()
+
+            if card_ids is None:
+                self._refresh_dashboard_calendar()
+
+        def _refresh_dashboard_calendar(self) -> None:
+            if not self.dashboard_page.begin_calendar_refresh():
+                return
+            query = self.dashboard_page.calendar.current_query()
+            worker = AsyncWorker(controller.refresh_calendar(query))
+            worker.complete.connect(self.dashboard_page.apply_calendar_snapshot)
+            worker.failed.connect(self.dashboard_page.fail_calendar_refresh)
             worker.finished.connect(lambda: self._discard_dashboard_worker(worker))
             self._workers.append(worker)
             self._dashboard_workers.append(worker)
@@ -2898,9 +3000,7 @@ def run_desktop(container: Container) -> int:
             )
             self.extension_hub_page.installed.connect(self._extension_installed)
             self.extension_hub_page.uninstalled.connect(self._extension_uninstalled)
-            self.extension_hub_page.connection_changed.connect(
-                lambda _extension_id: self.connections_page.reload()
-            )
+            self.extension_hub_page.connection_changed.connect(self._extension_connection_changed)
             return self.extension_hub_page
 
         def _connections_tab(self) -> QWidget:
@@ -3089,6 +3189,8 @@ def run_desktop(container: Container) -> int:
         def _extension_installed(self, skill_id: str) -> None:
             self._reload_skills()
             self.connections_page.reload()
+            self.dashboard_page.reload_calendar_layout()
+            self._refresh_dashboard_calendar()
             self.statusBar().showMessage(
                 f"Installed {skill_id} disabled. Review it in Skills before enabling.",
                 8000,
@@ -3097,7 +3199,19 @@ def run_desktop(container: Container) -> int:
         def _extension_uninstalled(self, skill_id: str) -> None:
             self._reload_skills()
             self.connections_page.reload()
+            self.dashboard_page.reload_calendar_layout()
+            self._refresh_dashboard_calendar()
             self.statusBar().showMessage(f"Uninstalled {skill_id}.", 8000)
+
+        def _extension_connection_changed(self, extension_id: str) -> None:
+            self.connections_page.reload()
+            if extension_id in {
+                "integration.google_calendar",
+                "integration.gmail",
+                "integration.google_drive",
+            }:
+                self.dashboard_page.reload_calendar_layout()
+                self._refresh_dashboard_calendar()
 
         def _skills_tab(self) -> QWidget:
             page = QWidget()
@@ -3417,6 +3531,9 @@ def run_desktop(container: Container) -> int:
                 )
             )
             self._update_skill_details(reset_demo=False)
+            if manifest.skill_id == "integration.google_calendar":
+                self.dashboard_page.reload_calendar_layout()
+                self._refresh_dashboard_calendar()
 
         def _run_skill_demo(self) -> None:
             manifest = self._selected_manifest()
@@ -4722,6 +4839,7 @@ def run_desktop(container: Container) -> int:
             container.orchestrator.show_reasoning_steps = validated.show_reasoning_steps
             container.orchestrator.terminal_debug = validated.terminal_debug
             container.orchestrator.hide_sensitive_display = validated.hide_sensitive_display
+            self.dashboard_page.calendar.set_sensitive_hidden(validated.hide_sensitive_display)
             self._apply_accessibility_settings(validated)
             container.engine.confirmation_overrides = dict(validated.confirmation_overrides)
             container.audio_capture.noise_suppression = validated.noise_suppression
@@ -4773,6 +4891,7 @@ def run_desktop(container: Container) -> int:
             recommendations = model_recommendations(report)
             recent_metrics = container.metrics.recent(100)
             dashboard = container.dashboard.diagnostics()
+            calendar = container.calendar.diagnostics()
             command_latencies = [
                 item["duration_ms"]
                 for item in recent_metrics
@@ -4827,6 +4946,16 @@ def run_desktop(container: Container) -> int:
                         f"Refresh errors: {dashboard.get('error', 0)}",
                         f"History errors: {dashboard.get('history_error', 0)}",
                         f"Numeric history samples: {dashboard.get('history_samples', 0)}",
+                        "",
+                        "Calendar",
+                        f"Providers: {calendar.get('providers', 0)}",
+                        f"Refresh attempts: {calendar.get('refresh_started', 0)}",
+                        f"Last state: {calendar.get('last_state') or 'Not refreshed'}",
+                        f"Ready snapshots: {calendar.get(CalendarState.READY.value, 0)}",
+                        f"Stale/offline snapshots: {calendar.get(CalendarState.STALE.value, 0) + calendar.get(CalendarState.OFFLINE.value, 0)}",
+                        f"Permission blocks: {calendar.get(CalendarState.PERMISSION_REQUIRED.value, 0)}",
+                        f"Connection blocks: {calendar.get(CalendarState.DISCONNECTED.value, 0) + calendar.get(CalendarState.REAUTHORIZATION_REQUIRED.value, 0)}",
+                        f"Refresh errors: {calendar.get(CalendarState.ERROR.value, 0)}",
                         "",
                         "Recovery",
                         *(
@@ -6283,6 +6412,7 @@ def run_desktop(container: Container) -> int:
             font-size: 10.5pt;
         }
         #statusCard, #composeCard, #activityCard, #skillBrowserCard, #skillDetailCard,
+        #calendarSurface,
         #mediaViewer, #compactMediaCard {
             background: #101d30;
             border: 1px solid #1e304a;
@@ -6344,6 +6474,71 @@ def run_desktop(container: Container) -> int:
         }
         #dashboardPage, #dashboardScroll, #dashboardCardContainer {
             background: #0c1626;
+        }
+        #calendarSurface {
+            background: #101d30;
+            border: 1px solid #1e304a;
+            border-radius: 14px;
+        }
+        #calendarSurface[calendarState="stale"], #calendarSurface[calendarState="empty"],
+        #calendarSurface[calendarState="offline"] {
+            border-color: #4e4936;
+        }
+        #calendarSurface[calendarState="permission_required"],
+        #calendarSurface[calendarState="reauthorization_required"] {
+            border-color: #6a4b22;
+        }
+        #calendarSurface[calendarState="error"] {
+            border-color: #633747;
+        }
+        #calendarTitle {
+            color: #f7fbff;
+            font-size: 15pt;
+            font-weight: 650;
+        }
+        #calendarSubtitle, #calendarRange, #calendarProvider, #calendarStatus {
+            color: #8fa0b7;
+            font-size: 8.5pt;
+        }
+        #calendarWeekday {
+            color: #7891b2;
+            font-size: 8pt;
+            font-weight: 700;
+            padding: 4px;
+        }
+        #calendarDayCell {
+            background: #0d192a;
+            border: 1px solid #20334d;
+            border-radius: 8px;
+            min-height: 62px;
+        }
+        #calendarDayCell[today="true"] {
+            border: 1px solid #5a8cff;
+        }
+        #calendarDayCell[outsideMonth="true"] {
+            background: #0b1524;
+        }
+        #calendarDayNumber {
+            color: #c7d5e6;
+            font-size: 8pt;
+            font-weight: 650;
+        }
+        #calendarEventChip {
+            color: #dce7f3;
+            background: #1d3b65;
+            border-radius: 4px;
+            padding: 3px 5px;
+            font-size: 8pt;
+        }
+        #calendarMoreEvents, #calendarPlaceholder, #calendarAgendaItem {
+            color: #8fa0b7;
+            font-size: 9pt;
+        }
+        #calendarAgendaItem {
+            background: #0d192a;
+            border: 1px solid #20334d;
+            border-radius: 7px;
+            padding: 8px;
         }
         #dashboardMetricCard {
             background: #101d30;

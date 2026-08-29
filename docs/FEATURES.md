@@ -80,7 +80,9 @@ the relevant setting, credential, local service, or device to be configured.
 - Persisted Dashboard and Assistant primary screens, tray actions and shortcuts
   for each, a responsive one-to-four-column metric grid, manual and per-card
   refresh, and staged add/remove/disable/reorder/resize/title/presentation
-  customization.
+  customization, plus a provider-neutral month/week/agenda calendar surface
+  with bounded Google Calendar pull refresh, scoped access, stale/offline
+  states, and privacy masking.
 - Privacy-bounded request, planner, native Ollama model, skill-execution, and
   automation metrics with request/model/execution latency cards; default-deny CPU,
   memory, storage, and battery cards; and read-only Home Assistant entity cards

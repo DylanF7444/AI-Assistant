@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from assistant.calendar.contracts import CalendarSnapshot
 from assistant.dashboard.contracts import (
     DashboardCard,
     MetricDefinition,
@@ -27,6 +28,7 @@ from assistant.dashboard.contracts import (
     MetricSnapshot,
     MetricState,
 )
+from assistant.ui.desktop.calendar_view import CalendarLayoutWidget
 from assistant.ui.desktop.controller import DesktopController
 
 
@@ -202,6 +204,11 @@ class DashboardMetricCard(QFrame):
 class DashboardPage(QWidget):
     refresh_requested = Signal()
     refresh_due_requested = Signal(object)
+    calendar_refresh_due_requested = Signal()
+    calendar_refresh_requested = Signal()
+    calendar_permission_requested = Signal()
+    calendar_extension_requested = Signal(str)
+    calendar_layout_changed = Signal(object)
     customize_requested = Signal()
     connections_requested = Signal()
     work_brief_requested = Signal()
@@ -219,6 +226,8 @@ class DashboardPage(QWidget):
         self._refreshing = False
         self._active_card_ids: tuple[UUID, ...] = ()
         self._last_refreshed_at: dict[UUID, float] = {}
+        self._calendar_last_refreshed_at = 0.0
+        self._calendar_refreshing = False
         self._column_count = 0
         self._cards: dict[UUID, DashboardMetricCard] = {}
         self._ordered_cards: list[tuple[DashboardCard, DashboardMetricCard]] = []
@@ -234,7 +243,7 @@ class DashboardPage(QWidget):
         title = QLabel("Dashboard")
         title.setObjectName("pageTitle")
         subtitle = QLabel(
-            "A privacy-bounded view of assistant performance, activity, and automations."
+            "A privacy-bounded view of assistant performance, activity, automations, and calendar."
         )
         subtitle.setObjectName("pageSubtitle")
         subtitle.setWordWrap(True)
@@ -274,6 +283,14 @@ class DashboardPage(QWidget):
         heading.addLayout(controls)
         page_layout.addLayout(heading)
 
+        self.calendar = CalendarLayoutWidget(controller)
+        self.calendar.refresh_requested.connect(self.calendar_refresh_requested.emit)
+        self.calendar.permission_requested.connect(self.calendar_permission_requested.emit)
+        self.calendar.extension_requested.connect(self.calendar_extension_requested.emit)
+        self.calendar.layout_changed.connect(self.calendar_layout_changed.emit)
+        self.calendar.range_changed.connect(self.calendar_refresh_requested.emit)
+        page_layout.addWidget(self.calendar)
+
         self.scroll = QScrollArea()
         self.scroll.setObjectName("dashboardScroll")
         self.scroll.setWidgetResizable(True)
@@ -296,6 +313,10 @@ class DashboardPage(QWidget):
     @property
     def refreshing(self) -> bool:
         return self._refreshing
+
+    @property
+    def calendar_refreshing(self) -> bool:
+        return self._calendar_refreshing
 
     def begin_refresh(
         self,
@@ -329,6 +350,23 @@ class DashboardPage(QWidget):
         self._finish_refresh()
         self.last_refresh.setText(f"Updated {_local_time(datetime.now().astimezone())}")
 
+    def begin_calendar_refresh(self) -> bool:
+        if self._calendar_refreshing:
+            return False
+        self._calendar_refreshing = True
+        self.calendar.set_loading()
+        return True
+
+    def apply_calendar_snapshot(self, snapshot: CalendarSnapshot) -> None:
+        self._calendar_refreshing = False
+        self._calendar_last_refreshed_at = time.monotonic()
+        self.calendar.set_snapshot(snapshot)
+
+    def fail_calendar_refresh(self, message: str) -> None:
+        self._calendar_refreshing = False
+        self._calendar_last_refreshed_at = time.monotonic()
+        self.calendar.set_refresh_error(message)
+
     def fail_refresh(self, _message: str) -> None:
         attempted_at = time.monotonic()
         for card_id in self._active_card_ids:
@@ -357,6 +395,10 @@ class DashboardPage(QWidget):
         }
         self._reflow_cards(force=True)
         self.last_refresh.setText("Layout saved  •  Refreshing…")
+
+    def reload_calendar_layout(self) -> None:
+        self.calendar.set_layout(self.controller.calendar_layout())
+        self._calendar_last_refreshed_at = 0.0
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -426,6 +468,11 @@ class DashboardPage(QWidget):
         )
         if due:
             self.refresh_due_requested.emit(due)
+        if (
+            not self._calendar_refreshing
+            and now - self._calendar_last_refreshed_at >= self.controller.calendar_refresh_seconds()
+        ):
+            self.calendar_refresh_due_requested.emit()
 
     def shutdown(self) -> None:
         self._refresh_timer.stop()
