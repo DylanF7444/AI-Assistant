@@ -1,8 +1,12 @@
-# Local Assistant
+# Local AI Desktop Assistant
 
-An offline-first Windows desktop assistant with typed skill contracts, explicit
-permissions, action-bound confirmations, deterministic routing, and a local
-audit trail.
+An offline-first Windows desktop assistant built around typed skill contracts, deterministic routing, explicit permissions, action-bound confirmations, and a local audit trail.
+
+## Portfolio highlights
+
+- **Reliable execution boundary:** Model output is treated as untrusted input; only registered, schema-validated skills can run under scoped permissions and required confirmations.
+- **Useful desktop workflows:** Conversational and optional voice interfaces connect to reminders, a durable inbox, local document search, and structured visual results.
+- **Modular integrations:** Optional model, speech, browser, and external-source adapters stay behind user settings and the offline/privacy controls.
 
 ## Quick start
 
